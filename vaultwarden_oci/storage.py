@@ -178,7 +178,6 @@ def _write_identity(path: Path, identity: StorageIdentity, label: str) -> None:
 def write_identity(identity: StorageIdentity, path: Path = HOST_IDENTITY_FILE) -> None: _write_identity(path, identity, "host storage identity")
 def write_volume_marker(identity: StorageIdentity, path: Path = VOLUME_MARKER) -> None: _write_identity(path, identity, "volume ownership marker")
 
-
 def _fstab_line(identity: StorageIdentity) -> str: return f"UUID={identity.uuid}\t{STATE_ROOT}\t{identity.fs_type}\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2"
 
 
@@ -200,8 +199,13 @@ def _confirm(prompt: str, *, acknowledgement: bool, interactive: bool) -> None:
 
 
 def _signature_types(device: str, *, runner: Runner) -> set[str]:
-    result = runner(["wipefs", "--no-act", "--all", "--output", "TYPE", "--noheadings", device])
-    if not result.ok: raise StorageError("cannot prove selected-device signatures because wipefs failed")
+    # Listing mode is read-only and already reports all visible signatures.
+    # Do not add --all here: util-linux treats it as the erase selector and
+    # rejects it when combined with --output on supported Ubuntu 24.04.
+    result = runner(["wipefs", "--noheadings", "--output", "TYPE", device])
+    if not result.ok:
+        detail = result.stderr.strip() or result.stdout.strip() or "command unavailable"
+        raise StorageError(f"cannot prove selected-device signatures because wipefs failed: {detail}")
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
