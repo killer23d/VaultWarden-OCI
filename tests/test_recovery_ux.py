@@ -463,10 +463,17 @@ class RecoveryKitTests(unittest.TestCase):
 
 class SetupRecoveryCustodyTests(unittest.TestCase):
     @staticmethod
-    def _successful_generated_setup(argv, *, offline_recipient_factory=None):
+    def _successful_generated_setup(
+        argv,
+        *,
+        offline_recipient_factory=None,
+        defer_next_actions=False,
+    ):
         del argv
         if offline_recipient_factory is None:
             raise AssertionError("generated custody callback was not supplied")
+        if not defer_next_actions:
+            raise AssertionError("generated custody must defer setup next-actions until handoff")
         offline_recipient_factory()
         return 0
 
@@ -497,6 +504,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
                 mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -520,6 +528,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
                 mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -542,6 +551,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
                 mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",

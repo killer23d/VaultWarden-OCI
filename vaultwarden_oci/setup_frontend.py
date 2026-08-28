@@ -112,6 +112,7 @@ def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
         return
     print(f"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}")
     print("ACTION Keep its ZIP passphrase separately from the archive.")
+    print("INFO If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.")
     try:
         answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()
     except EOFError as exc:
