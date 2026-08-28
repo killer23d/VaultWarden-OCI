@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-release acceptance for source staging and candidate-owned coherent rollback."""
+"""Cross-release acceptance for the one supported direct predecessor."""
 from __future__ import annotations
 
 import argparse
@@ -8,27 +8,11 @@ import hashlib
 import json
 import runpy
 import sys
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-PREVIOUS_VERSION = "0.1.0-dev.15"
-TWO_BACK_VERSION = "0.1.0-dev.14"
 _DATA_MARKER = Path("var/lib/vaultwarden-oci/state/acceptance-update-data.txt")
-
-
-def _current_candidate_version() -> str:
-    manifest = Path(__file__).resolve().parents[1] / "versions.toml"
-    with manifest.open("rb") as handle:
-        payload = tomllib.load(handle)
-    value = payload.get("vaultwarden_oci", {}).get("version")
-    if not isinstance(value, str) or not value:
-        raise SystemExit(f"current candidate version is missing from {manifest}")
-    return value
-
-
-CANDIDATE_VERSION = _current_candidate_version()
 
 
 def _command(cli_module, argv, *, stdout: str = ""):
@@ -42,18 +26,18 @@ def _command(cli_module, argv, *, stdout: str = ""):
 
 
 def install_previous(source: Path, host: Path) -> None:
-    """Use the two-back installer to materialize the supported predecessor exactly."""
+    """Install the actual supported predecessor with its own installer."""
     from vaultwarden_oci import cli, install
 
+    source = source.resolve()
     installer_root = Path(install.__file__).resolve().parent.parent
-    installer_version = cli.load_versions(installer_root / "versions.toml").version
-    source_version = cli.load_versions(source / "versions.toml").version
-    if installer_version != TWO_BACK_VERSION:
-        raise SystemExit(f"expected two-back installer {TWO_BACK_VERSION}, got {installer_version}")
-    if source_version != PREVIOUS_VERSION:
-        raise SystemExit(f"expected predecessor source {PREVIOUS_VERSION}, got {source_version}")
-    if install.SYSTEMD_SOURCE_DIR == "systemd":
-        raise SystemExit("two-back installer unexpectedly already uses the canonical systemd source directory")
+    if installer_root != source:
+        raise SystemExit(
+            f"predecessor installer imports are not owned by predecessor source {source}: {installer_root}"
+        )
+    previous_version = cli.load_versions(source / "versions.toml").version
+    if install.SYSTEMD_SOURCE_DIR != "systemd":
+        raise SystemExit("supported predecessor no longer owns the canonical systemd source directory")
 
     installed = Path(
         install.install_layout(
@@ -63,22 +47,17 @@ def install_previous(source: Path, host: Path) -> None:
             require_all_architectures=True,
         )
     )
-    historical_units = installed / install.SYSTEMD_SOURCE_DIR
-    if installed.name != PREVIOUS_VERSION or not historical_units.is_dir():
-        raise SystemExit("two-back installer did not materialize the predecessor historical unit layout")
-    missing = [unit for unit in install.SYSTEMD_UNITS if not (historical_units / unit).is_file()]
+    if installed.name != previous_version:
+        raise SystemExit(f"predecessor installer materialized {installed.name}, expected {previous_version}")
+    unit_source = installed / install.SYSTEMD_SOURCE_DIR
+    missing = [unit for unit in install.SYSTEMD_UNITS if not (unit_source / unit).is_file()]
     if missing:
-        raise SystemExit("predecessor historical unit layout is incomplete: " + ", ".join(missing))
-    if (installed / "systemd").exists():
-        raise SystemExit("acceptance predecessor unexpectedly contains a canonical systemd source directory")
+        raise SystemExit("predecessor canonical systemd unit set is incomplete: " + ", ".join(missing))
 
     marker = host / _DATA_MARKER
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("previous-data\n", encoding="utf-8")
-    print(
-        "PASS: two-back installer materialized supported predecessor using its historical unit layout "
-        f"({TWO_BACK_VERSION} -> {PREVIOUS_VERSION})"
-    )
+    print(f"PASS: installed actual supported predecessor {previous_version} with its own immutable installer")
 
 
 def fail_forward_update(candidate_source: Path, host: Path, state_file: Path) -> None:
@@ -96,16 +75,16 @@ def fail_forward_update(candidate_source: Path, host: Path, state_file: Path) ->
     predecessor_root = Path(update_appliance.__file__).resolve().parent.parent
     predecessor_version = cli.load_versions(predecessor_root / "versions.toml").version
     candidate_version = cli.load_versions(candidate_source / "versions.toml").version
-    if predecessor_version != PREVIOUS_VERSION:
-        raise SystemExit(f"expected predecessor updater {PREVIOUS_VERSION}, got {predecessor_version}")
-    if candidate_version != CANDIDATE_VERSION:
-        raise SystemExit(f"expected candidate {CANDIDATE_VERSION}, got {candidate_version}")
+    if candidate_version == predecessor_version:
+        raise SystemExit("cross-release acceptance requires a distinct candidate release")
 
     layout = install.Layout(host.resolve())
     current_target, current_release, _ = update._current(layout)
-    if current_release != PREVIOUS_VERSION:
-        raise SystemExit(f"host current release is {current_release}, expected {PREVIOUS_VERSION}")
+    if current_release != predecessor_version:
+        raise SystemExit(f"host current release is {current_release}, expected {predecessor_version}")
     frozen = update_versions.resolve_pinned(candidate_source, machine="x86_64")
+    if frozen.project_version != candidate_version:
+        raise SystemExit("candidate source and resolved project version disagree")
     plan = update.UpdatePlan(
         source_root=candidate_source.resolve(),
         root=host.resolve(),
@@ -162,9 +141,9 @@ def fail_forward_update(candidate_source: Path, host: Path, state_file: Path) ->
             guard = layout.path(update_guard.RECOVERY_REQUIRED_STATE)
             if not guard.is_file():
                 raise SystemExit("predecessor updater did not leave the durable recovery guard")
-            if update._current(layout)[1] != CANDIDATE_VERSION:
+            if update._current(layout)[1] != candidate_version:
                 raise SystemExit("post-start failure did not leave the candidate selected for guarded recovery")
-            candidate = layout.path(install.RELEASES_DIR) / CANDIDATE_VERSION
+            candidate = layout.path(install.RELEASES_DIR) / candidate_version
             installed_units = layout.path(install.SYSTEMD_DIR)
             for unit in install.SYSTEMD_UNITS:
                 if (installed_units / unit).read_bytes() != (candidate / install.SYSTEMD_SOURCE_DIR / unit).read_bytes():
@@ -189,7 +168,7 @@ def fail_forward_update(candidate_source: Path, host: Path, state_file: Path) ->
 
     print(
         "PASS: supported predecessor performed forward mutation and failed closed after simulated post-start state change "
-        f"({PREVIOUS_VERSION} -> {CANDIDATE_VERSION})"
+        f"({predecessor_version} -> {candidate_version})"
     )
 
 
@@ -197,27 +176,32 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
     """Execute installed candidate vwctl to restore data, old code, units, health, and guard state."""
     from vaultwarden_oci import cli, install, update, update_appliance, update_guard, update_unit_migration
 
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    previous_version = state["previous"]
+    candidate_version = state["candidate"]
+    if not isinstance(previous_version, str) or not isinstance(candidate_version, str):
+        raise SystemExit("recorded cross-release version state is invalid")
+
     layout = install.Layout(host.resolve())
     candidate_root = Path(update_appliance.__file__).resolve().parent.parent
-    expected_candidate_root = layout.path(install.RELEASES_DIR) / CANDIDATE_VERSION
+    expected_candidate_root = layout.path(install.RELEASES_DIR) / candidate_version
     if candidate_root != expected_candidate_root.resolve():
         raise SystemExit(
             f"rollback imports are not owned by installed candidate {expected_candidate_root}: {candidate_root}"
         )
-    candidate_version = cli.load_versions(candidate_root / "versions.toml").version
-    if candidate_version != CANDIDATE_VERSION:
-        raise SystemExit(f"expected candidate-owned rollback {CANDIDATE_VERSION}, got {candidate_version}")
+    loaded_candidate = cli.load_versions(candidate_root / "versions.toml").version
+    if loaded_candidate != candidate_version:
+        raise SystemExit(f"expected candidate-owned rollback {candidate_version}, got {loaded_candidate}")
     candidate_vwctl = candidate_root / "vwctl"
     if not candidate_vwctl.is_file():
         raise SystemExit(f"installed candidate vwctl is missing: {candidate_vwctl}")
 
-    state = json.loads(state_file.read_text(encoding="utf-8"))
     artifact = Path(state["artifact"])
     failure = update_appliance.reconstruct_failure(
         artifact,
         state["sha256"],
-        state["previous"],
-        state["candidate"],
+        previous_version,
+        candidate_version,
         root=host,
     )
     identity = host / "offline-acceptance.age"
@@ -246,8 +230,8 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
         if (
             requested_artifact != artifact
             or requested_sha256 != state["sha256"]
-            or previous_release != state["previous"]
-            or candidate_release != state["candidate"]
+            or previous_release != previous_version
+            or candidate_release != candidate_version
         ):
             raise AssertionError("installed candidate vwctl changed the recorded rollback identity")
         return failure
@@ -268,9 +252,9 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
         "--recovery-sha256",
         state["sha256"],
         "--previous-release",
-        state["previous"],
+        previous_version,
         "--candidate-release",
-        state["candidate"],
+        candidate_version,
         "--identity",
         str(identity),
         "--yes",
@@ -292,8 +276,8 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
             raise SystemExit("installed candidate vwctl did not terminate through its normal entrypoint")
 
     _, active_release, previous = update._current(layout)
-    if active_release != PREVIOUS_VERSION:
-        raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {PREVIOUS_VERSION}")
+    if active_release != previous_version:
+        raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {previous_version}")
     previous_units = update_unit_migration._systemd_source(
         previous,
         allow_supported_predecessor=True,
@@ -313,7 +297,7 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
 
     print(
         "PASS: installed candidate vwctl coherent rollback restored predecessor data, release selection, systemd units, health proof, and guard state "
-        f"({CANDIDATE_VERSION} -> {PREVIOUS_VERSION})"
+        f"({candidate_version} -> {previous_version})"
     )
 
 
