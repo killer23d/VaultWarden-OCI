@@ -9,7 +9,7 @@ from . import durability, install
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
-SUPPORTED_PREDECESSOR_RELEASE = "0.1.0-dev.15"
+SUPPORTED_PREDECESSOR_RELEASE = "0.1.0-dev.16"
 
 
 def _release_barrier(release: Path) -> None:
