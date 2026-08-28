@@ -48,47 +48,43 @@ jobs:
               raise SystemExit('expected URL mapping block not found')
           text = text.replace(old, new, 1)
 
-          old = '''    def latest_release(self, component: str) -> str:
-              try:
-                  url = _RELEASE_URLS[component]
-          '''
-          new = '''    def latest_release(self, component: str) -> str:
-              # caddy-dns/cloudflare publishes version tags but no GitHub Releases.
-              if component == "caddy_dns_cloudflare":
-                  return self.latest_ref(component)
-              try:
-                  url = _RELEASE_URLS[component]
-          '''
-          if old not in text:
-              raise SystemExit('expected latest_release block not found')
-          text = text.replace(old, new, 1)
+          needle = '    def latest_release(self, component: str) -> str:\n'
+          replacement = (
+              needle
+              + '        # caddy-dns/cloudflare publishes version tags but no GitHub Releases.\n'
+              + '        if component == "caddy_dns_cloudflare":\n'
+              + '            return self.latest_ref(component)\n'
+          )
+          if text.count(needle) != 1:
+              raise SystemExit('expected one latest_release definition')
+          text = text.replace(needle, replacement, 1)
           source.write_text(text, encoding='utf-8')
 
           tests = Path('tests/test_update_workflow.py')
           text = tests.read_text(encoding='utf-8')
           marker = '\n\nclass UpdateTransactionTests(unittest.TestCase):\n'
-          regression = '''
-              def test_cloudflare_dns_latest_uses_tag_endpoint_not_release_endpoint(self) -> None:
-                  calls: list[str] = []
-
-                  def get_json(url: str, headers=None):
-                      del headers
-                      calls.append(url)
-                      return [{"name": "v0.2.4"}]
-
-                  lookup = update_versions.RemoteLookup(get_json=get_json)
-                  self.assertEqual(lookup.latest_release("caddy_dns_cloudflare"), "v0.2.4")
-                  self.assertEqual(
-                      calls,
-                      ["https://api.github.com/repos/caddy-dns/cloudflare/tags?per_page=1"],
-                  )
-                  self.assertNotIn("/releases/latest", calls[0])
-          '''
+          regression = (
+              '\n    def test_cloudflare_dns_latest_uses_tag_endpoint_not_release_endpoint(self) -> None:\n'
+              '        calls: list[str] = []\n'
+              '\n'
+              '        def get_json(url: str, headers=None):\n'
+              '            del headers\n'
+              '            calls.append(url)\n'
+              '            return [{"name": "v0.2.4"}]\n'
+              '\n'
+              '        lookup = update_versions.RemoteLookup(get_json=get_json)\n'
+              '        self.assertEqual(lookup.latest_release("caddy_dns_cloudflare"), "v0.2.4")\n'
+              '        self.assertEqual(\n'
+              '            calls,\n'
+              '            ["https://api.github.com/repos/caddy-dns/cloudflare/tags?per_page=1"],\n'
+              '        )\n'
+              '        self.assertNotIn("/releases/latest", calls[0])\n'
+          )
           if marker not in text:
               raise SystemExit('test insertion marker not found')
           if 'test_cloudflare_dns_latest_uses_tag_endpoint_not_release_endpoint' in text:
               raise SystemExit('regression already present')
-          text = text.replace(marker, '\n' + regression + marker, 1)
+          text = text.replace(marker, regression + marker, 1)
           tests.write_text(text, encoding='utf-8')
           PY
 
