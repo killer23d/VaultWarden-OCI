@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import admin
+from vaultwarden_oci import admin, secrets
 
 
 PHC = "$argon2id$v=19$m=65540,t=3,p=4$c2FsdA$YWJjZA"
@@ -15,7 +17,92 @@ def done(*, code: int = 0, stdout: str = "", stderr: str = ""):
     return mock.Mock(returncode=code, stdout=stdout, stderr=stderr)
 
 
+def admin_values(token: str) -> dict[str, str]:
+    return {
+        "cloudflare_api_token": "A" * 40,
+        "smtp_username": "smtp-user",
+        "smtp_password": "smtp-password",
+        "vaultwarden_admin_token": token,
+        "admin_basic_auth_password": "outer-admin-password",
+    }
+
+
 class AdminCredentialTests(unittest.TestCase):
+    def test_source_validator_rejects_unsafe_pty_values_and_excessive_length(self) -> None:
+        self.assertEqual(
+            admin.validate_vaultwarden_admin_source("valid-admin-password"),
+            "valid-admin-password",
+        )
+        invalid = (
+            "short",
+            "valid-admin\x03password",
+            "valid-admin\x04password",
+            "valid-admin\x7fpassword",
+            "valid-admin\x85password",
+            "x" * 257,
+        )
+        for value in invalid:
+            with self.subTest(repr=repr(value)):
+                with self.assertRaisesRegex(
+                    admin.AdminCredentialError,
+                    "8-256 printable characters with no control characters",
+                ):
+                    admin.validate_vaultwarden_admin_source(value)
+
+    def test_runtime_hash_rejects_invalid_source_before_any_image_or_pty_command(self) -> None:
+        runner = mock.Mock(side_effect=AssertionError("runner must not be called"))
+        with self.assertRaisesRegex(admin.AdminCredentialError, "8-256 printable characters"):
+            admin.derive_vaultwarden_admin_phc(
+                "unsafe\x04admin-password",
+                "vaultwarden/server:1.37.1",
+                runner=runner,
+            )
+        runner.assert_not_called()
+
+    def test_sops_validation_uses_same_admin_source_policy(self) -> None:
+        with mock.patch(
+            "vaultwarden_oci.secrets.load",
+            return_value=admin_values("abc"),
+        ):
+            with self.assertRaisesRegex(secrets.SecretsError, "8-256 printable characters"):
+                secrets.validate_encrypted("age1" + "a" * 58)
+
+    def test_sops_edit_does_not_commit_admin_source_rejected_by_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            encrypted = root / "secrets.sops.yaml"
+            age_key = root / "age-key.txt"
+            encrypted.write_text("stable-encrypted", encoding="utf-8")
+            age_key.write_text("AGE-SECRET-KEY-TEST", encoding="utf-8")
+            paths = secrets.SecretPaths(
+                encrypted=encrypted,
+                age_key=age_key,
+                root=root / "run",
+                vaultwarden=root / "run/vaultwarden",
+                caddy=root / "run/caddy",
+            )
+
+            def editor(argv, check=False, env=None):
+                Path(argv[-1]).write_text("candidate-encrypted", encoding="utf-8")
+                return mock.Mock(returncode=0)
+
+            with (
+                mock.patch("vaultwarden_oci.secrets.subprocess.run", side_effect=editor),
+                mock.patch(
+                    "vaultwarden_oci.secrets.load",
+                    return_value=admin_values("unsafe\x04admin-password"),
+                ),
+            ):
+                with self.assertRaisesRegex(secrets.SecretsError, "8-256 printable characters"):
+                    secrets.edit_encrypted(
+                        "age1" + "a" * 58,
+                        paths=paths,
+                        editor=("sops",),
+                        lock_path=root / "lock",
+                    )
+
+            self.assertEqual(encrypted.read_text(encoding="utf-8"), "stable-encrypted")
+
     def test_vaultwarden_phc_uses_constrained_tty_without_secret_in_argv(self) -> None:
         password = "correct-horse-battery-staple"
         image = "vaultwarden/server:1.37.1@sha256:" + "a" * 64
