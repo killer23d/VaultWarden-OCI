@@ -1,0 +1,93 @@
+name: PR354 finalize custody ordering
+
+on:
+  push:
+    branches:
+      - fix/blank-vm-offline-age-bootstrap-2026-08-27
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Finalize recovery custody ordering tests'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Fix legacy custody mocks and SSH handoff guidance
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          tests = Path('tests/test_recovery_ux.py')
+          text = tests.read_text(encoding='utf-8')
+          old = """    @staticmethod
+              def _successful_generated_setup(argv, *, offline_recipient_factory=None):
+                  del argv
+                  if offline_recipient_factory is None:
+                      raise AssertionError(\"generated custody callback was not supplied\")
+                  offline_recipient_factory()
+                  return 0
+          """
+          new = """    @staticmethod
+              def _successful_generated_setup(
+                  argv,
+                  *,
+                  offline_recipient_factory=None,
+                  defer_next_actions=False,
+              ):
+                  del argv
+                  if offline_recipient_factory is None:
+                      raise AssertionError(\"generated custody callback was not supplied\")
+                  if not defer_next_actions:
+                      raise AssertionError(\"generated custody must defer setup next-actions until handoff\")
+                  offline_recipient_factory()
+                  return 0
+          """
+          if old not in text:
+              raise SystemExit('legacy custody setup test double not found')
+          text = text.replace(old, new, 1)
+
+          old_context = """                mock.patch.object(setup_frontend.setup, \"main\", side_effect=self._successful_generated_setup),
+                          mock.patch.object(
+                              setup_frontend.recovery_ux,
+          """
+          new_context = """                mock.patch.object(setup_frontend.setup, \"main\", side_effect=self._successful_generated_setup),
+                          mock.patch.object(setup_frontend, \"_complete_external_credentials_before_handoff\"),
+                          mock.patch.object(
+                              setup_frontend.recovery_ux,
+          """
+          count = text.count(old_context)
+          if count != 3:
+              raise SystemExit(f'expected three legacy custody contexts, found {count}')
+          text = text.replace(old_context, new_context)
+          tests.write_text(text, encoding='utf-8')
+
+          frontend = Path('vaultwarden_oci/setup_frontend.py')
+          text = frontend.read_text(encoding='utf-8')
+          old = """    print(f\"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}\")
+              print(\"ACTION Keep its ZIP passphrase separately from the archive.\")
+              try:
+          """
+          new = """    print(f\"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}\")
+              print(\"ACTION Keep its ZIP passphrase separately from the archive.\")
+              print(\"INFO If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.\")
+              try:
+          """
+          if old not in text:
+              raise SystemExit('local handoff prompt block not found')
+          frontend.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+          git rm .github/workflows/pr354-finalize-custody-tests.yml
+          git diff --check
+          python3 -m unittest tests.test_recovery_ux tests.test_setup_auto_offline -v
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/test_recovery_ux.py vaultwarden_oci/setup_frontend.py
+          git commit -m 'Finalize recovery custody ordering regressions'
+          git push origin HEAD:fix/blank-vm-offline-age-bootstrap-2026-08-27
