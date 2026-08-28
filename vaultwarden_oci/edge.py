@@ -11,9 +11,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from . import secrets
 from .cli import CommandResult, DoctorCheck, run_command
@@ -35,6 +36,7 @@ BOUNCER_SERVICE = "crowdsec-cloudflare-worker-bouncer.service"
 BOUNCER_BINARY = "/usr/bin/crowdsec-cloudflare-worker-bouncer"
 CROWDSEC_SERVICE = "crowdsec.service"
 DEFAULT_LAPI_URL = "http://127.0.0.1:8080"
+POLICY_RC_D = Path("/usr/sbin/policy-rc.d")
 STATE_ROOT = Path("/var/lib/vaultwarden-oci/state")
 LKG_PATH = STATE_ROOT / "cloudflare-ranges.json"
 CADDY_LOG = Path("/var/lib/vaultwarden-oci/caddy/log/access.log")
@@ -269,6 +271,26 @@ def _command(
         raise EdgeError(f"{label} failed ({detail})")
 
 
+def _apt_command(
+    runner: Runner,
+    argv: Sequence[str],
+    label: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    result = runner(argv, env=env) if env is not None else runner(argv)
+    if result.ok:
+        return
+    code = result.kind if result.returncode is None else f"exit {result.returncode}"
+    raw = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    tail = " | ".join(lines[-8:])
+    if len(tail) > 1200:
+        tail = tail[-1200:]
+    detail = tail or "no package-manager diagnostic output; inspect /var/log/apt/term.log"
+    raise EdgeError(f"{label} failed ({code}): {detail}")
+
+
 def _rule(binary: str, comment: str, target: str) -> list[str]:
     return [
         binary,
@@ -456,7 +478,50 @@ def _unlink_state(path: Path, label: str) -> None:
         raise EdgeError(f"cannot clear {label}: {exc}") from exc
 
 
-def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_command) -> None:
+@contextmanager
+def _suppress_package_service_starts(path: Path) -> Iterator[None]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o755)
+    except FileExistsError as exc:
+        raise EdgeError(
+            f"cannot safely suppress CrowdSec package service auto-start because {path} already exists; "
+            "preserve the host policy and resolve it explicitly before retrying"
+        ) from exc
+    except OSError as exc:
+        raise EdgeError(f"cannot create temporary package service policy {path}: {exc}") from exc
+    identity = os.fstat(descriptor)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("#!/bin/sh\nexit 101\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o755)
+        yield
+    finally:
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            current = None
+        except OSError as exc:
+            raise EdgeError(f"cannot inspect temporary package service policy {path}: {exc}") from exc
+        if current is not None:
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                raise EdgeError(
+                    f"temporary package service policy {path} changed unexpectedly; refusing to remove it"
+                )
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise EdgeError(f"cannot remove temporary package service policy {path}: {exc}") from exc
+
+
+def setup_crowdsec(
+    *,
+    paths: EdgePaths = EdgePaths(),
+    runner: Runner = run_command,
+    policy_path: Path | None = None,
+) -> None:
     if os.geteuid() != 0 and paths == EdgePaths():
         raise EdgeError("vwctl crowdsec setup must run as root")
     installer: Path | None = None
@@ -468,13 +533,17 @@ def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_comma
             installer.unlink(missing_ok=True)
     _command(runner, ["apt-get", "update"], "apt metadata refresh")
     install_env = dict(os.environ)
+    install_env["DEBIAN_FRONTEND"] = "noninteractive"
     install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
-    _command(
-        runner,
-        ["apt-get", "install", "-y", "crowdsec", "crowdsec-cloudflare-worker-bouncer"],
-        "CrowdSec package installation",
-        env=install_env,
-    )
+    if policy_path is None:
+        policy_path = POLICY_RC_D if paths == EdgePaths() else paths.acquisition.parent / ".policy-rc.d"
+    with _suppress_package_service_starts(policy_path):
+        _apt_command(
+            runner,
+            ["apt-get", "install", "-y", "crowdsec", "crowdsec-cloudflare-worker-bouncer"],
+            "CrowdSec package installation",
+            env=install_env,
+        )
     _command(runner, ["systemctl", "disable", "--now", BOUNCER_SERVICE], "Cloudflare bouncer disable/stop")
     _command(runner, ["systemctl", "stop", CROWDSEC_SERVICE], "CrowdSec stop before source restriction")
     _command(runner, ["cscli", "collections", "remove", "--all"], "CrowdSec collection reset")
