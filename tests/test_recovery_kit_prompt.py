@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from vaultwarden_oci import recovery_ux
@@ -40,6 +42,38 @@ class RecoveryKitPassphrasePromptTests(unittest.TestCase):
             self.assertRaises(KeyboardInterrupt),
         ):
             recovery_ux._prompt_passphrase()
+
+
+class RecoveryKitOptionalSecretTests(unittest.TestCase):
+    def test_known_optional_empty_fields_are_omitted(self) -> None:
+        payload = {
+            "cloudflare_api_token": "cfut_" + "a" * 32,
+            "cloudflare_remediation_token": "",
+            "smtp_username": "smtp-user",
+            "smtp_password": "smtp-pass",
+            "email_api_token": "",
+            "vaultwarden_admin_token": "",
+            "admin_basic_auth_password": "",
+        }
+
+        def runner(argv, *, env=None):
+            del argv, env
+            return mock.Mock(ok=True, stdout=json.dumps(payload))
+
+        values = recovery_ux._decrypt_all_sops(
+            Path("/tmp/secrets.sops.yaml"),
+            Path("/tmp/offline.age"),
+            runner=runner,
+        )
+
+        self.assertEqual(
+            values,
+            {
+                "cloudflare_api_token": payload["cloudflare_api_token"],
+                "smtp_username": "smtp-user",
+                "smtp_password": "smtp-pass",
+            },
+        )
 
 
 if __name__ == "__main__":
