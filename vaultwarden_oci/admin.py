@@ -56,6 +56,35 @@ def _hash_command(image: str) -> list[str]:
     ]
 
 
+def _ensure_image(image: str, *, runner=subprocess.run) -> None:
+    """Make the one possible network step explicit before the TTY hash command."""
+    try:
+        present = runner(
+            ["docker", "image", "inspect", image],
+            text=True,
+            capture_output=True,
+            check=False,
+            shell=False,
+        )
+    except OSError as exc:
+        raise AdminCredentialError("cannot inspect the exact Vaultwarden image") from exc
+    if present.returncode == 0:
+        return
+
+    print("INFO: exact Vaultwarden image is not local; pulling it before admin credential derivation.", flush=True)
+    try:
+        pulled = runner(
+            ["docker", "pull", image],
+            text=True,
+            check=False,
+            shell=False,
+        )
+    except OSError as exc:
+        raise AdminCredentialError("cannot pull the exact Vaultwarden image") from exc
+    if pulled.returncode != 0:
+        raise AdminCredentialError("exact Vaultwarden image pull failed")
+
+
 def derive_vaultwarden_admin_phc(
     password: str,
     image: str,
@@ -75,6 +104,7 @@ def derive_vaultwarden_admin_phc(
     ):
         raise AdminCredentialError("Vaultwarden admin secret must be a single-line value of at least 8 characters")
 
+    _ensure_image(image, runner=runner)
     argv: Sequence[str] = _hash_command(image)
     try:
         completed = runner(
