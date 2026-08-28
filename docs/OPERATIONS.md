@@ -73,6 +73,8 @@ An install performed with an explicit `--offline-recipient` uses that existing o
 
 Caddy uses exact-pinned Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP, combined-range, and rate-limit modules. Its trusted-proxy module is the single Caddy authority for Cloudflare client-IP trust.
 
+For creation or rotation of `cloudflare_api_token` and `cloudflare_remediation_token`, including the intentionally different Cloudflare permission sets, see [Cloudflare tokens](CLOUDFLARE-TOKENS.md). Keep the two credentials separate and update them only through `sudo vwctl secrets edit`.
+
 The host separately owns a fail-closed Docker `DOCKER-USER` origin filter that permits published TCP/443 only from validated Cloudflare IPv4/IPv6 ranges. A bounded last-known-good range set can be used. With neither current nor safe cached ranges, public origin ingress remains blocked.
 
 `/admin` uses only the intended small stack: Vaultwarden admin token, Caddy rate limiting, and one outer Basic Auth gate. A deliberately disabled admin route is a valid closed state.
@@ -105,7 +107,7 @@ sudo vwctl crowdsec decisions
 sudo vwctl crowdsec unban 203.0.113.7
 ```
 
-CrowdSec consumes Caddy web logs and remediates proxied clients through Cloudflare. It does not need a host firewall bouncer; the `DOCKER-USER` source filter is a separate control.
+CrowdSec consumes Caddy web logs and remediates proxied clients through Cloudflare. It does not need a host firewall bouncer; the `DOCKER-USER` source filter is a separate control. When remediation is enabled, `cloudflare_remediation_token` must carry the Worker/KV/Turnstile and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the local CrowdSec LAPI bouncer credential; those are not operator-supplied secrets.
 
 **Expected success:** engine and Cloudflare remediation report healthy state. **On failure:** inspect CrowdSec service state and Cloudflare credentials/config before changing host firewall rules.
 
