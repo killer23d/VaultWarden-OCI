@@ -22,7 +22,7 @@ CrowdSec is separate again: it reads proxied web-client activity and remediates 
 
 ## `/admin`
 
-When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The source Basic Auth password is encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
+When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The high-entropy `vaultwarden_admin_token` value in SOPS remains the operator's recoverable `/admin` login secret; at start/restart the appliance uses the exact pinned Vaultwarden image to derive an Argon2id PHC and materializes only that PHC into the Vaultwarden runtime boundary. The source Basic Auth password is likewise encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
 
 ## Notification and SMTP security
 
