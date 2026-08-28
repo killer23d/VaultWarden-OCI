@@ -37,6 +37,10 @@ def _setup_run_7zip_compat(argv: Sequence[str], *, input_text=None, env=None):
 setup._run = _setup_run_7zip_compat
 
 
+def _ui() -> setup.UI:
+    return setup.UI(color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+
+
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
     recovery_ux._safe_private_dir(root)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
@@ -86,7 +90,7 @@ def _should_generate(args: Sequence[str]) -> bool:
     )
 
 
-def _confirm_use_latest(args: Sequence[str], ui: setup.UI) -> bool:
+def _confirm_use_latest(args: Sequence[str]) -> bool:
     parsed = _parse_install_args(args)
     if parsed is None or not parsed.use_latest:
         return True
@@ -94,7 +98,7 @@ def _confirm_use_latest(args: Sequence[str], ui: setup.UI) -> bool:
         "--use-latest bypasses the project's tested release pins. Vaultwarden, Caddy, all xcaddy addon refs, "
         "and architecture image digests will be resolved once and frozen exactly for this install."
     )
-    ui.warn(warning, file=sys.stderr)
+    _ui().warn(warning, file=sys.stderr)
     if parsed.auto or not sys.stdin.isatty():
         return True
     try:
@@ -104,9 +108,10 @@ def _confirm_use_latest(args: Sequence[str], ui: setup.UI) -> bool:
     return answer in {"y", "yes"}
 
 
-def _confirm_local_handoff(result: recovery_ux.KitResult, ui: setup.UI) -> None:
+def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
     if result.emailed:
         return
+    ui = _ui()
     ui.action(f"Copy the verified encrypted recovery kit off-host now: {result.archive}")
     ui.action("Keep its ZIP passphrase separately from the archive.")
     ui.info("If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.")
@@ -118,7 +123,8 @@ def _confirm_local_handoff(result: recovery_ux.KitResult, ui: setup.UI) -> None:
         raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")
 
 
-def _complete_external_credentials_before_handoff(ui: setup.UI) -> None:
+def _complete_external_credentials_before_handoff() -> None:
+    ui = _ui()
     config = runtime.load_config()
     secret_paths = runtime.Paths().secret_paths()
     try:
@@ -161,7 +167,8 @@ def _complete_external_credentials_before_handoff(ui: setup.UI) -> None:
     ui.ok("External runtime config and required SOPS credentials validate before recovery-kit publication.")
 
 
-def _print_post_handoff_next_actions(ui: setup.UI) -> None:
+def _print_post_handoff_next_actions() -> None:
+    ui = _ui()
     ui.header("Next actions")
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
@@ -171,10 +178,10 @@ def _print_post_handoff_next_actions(ui: setup.UI) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    ui = setup.UI(color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+    ui = _ui()
     if args[:1] == ["recovery-kit"]:
         return recovery_ux.main(args)
-    if not _confirm_use_latest(args, ui):
+    if not _confirm_use_latest(args):
         ui.action("setup cancelled before installation changes", file=sys.stderr)
         return 2
     if not _should_generate(args):
@@ -206,17 +213,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if workspace is None or identity is None:
             raise SetupFrontendError("setup completed without producing the requested offline recovery identity")
 
-        _complete_external_credentials_before_handoff(ui)
+        _complete_external_credentials_before_handoff()
         ui.header("Initial credential recovery-kit handoff")
         result = recovery_ux.export_recovery_kit(identity)
         ui.ok(f"Verified complete recovery kit: {result.archive}")
-        _confirm_local_handoff(result, ui)
+        _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():
             raise SetupFrontendError("offline identity remained in volatile server state after successful recovery-kit handoff")
         ui.ok("Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
         ui.action("Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
-        _print_post_handoff_next_actions(ui)
+        _print_post_handoff_next_actions()
         return 0
     except (
         SetupFrontendError,
