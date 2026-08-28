@@ -278,10 +278,7 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
     _, active_release, previous = update._current(layout)
     if active_release != previous_version:
         raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {previous_version}")
-    previous_units = update_unit_migration._systemd_source(
-        previous,
-        allow_supported_predecessor=True,
-    )
+    previous_units = update_unit_migration._systemd_source(previous)
     installed_units = layout.path(install.SYSTEMD_DIR)
     for unit in install.SYSTEMD_UNITS:
         if (installed_units / unit).read_bytes() != (previous_units / unit).read_bytes():
