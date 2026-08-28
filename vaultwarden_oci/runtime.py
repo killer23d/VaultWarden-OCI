@@ -642,10 +642,22 @@ def lifecycle(
         admin_enabled = secrets.admin_enabled(values)
         derived: dict[str, str] = {}
         if admin_enabled:
+            from . import admin
+
             frozen = _pins(versions_path)
+            source_admin_token = values["vaultwarden_admin_token"]
             derived["admin_basic_auth_hash"] = secrets.derive_admin_basic_auth_hash(
                 values["admin_basic_auth_password"], frozen.caddy_runtime_image.reference
             )
+            try:
+                vaultwarden_admin_phc = admin.derive_vaultwarden_admin_phc(
+                    source_admin_token,
+                    frozen.vaultwarden_image.reference,
+                )
+            except admin.AdminCredentialError as exc:
+                raise RuntimeOperationError(str(exc)) from exc
+            values = dict(values)
+            values["vaultwarden_admin_token"] = vaultwarden_admin_phc
         render(config, versions_path, paths, admin_enabled=admin_enabled)
         if not _compose(["config", "--quiet"], paths, runner).ok:
             raise RuntimeOperationError("rendered Compose validation failed")
