@@ -85,6 +85,53 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             self.assertFalse(setup_frontend._confirm_use_latest(args))
         prompt.assert_called_once()
 
+    def test_recipient_derivation_failure_cleans_generated_private_identity(self) -> None:
+        created: dict[str, Path] = {}
+        args = install_args()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            real_generate = setup_frontend._generate_offline_identity
+
+            def fake_age_keygen(argv):
+                identity = Path(argv[-1])
+                identity.write_text("AGE-SECRET-KEY-TEST", encoding="utf-8")
+                created["identity"] = identity
+                created["workspace"] = identity.parent
+                return mock.Mock(ok=True)
+
+            def fake_setup_main(argv, *, offline_recipient_factory=None):
+                self.assertEqual(list(argv), args)
+                self.assertIsNotNone(offline_recipient_factory)
+                offline_recipient_factory()
+                return 0
+
+            with (
+                mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                mock.patch.object(
+                    setup_frontend,
+                    "_generate_offline_identity",
+                    side_effect=lambda: real_generate(root),
+                ),
+                mock.patch.object(
+                    setup_frontend.recovery_ux.recovery,
+                    "run_command",
+                    side_effect=fake_age_keygen,
+                ),
+                mock.patch.object(
+                    setup_frontend.secrets,
+                    "derive_recipient",
+                    side_effect=setup_frontend.secrets.SecretsError("recipient derivation failed"),
+                ),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=fake_setup_main),
+            ):
+                self.assertEqual(setup_frontend.main(args), 1)
+
+            self.assertIn("identity", created)
+            self.assertIn("workspace", created)
+            self.assertFalse(created["identity"].exists())
+            self.assertFalse(created["workspace"].exists())
+            self.assertTrue(root.exists())
+
     def test_blank_vm_preflights_then_bootstraps_age_before_generated_identity_and_storage(self) -> None:
         events: list[tuple[str, ...] | str] = []
         host = mock.Mock(architecture="amd64")
