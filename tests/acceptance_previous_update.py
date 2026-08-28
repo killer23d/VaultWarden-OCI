@@ -8,14 +8,27 @@ import hashlib
 import json
 import runpy
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 PREVIOUS_VERSION = "0.1.0-dev.15"
-CANDIDATE_VERSION = "0.1.0-dev.16"
 TWO_BACK_VERSION = "0.1.0-dev.14"
 _DATA_MARKER = Path("var/lib/vaultwarden-oci/state/acceptance-update-data.txt")
+
+
+def _current_candidate_version() -> str:
+    manifest = Path(__file__).resolve().parents[1] / "versions.toml"
+    with manifest.open("rb") as handle:
+        payload = tomllib.load(handle)
+    value = payload.get("vaultwarden_oci", {}).get("version")
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"current candidate version is missing from {manifest}")
+    return value
+
+
+CANDIDATE_VERSION = _current_candidate_version()
 
 
 def _command(cli_module, argv, *, stdout: str = ""):
