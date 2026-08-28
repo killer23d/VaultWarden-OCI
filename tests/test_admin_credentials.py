@@ -16,7 +16,7 @@ def done(*, code: int = 0, stdout: str = "", stderr: str = ""):
 
 
 class AdminCredentialTests(unittest.TestCase):
-    def test_vaultwarden_phc_uses_tty_without_secret_in_argv_or_output(self) -> None:
+    def test_vaultwarden_phc_uses_constrained_tty_without_secret_in_argv(self) -> None:
         password = "correct-horse-battery-staple"
         image = "vaultwarden/server:1.37.1@sha256:" + "a" * 64
         hash_result = done(
@@ -46,6 +46,12 @@ class AdminCredentialTests(unittest.TestCase):
         self.assertIn("--command", argv)
         child = argv[argv.index("--command") + 1]
         self.assertNotIn(password, child)
+        self.assertIn("--network none", child)
+        self.assertIn("--read-only", child)
+        self.assertIn("--cap-drop ALL", child)
+        self.assertIn("--security-opt no-new-privileges:true", child)
+        self.assertIn("--pids-limit 50", child)
+        self.assertIn("--memory 256m", child)
         self.assertIn("--entrypoint /vaultwarden", child)
         self.assertIn(image, child)
         self.assertIn("hash --preset bitwarden", child)
