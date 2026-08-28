@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from typing import Sequence
 
@@ -28,25 +29,30 @@ def _hash_command(image: str) -> list[str]:
     # provides `script(1)` as an essential utility, so use it only as a
     # pseudoterminal boundary. The source secret remains stdin-only and is
     # never placed in argv, environment variables, files, or command output.
+    child = shlex.join(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--interactive",
+            "--tty",
+            "--entrypoint",
+            "/vaultwarden",
+            image,
+            "hash",
+            "--preset",
+            "bitwarden",
+        ]
+    )
     return [
         "script",
         "--quiet",
         "--return",
         "--echo",
         "never",
+        "--command",
+        child,
         "/dev/null",
-        "--",
-        "docker",
-        "run",
-        "--rm",
-        "--interactive",
-        "--tty",
-        "--entrypoint",
-        "/vaultwarden",
-        image,
-        "hash",
-        "--preset",
-        "bitwarden",
     ]
 
 
