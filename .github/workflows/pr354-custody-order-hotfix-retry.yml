@@ -30,7 +30,7 @@ jobs:
           lines = run_block.splitlines()
           shell = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
 
-          extra = r'''
+          extra = r"""
           # Keep older custody-focused test doubles compatible with the generated-custody defer flag,
           # and bypass the credential editor in tests specifically about workspace retention/removal.
           recovery_tests = Path('tests/test_recovery_ux.py')
@@ -72,9 +72,8 @@ jobs:
               raise SystemExit(f'expected three custody test contexts, found {text.count(needle)}')
           text = text.replace(needle, replacement)
           recovery_tests.write_text(text, encoding='utf-8')
-          '''
+          """
 
-          # The YAML indentation above becomes part of the raw string; strip the ten-space workflow indent.
           extra = '\n'.join(line[10:] if line.startswith('          ') else line for line in extra.splitlines())
           closing = '\nPY\n\ngit rm .github/workflows/pr354-custody-order-hotfix.yml\n'
           if closing not in shell:
