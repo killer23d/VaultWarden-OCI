@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import durability
+from . import admin, durability
 from .cli import CommandResult, GLOBAL_LOCK_PATH, mutation_lock, run_command
 
 ETC = Path("/etc/vaultwarden-oci")
@@ -248,7 +248,11 @@ def validate_encrypted(
 ) -> dict[str, str]:
     """Validate the complete SOPS/Age authority and admin-pairing invariant."""
     values = load(offline, paths=paths, runner=runner, uid=uid)
-    admin_enabled(values)
+    if admin_enabled(values):
+        try:
+            admin.validate_vaultwarden_admin_source(values["vaultwarden_admin_token"])
+        except admin.AdminCredentialError as exc:
+            raise SecretsError(str(exc)) from exc
     return values
 
 
