@@ -15,11 +15,32 @@ _ARGON2ID_PHC = re.compile(
     r"^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}$"
 )
 _TOKEN_LINE = re.compile(r"ADMIN_TOKEN='([^'\r\n]+)'")
+_ADMIN_SOURCE_MIN_LENGTH = 8
+_ADMIN_SOURCE_MAX_LENGTH = 256
 
 
 def is_vaultwarden_phc(value: str) -> bool:
     """Return whether value is a canonical Argon2id PHC accepted for ADMIN_TOKEN."""
     return bool(_ARGON2ID_PHC.fullmatch(value))
+
+
+def validate_vaultwarden_admin_source(value: str) -> str:
+    """Validate the recoverable admin password before it crosses a TTY boundary.
+
+    The supported Vaultwarden hash command is interactive, so control
+    characters are not safe source material: terminal line discipline may
+    consume them instead of passing them literally. Keep one validation rule
+    for both SOPS authority validation and runtime PHC derivation.
+    """
+    if (
+        not isinstance(value, str)
+        or not (_ADMIN_SOURCE_MIN_LENGTH <= len(value) <= _ADMIN_SOURCE_MAX_LENGTH)
+        or not value.isprintable()
+    ):
+        raise AdminCredentialError(
+            "Vaultwarden admin secret must be 8-256 printable characters with no control characters"
+        )
+    return value
 
 
 def _hash_command(image: str) -> list[str]:
@@ -108,12 +129,7 @@ def derive_vaultwarden_admin_phc(
     it remains usable for `/admin`. Only this derived PHC is materialized into
     the Vaultwarden container boundary.
     """
-    if (
-        not isinstance(password, str)
-        or len(password) < 8
-        or any(char in password for char in "\0\r\n")
-    ):
-        raise AdminCredentialError("Vaultwarden admin secret must be a single-line value of at least 8 characters")
+    validate_vaultwarden_admin_source(password)
 
     _ensure_image(image, runner=runner)
     argv: Sequence[str] = _hash_command(image)
