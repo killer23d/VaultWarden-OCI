@@ -214,10 +214,14 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             args = install_args()
             captured: dict[str, object] = {}
 
-            def fake_setup_main(argv, *, offline_recipient_factory=None):
+            events: list[str] = []
+
+            def fake_setup_main(argv, *, offline_recipient_factory=None, defer_next_actions=False):
                 captured["argv"] = list(argv)
                 self.assertIsNotNone(offline_recipient_factory)
+                self.assertTrue(defer_next_actions)
                 captured["recipient"] = offline_recipient_factory()
+                events.append("setup")
                 return 0
 
             with (
@@ -229,18 +233,45 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 ),
                 mock.patch.object(setup_frontend.setup, "main", side_effect=fake_setup_main),
                 mock.patch.object(
+                    setup_frontend,
+                    "_complete_external_credentials_before_handoff",
+                    side_effect=lambda: events.append("credentials"),
+                ),
+                mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
-                    return_value=recovery_ux.KitResult(kit, recovery_ux.KIT_MEMBERS, False),
+                    side_effect=lambda _identity: (
+                        events.append("export")
+                        or recovery_ux.KitResult(kit, recovery_ux.KIT_MEMBERS, False)
+                    ),
                 ) as export,
                 mock.patch("builtins.input", return_value="SAVED"),
             ):
                 self.assertEqual(setup_frontend.main(args), 0)
             self.assertEqual(captured["argv"], args)
             self.assertEqual(captured["recipient"], OFFLINE)
+            self.assertEqual(events, ["setup", "credentials", "export"])
             export.assert_called_once_with(identity)
             self.assertFalse(workspace.exists())
             self.assertFalse(identity.exists())
+
+    def test_external_credentials_are_completed_with_existing_validated_owners(self) -> None:
+        placeholder = mock.Mock(smtp_host="smtp.invalid", offline_recovery_recipient=OFFLINE)
+        ready = mock.Mock(smtp_host="smtp.example.net", offline_recovery_recipient=OFFLINE)
+        with (
+            mock.patch.object(setup_frontend.runtime, "load_config", side_effect=[placeholder, ready, ready]),
+            mock.patch.object(setup_frontend.runtime, "edit_config") as edit_config,
+            mock.patch.object(
+                setup_frontend.secrets,
+                "validate_encrypted",
+                side_effect=[setup_frontend.secrets.SecretsError("missing required"), {"ok": "yes"}],
+            ) as validate,
+            mock.patch.object(setup_frontend.secrets, "edit_encrypted") as edit_secrets,
+        ):
+            setup_frontend._complete_external_credentials_before_handoff()
+        edit_config.assert_called_once_with()
+        edit_secrets.assert_called_once()
+        self.assertEqual(validate.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -295,6 +295,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     offline_recipient_factory: Callable[[], str] | None = None,
+    defer_next_actions: bool = False,
 ) -> int:
     args = _parser().parse_args(argv); ui = UI(color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
     try:
@@ -319,8 +320,13 @@ def main(
         release = _install_release(Path(__file__).resolve().parents[1], use_latest=args.use_latest); ui.ok(f"installed exact immutable release at {release}")
         operational = _ensure_age_identity(); _ensure_config(domain, email, offline); _ensure_secret_start(operational, offline); storage.verify()
         ui.ok("operational Age identity, validated operator config, and decryptable encrypted-secrets starting point are present")
-        ui.header("Next actions"); ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")
-        ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml"); ui.action("run: sudo vwctl doctor"); ui.action("when doctor is ready, run: sudo vwctl start"); return 0
+        if not defer_next_actions:
+            ui.header("Next actions")
+            ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")
+            ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
+            ui.action("run: sudo vwctl doctor")
+            ui.action("when doctor is ready, run: sudo vwctl start")
+        return 0
     except (
         SetupError,
         storage.StorageError,

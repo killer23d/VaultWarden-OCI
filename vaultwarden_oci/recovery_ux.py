@@ -656,6 +656,15 @@ def export_recovery_kit(
     offline_values = _decrypt_all_sops(paths.encrypted_secrets, offline_identity, runner=runner)
     if operational_values != offline_values:
         raise RecoveryUXError("operational and offline SOPS decryption results do not match")
+    missing = sorted(set(secrets.REQUIRED) - set(operational_values))
+    if missing:
+        raise RecoveryUXError(
+            "complete recovery-kit export requires required SOPS credential(s): " + ", ".join(missing)
+        )
+    try:
+        secrets.admin_enabled(operational_values)
+    except secrets.SecretsError as exc:
+        raise RecoveryUXError(str(exc)) from exc
 
     first, second = passphrase_provider()
     passphrase = _validate_passphrase(first, second)

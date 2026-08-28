@@ -59,7 +59,7 @@ It must:
 
 `setup.sh` supports interactive operation, `--auto`, and an independent explicit `--use-latest` override. `--auto` does not imply `--use-latest` and means automatic installation steps, not necessarily a fully headless recovery-custody workflow.
 
-When setup is attached to an interactive terminal and no `--offline-recipient` was supplied, both normal interactive setup and terminal-driven `--auto` may generate the separate offline Age identity only in root-owned volatile storage, pass only its public recipient into the installation owner, and require the existing verified recovery-kit handoff before deleting the private identity. The recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries even when the install steps use `--auto`.
+When setup is attached to an interactive terminal and no `--offline-recipient` was supplied, both normal interactive setup and terminal-driven `--auto` may generate the separate offline Age identity only in root-owned volatile storage, pass only its public recipient into the installation owner, and require the existing verified recovery-kit handoff before deleting the private identity. For this generated-custody path, setup completes and validates the external runtime config/SOPS credentials needed for a truthful complete initial kit and authenticated SMTP delivery before the kit is published or email is offered. The recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries even when the install steps use `--auto`.
 
 A fully headless `--auto` run has no safe private-key handoff channel, so it must require an existing public `--offline-recipient` and fail before storage provisioning or other installation mutation when that custody input is missing. An explicitly supplied recipient is authoritative and must never be silently replaced by a generated recipient.
 
@@ -99,6 +99,7 @@ Recovery-kit rules:
 - passphrase never supplied via argv, environment variable, file, or email;
 - encrypted ZIP fully verified before email is attempted;
 - email failure must not be represented as successful handoff;
+- setup-generated custody completes/validates required external runtime credentials before publishing the initial complete kit, so SMTP delivery is actually available and the kit is not frozen before those credentials exist;
 - first-run generated custody includes the matching offline recovery private identity plus the operational identity and current generated/SOPS-managed credential values;
 - a setup-generated offline identity is removed from host-side volatile storage only after successful handoff.
 

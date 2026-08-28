@@ -292,6 +292,7 @@ class RecoveryKitTests(unittest.TestCase):
             values = {
                 "vaultwarden_admin_token": "vw-admin-secret",
                 "admin_basic_auth_password": "caddy-admin-secret",
+                "cloudflare_api_token": "cfut_" + "a" * 32,
                 "smtp_username": "smtp-user",
                 "smtp_password": "smtp-pass",
             }
@@ -343,6 +344,39 @@ class RecoveryKitTests(unittest.TestCase):
             self.assertTrue(result.archive.exists())
             self.assertEqual(calls, ["verified", "email"])
             self.assertFalse(any(sensitive.glob("recovery-kit-*")))
+
+    def test_complete_kit_refuses_missing_required_credentials_before_passphrase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self._seed(root)
+            offline = root / "offline.age"
+            offline.write_text("OFFLINE-PRIVATE", encoding="utf-8")
+            values = {
+                "vaultwarden_admin_token": "vw-admin-secret",
+                "admin_basic_auth_password": "caddy-admin-secret",
+            }
+
+            def fake_runner(argv, *, env=None, cwd=None):
+                del env, cwd
+                if tuple(argv[:3]) == ("sops", "--decrypt", "--output-type"):
+                    return command_result(argv, json.dumps(values))
+                raise AssertionError(argv)
+
+            passphrase = mock.Mock(return_value=("correct horse battery staple", "correct horse battery staple"))
+            with (
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", side_effect=[OPERATIONAL, OFFLINE]),
+                self.assertRaisesRegex(recovery_ux.RecoveryUXError, "requires required SOPS credential"),
+            ):
+                recovery_ux.export_recovery_kit(
+                    offline,
+                    publication_dir=root / "published",
+                    sensitive_root=root / "run",
+                    paths=paths,
+                    runner=fake_runner,
+                    passphrase_provider=passphrase,
+                    offer_email=False,
+                )
+            passphrase.assert_not_called()
 
     def test_later_complete_export_refuses_mismatched_offline_identity_before_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

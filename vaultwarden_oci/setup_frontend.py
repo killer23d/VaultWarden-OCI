@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import notification, recovery_ux, secrets, setup, sevenzip_secure
+from . import notification, recovery_ux, runtime, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
@@ -120,6 +120,53 @@ def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
         raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")
 
 
+def _complete_external_credentials_before_handoff() -> None:
+    config = runtime.load_config()
+    secret_paths = runtime.Paths().secret_paths()
+    try:
+        secrets.validate_encrypted(config.offline_recovery_recipient, paths=secret_paths)
+        secrets_ready = True
+    except secrets.SecretsError:
+        secrets_ready = False
+    config_ready = config.smtp_host != "smtp.invalid"
+    if config_ready and secrets_ready:
+        print("PASS External runtime config and required SOPS credentials already validate before recovery-kit publication.")
+        return
+
+    print("\n== External credentials before recovery handoff ==")
+    print("INFO Complete the credentials first so the initial recovery kit contains the final required credential set and authenticated SMTP delivery is available.")
+    if not config_ready:
+        print("ACTION The validated config editor will open now. Replace smtp.invalid and complete the [smtp] settings; optional [notifications] settings may also be added.")
+        runtime.edit_config()
+        config = runtime.load_config()
+        if config.smtp_host == "smtp.invalid":
+            raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")
+
+    if not secrets_ready:
+        print("ACTION The validated SOPS editor will open now. Add cloudflare_api_token, smtp_username, and smtp_password; keep the generated admin credentials unchanged unless intentionally rotating them.")
+        secrets.edit_encrypted(
+            config.offline_recovery_recipient,
+            paths=runtime.Paths().secret_paths(),
+        )
+
+    config = runtime.load_config()
+    if config.smtp_host == "smtp.invalid":
+        raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")
+    secrets.validate_encrypted(
+        config.offline_recovery_recipient,
+        paths=runtime.Paths().secret_paths(),
+    )
+    print("PASS External runtime config and required SOPS credentials validate before recovery-kit publication.")
+
+
+def _print_post_handoff_next_actions() -> None:
+    print("\n== Next actions ==")
+    print("ACTION run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
+    print("ACTION run: sudo vwctl secrets validate")
+    print("ACTION run: sudo vwctl doctor")
+    print("ACTION when doctor is ready, run: sudo vwctl start")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["recovery-kit"]:
@@ -140,7 +187,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace, identity, recipient = _generate_offline_identity()
             return recipient
 
-        code = setup.main(args, offline_recipient_factory=provide_offline_recipient)
+        code = setup.main(
+            args,
+            offline_recipient_factory=provide_offline_recipient,
+            defer_next_actions=True,
+        )
         if code != 0:
             if identity is not None and identity.exists():
                 print(
@@ -152,6 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if workspace is None or identity is None:
             raise SetupFrontendError("setup completed without producing the requested offline recovery identity")
 
+        _complete_external_credentials_before_handoff()
         print("\n== Initial credential recovery-kit handoff ==")
         result = recovery_ux.export_recovery_kit(identity)
         print(f"PASS Verified complete recovery kit: {result.archive}")
@@ -161,11 +213,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SetupFrontendError("offline identity remained in volatile server state after successful recovery-kit handoff")
         print("PASS Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
         print("ACTION Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
+        _print_post_handoff_next_actions()
         return 0
     except (
         SetupFrontendError,
         notification.NotificationError,
         recovery_ux.RecoveryUXError,
+        runtime.RuntimeConfigError,
         secrets.SecretsError,
         sevenzip_secure.SevenZipError,
         OSError,
@@ -177,6 +231,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "secure it before reboot, then retry recovery-kit export.",
                 file=sys.stderr,
             )
+            if setup.CONFIG.exists() and setup.ENCRYPTED.exists():
+                print("ACTION Complete external credentials with: sudo vwctl config edit && sudo vwctl secrets edit", file=sys.stderr)
+                print(
+                    f"ACTION Then export the complete kit with: sudo vwctl recovery-kit export --offline-identity {identity}",
+                    file=sys.stderr,
+                )
+                print(
+                    f"ACTION Remove {identity.parent} only after the verified kit is in off-host custody.",
+                    file=sys.stderr,
+                )
         return 1
 
 

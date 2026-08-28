@@ -38,7 +38,7 @@ sudo ./setup.sh install \
 
 Interactive setup lists plausible non-boot devices with size/filesystem/mount/model. Adopting an existing ext4/xfs filesystem requires explicit acknowledgement. Formatting a blank device requires an independent confirmation. If no acceptable separate volume exists, setup exits instead of falling back to root storage.
 
-When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage, creates and verifies a complete encrypted recovery-kit ZIP, and removes the transient identity only after authenticated email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.
+When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.
 
 **Expected success:** setup ends in `PASS` with a dedicated mounted/identified volume and an explicit external-config/recovery-custody checkpoint. **On failure:** follow the displayed `ACTION`; if setup says a transient offline identity remains, secure it before reboot, correct the cause, and rerun the same command.
 
@@ -46,7 +46,7 @@ When no `--offline-recipient` is supplied in an interactive TTY, setup generates
 
 `--auto` automates install decisions that were supplied explicitly; it never guesses storage, never implies format/adoption consent, and does not imply `--use-latest`. It does not necessarily mean that no human is present for recovery custody.
 
-When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
+When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but external credentials are still human-supplied through the validated editors before recovery-kit publication; the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
 
 Terminal-driven automatic install with setup-generated offline recovery custody:
 
@@ -116,7 +116,7 @@ sudo vwctl secrets edit
 sudo vwctl secrets validate
 ```
 
-Complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
+For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
 
 **Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
