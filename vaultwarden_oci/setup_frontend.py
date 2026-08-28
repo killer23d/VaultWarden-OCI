@@ -40,15 +40,20 @@ setup._run = _setup_run_7zip_compat
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
     recovery_ux._safe_private_dir(root)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
-    os.chmod(workspace, 0o700)
-    identity = workspace / "offline-age-identity.txt"
-    result = recovery_ux.recovery.run_command(["age-keygen", "-o", str(identity)])
-    if not result.ok:
-        recovery_ux._cleanup_workspace(workspace)
-        raise SetupFrontendError("offline recovery Age identity generation failed")
-    os.chmod(identity, 0o600)
-    recipient = secrets.derive_recipient(identity)
-    return workspace, identity, recipient
+    completed = False
+    try:
+        os.chmod(workspace, 0o700)
+        identity = workspace / "offline-age-identity.txt"
+        result = recovery_ux.recovery.run_command(["age-keygen", "-o", str(identity)])
+        if not result.ok:
+            raise SetupFrontendError("offline recovery Age identity generation failed")
+        os.chmod(identity, 0o600)
+        recipient = secrets.derive_recipient(identity)
+        completed = True
+        return workspace, identity, recipient
+    finally:
+        if not completed:
+            recovery_ux._cleanup_workspace(workspace)
 
 
 def _cleanup_generated(workspace: Path) -> None:
