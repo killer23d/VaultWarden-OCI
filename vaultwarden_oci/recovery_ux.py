@@ -459,9 +459,14 @@ def _decrypt_all_sops(
         raise RecoveryUXError("SOPS credential decryption did not return a JSON object") from exc
     if not isinstance(payload, dict) or not payload:
         raise RecoveryUXError("SOPS credential document is empty or invalid")
+    optional_empty = set(secrets.OPTIONAL + secrets.TRANSIENT_ONLY)
     values: dict[str, str] = {}
     for key, value in payload.items():
-        if not isinstance(key, str) or not key or not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
+        if not isinstance(key, str) or not key:
+            raise RecoveryUXError("SOPS credential document contains an unsupported key/value")
+        if key in optional_empty and value in (None, ""):
+            continue
+        if not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
             raise RecoveryUXError("SOPS credential document contains an unsupported key/value")
         values[key] = value
     return values
