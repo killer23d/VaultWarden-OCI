@@ -497,9 +497,16 @@ def _kit_readme(config: runtime.RuntimeConfig) -> str:
 
 
 def _prompt_passphrase() -> tuple[str, str]:
-    first = getpass.getpass("Recovery-kit ZIP passphrase (minimum 16 characters): ")
-    second = getpass.getpass("Confirm recovery-kit ZIP passphrase: ")
-    return first, second
+    ui = UI()
+    while True:
+        first = getpass.getpass("Recovery-kit ZIP passphrase (minimum 16 characters): ")
+        second = getpass.getpass("Confirm recovery-kit ZIP passphrase: ")
+        try:
+            _validate_passphrase(first, second)
+        except RecoveryUXError as exc:
+            ui.warn(f"{exc}; try again or press Ctrl+C to cancel")
+            continue
+        return first, second
 
 
 def _validate_passphrase(first: str, second: str) -> str:
