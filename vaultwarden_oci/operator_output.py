@@ -40,7 +40,8 @@ class ColorizingWriter:
 
     def write(self, text: str) -> int:
         rendered = colorize(text) if self._enabled else text
-        return self._stream.write(rendered)
+        self._stream.write(rendered)
+        return len(text)
 
     def flush(self) -> None:
         self._stream.flush()
