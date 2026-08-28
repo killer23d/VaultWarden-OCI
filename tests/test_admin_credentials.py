@@ -12,6 +12,7 @@ PHC = "$argon2id$v=19$m=65540,t=3,p=4$c2FsdA$YWJjZA"
 class AdminCredentialTests(unittest.TestCase):
     def test_vaultwarden_phc_uses_tty_without_secret_in_argv_or_output(self) -> None:
         password = "correct-horse-battery-staple"
+        image = "vaultwarden/server:1.37.1@sha256:" + "a" * 64
         completed = mock.Mock(
             returncode=0,
             stdout=(
@@ -23,19 +24,19 @@ class AdminCredentialTests(unittest.TestCase):
         )
         runner = mock.Mock(return_value=completed)
 
-        value = admin.derive_vaultwarden_admin_phc(
-            password,
-            "vaultwarden/server:1.37.1@sha256:" + "a" * 64,
-            runner=runner,
-        )
+        value = admin.derive_vaultwarden_admin_phc(password, image, runner=runner)
 
         self.assertEqual(value, PHC)
         argv = runner.call_args.args[0]
         self.assertNotIn(password, argv)
         self.assertIn("--echo", argv)
         self.assertIn("never", argv)
-        self.assertIn("--entrypoint", argv)
-        self.assertIn("/vaultwarden", argv)
+        self.assertIn("--command", argv)
+        child = argv[argv.index("--command") + 1]
+        self.assertNotIn(password, child)
+        self.assertIn("--entrypoint /vaultwarden", child)
+        self.assertIn(image, child)
+        self.assertIn("hash --preset bitwarden", child)
         self.assertEqual(runner.call_args.kwargs["input"], password + "\n" + password + "\n")
         self.assertFalse(runner.call_args.kwargs["shell"])
 
