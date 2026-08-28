@@ -28,7 +28,7 @@ def _hash_command(image: str) -> list[str]:
     # Vaultwarden's supported `hash` command prompts on a TTY. Ubuntu 24.04
     # provides `script(1)` as an essential utility, so use it only as a
     # pseudoterminal boundary. The source secret remains stdin-only and is
-    # never placed in argv, environment variables, files, or command output.
+    # never placed in argv, environment variables, files, or reported errors.
     child = shlex.join(
         [
             "docker",
@@ -36,6 +36,17 @@ def _hash_command(image: str) -> list[str]:
             "--rm",
             "--interactive",
             "--tty",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "50",
+            "--memory",
+            "256m",
             "--entrypoint",
             "/vaultwarden",
             image,
