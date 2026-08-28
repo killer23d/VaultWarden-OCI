@@ -30,7 +30,8 @@ jobs:
           git worktree add --detach /tmp/vwoci-previous 63d3d2c9ec7b554cb049c47dc981eb32ba64354d
           PYTHONPATH=/tmp/vwoci-two-back python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$host_root"
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$host_root" "$state_file"
-          candidate_python="$host_root/opt/vaultwarden-oci/releases/0.1.0-dev.16"
+          candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
+          candidate_python="$host_root/opt/vaultwarden-oci/releases/$candidate_version"
           PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$host_root" "$state_file"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
