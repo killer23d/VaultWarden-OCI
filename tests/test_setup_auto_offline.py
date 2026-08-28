@@ -88,6 +88,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
     def test_recipient_derivation_failure_cleans_generated_private_identity(self) -> None:
         created: dict[str, Path] = {}
         args = install_args()
+        host = mock.Mock(architecture="amd64")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "run"
             real_generate = setup_frontend._generate_offline_identity
@@ -99,14 +100,12 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 created["workspace"] = identity.parent
                 return mock.Mock(ok=True)
 
-            def fake_setup_main(argv, *, offline_recipient_factory=None):
-                self.assertEqual(list(argv), args)
-                self.assertIsNotNone(offline_recipient_factory)
-                offline_recipient_factory()
-                return 0
-
             with (
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                mock.patch.object(setup.os, "geteuid", return_value=0),
+                mock.patch.object(setup.install, "validate_host", return_value=host),
+                mock.patch.object(setup, "_select_storage", return_value="/dev/vdb"),
+                mock.patch.object(setup, "ensure_recovery_custody_tooling"),
                 mock.patch.object(
                     setup_frontend,
                     "_generate_offline_identity",
@@ -122,10 +121,11 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                     "derive_recipient",
                     side_effect=setup_frontend.secrets.SecretsError("recipient derivation failed"),
                 ),
-                mock.patch.object(setup_frontend.setup, "main", side_effect=fake_setup_main),
+                mock.patch.object(setup.storage, "provision") as provision,
             ):
                 self.assertEqual(setup_frontend.main(args), 1)
 
+            provision.assert_not_called()
             self.assertIn("identity", created)
             self.assertIn("workspace", created)
             self.assertFalse(created["identity"].exists())
