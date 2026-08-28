@@ -126,13 +126,25 @@ offline_recovery_recipient = {_toml_string(offline)}
 signups_allowed = false
 
 [smtp]
-# Complete these external SMTP settings before start.
+# REQUIRED before first recovery-kit handoff/start: replace smtp.invalid with
+# your authenticated SMTP server hostname. Credentials are entered separately
+# in secrets.sops.yaml as smtp_username and smtp_password.
 host = "smtp.invalid"
+# Provider SMTP port, commonly 587 for STARTTLS or 465 for implicit TLS.
 port = 587
+# Allowed values: "starttls" or "force_tls".
 security = "starttls"
+# Sender identity accepted by your SMTP provider.
 from_email = {_toml_string("vaultwarden@" + host)}
 from_name = "Vaultwarden"
+# Network timeout in seconds (1..120).
 timeout_seconds = 15
+
+# Optional operational notification provider. Uncomment the complete table only
+# when configuring it; its API token belongs in SOPS, never in this TOML file.
+# [notifications]
+# provider = "cyberpersons"
+# to_email = {_toml_string(email)}
 '''
 
 
@@ -274,6 +286,9 @@ def _ensure_secret_start(operational: str, offline: str) -> None:
     admin_token = pysecrets.token_urlsafe(48)
     admin_basic_auth_password = pysecrets.token_urlsafe(32)
     plaintext = json.dumps({
+        "cloudflare_api_token": "",
+        "smtp_username": "",
+        "smtp_password": "",
         "vaultwarden_admin_token": admin_token,
         "admin_basic_auth_password": admin_basic_auth_password,
     }) + "\n"
