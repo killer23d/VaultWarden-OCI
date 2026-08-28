@@ -1,0 +1,164 @@
+name: PR354 custody ordering hotfix
+
+on:
+  push:
+    branches:
+      - fix/blank-vm-offline-age-bootstrap-2026-08-27
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Apply first-run recovery custody ordering fix'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Patch first-run custody ordering
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'expected block not found in {path}: {old[:80]!r}')
+              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # setup.py: suppress premature next-actions only for the generated-custody frontend.
+          replace_once(
+              'vaultwarden_oci/setup.py',
+              '''def main(\n    argv: Sequence[str] | None = None,\n    *,\n    offline_recipient_factory: Callable[[], str] | None = None,\n) -> int:\n''',
+              '''def main(\n    argv: Sequence[str] | None = None,\n    *,\n    offline_recipient_factory: Callable[[], str] | None = None,\n    defer_next_actions: bool = False,\n) -> int:\n''',
+          )
+          replace_once(
+              'vaultwarden_oci/setup.py',
+              '''        ui.ok("operational Age identity, validated operator config, and decryptable encrypted-secrets starting point are present")\n        ui.header("Next actions"); ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")\n        ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml"); ui.action("run: sudo vwctl doctor"); ui.action("when doctor is ready, run: sudo vwctl start"); return 0\n''',
+              '''        ui.ok("operational Age identity, validated operator config, and decryptable encrypted-secrets starting point are present")\n        if not defer_next_actions:\n            ui.header("Next actions")\n            ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")\n            ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")\n            ui.action("run: sudo vwctl doctor")\n            ui.action("when doctor is ready, run: sudo vwctl start")\n        return 0\n''',
+          )
+
+          # setup_frontend.py: complete validated external credentials before kit publication/email.
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              'from . import notification, recovery_ux, secrets, setup, sevenzip_secure\n',
+              'from . import notification, recovery_ux, runtime, secrets, setup, sevenzip_secure\n',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '''def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:\n    if result.emailed:\n        return\n    print(f"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}")\n    print("ACTION Keep its ZIP passphrase separately from the archive.")\n    try:\n        answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()\n    except EOFError as exc:\n        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged") from exc\n    if answer != "SAVED":\n        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")\n\n\ndef main(argv: Sequence[str] | None = None) -> int:\n''',
+              '''def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:\n    if result.emailed:\n        return\n    print(f"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}")\n    print("ACTION Keep its ZIP passphrase separately from the archive.")\n    try:\n        answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()\n    except EOFError as exc:\n        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged") from exc\n    if answer != "SAVED":\n        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")\n\n\ndef _complete_external_credentials_before_handoff() -> None:\n    config = runtime.load_config()\n    secret_paths = runtime.Paths().secret_paths()\n    try:\n        secrets.validate_encrypted(config.offline_recovery_recipient, paths=secret_paths)\n        secrets_ready = True\n    except secrets.SecretsError:\n        secrets_ready = False\n    config_ready = config.smtp_host != "smtp.invalid"\n    if config_ready and secrets_ready:\n        print("PASS External runtime config and required SOPS credentials already validate before recovery-kit publication.")\n        return\n\n    print("\\n== External credentials before recovery handoff ==")\n    print("INFO Complete the credentials first so the initial recovery kit contains the final required credential set and authenticated SMTP delivery is available.")\n    if not config_ready:\n        print("ACTION The validated config editor will open now. Replace smtp.invalid and complete the [smtp] settings; optional [notifications] settings may also be added.")\n        runtime.edit_config()\n        config = runtime.load_config()\n        if config.smtp_host == "smtp.invalid":\n            raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")\n\n    if not secrets_ready:\n        print("ACTION The validated SOPS editor will open now. Add cloudflare_api_token, smtp_username, and smtp_password; keep the generated admin credentials unchanged unless intentionally rotating them.")\n        secrets.edit_encrypted(\n            config.offline_recovery_recipient,\n            paths=runtime.Paths().secret_paths(),\n        )\n\n    config = runtime.load_config()\n    if config.smtp_host == "smtp.invalid":\n        raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")\n    secrets.validate_encrypted(\n        config.offline_recovery_recipient,\n        paths=runtime.Paths().secret_paths(),\n    )\n    print("PASS External runtime config and required SOPS credentials validate before recovery-kit publication.")\n\n\ndef _print_post_handoff_next_actions() -> None:\n    print("\\n== Next actions ==")\n    print("ACTION run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")\n    print("ACTION run: sudo vwctl secrets validate")\n    print("ACTION run: sudo vwctl doctor")\n    print("ACTION when doctor is ready, run: sudo vwctl start")\n\n\ndef main(argv: Sequence[str] | None = None) -> int:\n''',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '        code = setup.main(args, offline_recipient_factory=provide_offline_recipient)\n',
+              '        code = setup.main(\n            args,\n            offline_recipient_factory=provide_offline_recipient,\n            defer_next_actions=True,\n        )\n',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '''        if workspace is None or identity is None:\n            raise SetupFrontendError("setup completed without producing the requested offline recovery identity")\n\n        print("\\n== Initial credential recovery-kit handoff ==")\n''',
+              '''        if workspace is None or identity is None:\n            raise SetupFrontendError("setup completed without producing the requested offline recovery identity")\n\n        _complete_external_credentials_before_handoff()\n        print("\\n== Initial credential recovery-kit handoff ==")\n''',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '''        print("PASS Offline recovery private identity removed from host-side volatile workspace after successful handoff.")\n        print("ACTION Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")\n        return 0\n''',
+              '''        print("PASS Offline recovery private identity removed from host-side volatile workspace after successful handoff.")\n        print("ACTION Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")\n        _print_post_handoff_next_actions()\n        return 0\n''',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '''        notification.NotificationError,\n        recovery_ux.RecoveryUXError,\n        secrets.SecretsError,\n''',
+              '''        notification.NotificationError,\n        recovery_ux.RecoveryUXError,\n        runtime.RuntimeConfigError,\n        secrets.SecretsError,\n''',
+          )
+          replace_once(
+              'vaultwarden_oci/setup_frontend.py',
+              '''        if identity is not None and identity.exists():\n            print(\n                f"ACTION The offline private identity remains only in volatile root-only storage at {identity}; "\n                "secure it before reboot, then retry recovery-kit export.",\n                file=sys.stderr,\n            )\n        return 1\n''',
+              '''        if identity is not None and identity.exists():\n            print(\n                f"ACTION The offline private identity remains only in volatile root-only storage at {identity}; "\n                "secure it before reboot, then retry recovery-kit export.",\n                file=sys.stderr,\n            )\n            if setup.CONFIG.exists() and setup.ENCRYPTED.exists():\n                print("ACTION Complete external credentials with: sudo vwctl config edit && sudo vwctl secrets edit", file=sys.stderr)\n                print(\n                    f"ACTION Then export the complete kit with: sudo vwctl recovery-kit export --offline-identity {identity}",\n                    file=sys.stderr,\n                )\n                print(\n                    f"ACTION Remove {identity.parent} only after the verified kit is in off-host custody.",\n                    file=sys.stderr,\n                )\n        return 1\n''',
+          )
+
+          # recovery_ux.py: a kit called complete must not publish before required SOPS credentials exist.
+          replace_once(
+              'vaultwarden_oci/recovery_ux.py',
+              '''    if operational_values != offline_values:\n        raise RecoveryUXError("operational and offline SOPS decryption results do not match")\n\n    first, second = passphrase_provider()\n''',
+              '''    if operational_values != offline_values:\n        raise RecoveryUXError("operational and offline SOPS decryption results do not match")\n    missing = sorted(set(secrets.REQUIRED) - set(operational_values))\n    if missing:\n        raise RecoveryUXError(\n            "complete recovery-kit export requires required SOPS credential(s): " + ", ".join(missing)\n        )\n    try:\n        secrets.admin_enabled(operational_values)\n    except secrets.SecretsError as exc:\n        raise RecoveryUXError(str(exc)) from exc\n\n    first, second = passphrase_provider()\n''',
+          )
+
+          # Setup frontend tests: generated custody defers next actions and completes credentials before export.
+          replace_once(
+              'tests/test_setup_auto_offline.py',
+              '''            def fake_setup_main(argv, *, offline_recipient_factory=None):\n                captured["argv"] = list(argv)\n                self.assertIsNotNone(offline_recipient_factory)\n                captured["recipient"] = offline_recipient_factory()\n                return 0\n''',
+              '''            events: list[str] = []\n\n            def fake_setup_main(argv, *, offline_recipient_factory=None, defer_next_actions=False):\n                captured["argv"] = list(argv)\n                self.assertIsNotNone(offline_recipient_factory)\n                self.assertTrue(defer_next_actions)\n                captured["recipient"] = offline_recipient_factory()\n                events.append("setup")\n                return 0\n''',
+          )
+          replace_once(
+              'tests/test_setup_auto_offline.py',
+              '''                mock.patch.object(\n                    setup_frontend.recovery_ux,\n                    "export_recovery_kit",\n                    return_value=recovery_ux.KitResult(kit, recovery_ux.KIT_MEMBERS, False),\n                ) as export,\n                mock.patch("builtins.input", return_value="SAVED"),\n            ):\n                self.assertEqual(setup_frontend.main(args), 0)\n''',
+              '''                mock.patch.object(\n                    setup_frontend,\n                    "_complete_external_credentials_before_handoff",\n                    side_effect=lambda: events.append("credentials"),\n                ),\n                mock.patch.object(\n                    setup_frontend.recovery_ux,\n                    "export_recovery_kit",\n                    side_effect=lambda _identity: (\n                        events.append("export")\n                        or recovery_ux.KitResult(kit, recovery_ux.KIT_MEMBERS, False)\n                    ),\n                ) as export,\n                mock.patch("builtins.input", return_value="SAVED"),\n            ):\n                self.assertEqual(setup_frontend.main(args), 0)\n''',
+          )
+          replace_once(
+              'tests/test_setup_auto_offline.py',
+              '''            self.assertEqual(captured["recipient"], OFFLINE)\n            export.assert_called_once_with(identity)\n            self.assertFalse(workspace.exists())\n''',
+              '''            self.assertEqual(captured["recipient"], OFFLINE)\n            self.assertEqual(events, ["setup", "credentials", "export"])\n            export.assert_called_once_with(identity)\n            self.assertFalse(workspace.exists())\n''',
+          )
+          insert_marker = '\n\nif __name__ == "__main__":\n    unittest.main()\n'
+          setup_tests = Path('tests/test_setup_auto_offline.py')
+          text = setup_tests.read_text(encoding='utf-8')
+          regression = '''\n    def test_external_credentials_are_completed_with_existing_validated_owners(self) -> None:\n        placeholder = mock.Mock(smtp_host="smtp.invalid", offline_recovery_recipient=OFFLINE)\n        ready = mock.Mock(smtp_host="smtp.example.net", offline_recovery_recipient=OFFLINE)\n        with (\n            mock.patch.object(setup_frontend.runtime, "load_config", side_effect=[placeholder, ready, ready]),\n            mock.patch.object(setup_frontend.runtime, "edit_config") as edit_config,\n            mock.patch.object(\n                setup_frontend.secrets,\n                "validate_encrypted",\n                side_effect=[setup_frontend.secrets.SecretsError("missing required"), {"ok": "yes"}],\n            ) as validate,\n            mock.patch.object(setup_frontend.secrets, "edit_encrypted") as edit_secrets,\n        ):\n            setup_frontend._complete_external_credentials_before_handoff()\n        edit_config.assert_called_once_with()\n        edit_secrets.assert_called_once()\n        self.assertEqual(validate.call_count, 2)\n'''
+          if 'test_external_credentials_are_completed_with_existing_validated_owners' not in text:
+              if insert_marker not in text:
+                  raise SystemExit('setup test insertion marker not found')
+              setup_tests.write_text(text.replace(insert_marker, regression + insert_marker, 1), encoding='utf-8')
+
+          # Recovery-kit tests: complete kit now includes every required runtime credential and incomplete state stops before passphrase/ZIP.
+          replace_once(
+              'tests/test_recovery_ux.py',
+              '''            values = {\n                "vaultwarden_admin_token": "vw-admin-secret",\n                "admin_basic_auth_password": "caddy-admin-secret",\n                "smtp_username": "smtp-user",\n                "smtp_password": "smtp-pass",\n            }\n''',
+              '''            values = {\n                "vaultwarden_admin_token": "vw-admin-secret",\n                "admin_basic_auth_password": "caddy-admin-secret",\n                "cloudflare_api_token": "cfut_" + "a" * 32,\n                "smtp_username": "smtp-user",\n                "smtp_password": "smtp-pass",\n            }\n''',
+          )
+          recovery_tests = Path('tests/test_recovery_ux.py')
+          text = recovery_tests.read_text(encoding='utf-8')
+          marker = '    def test_later_complete_export_refuses_mismatched_offline_identity_before_zip(self) -> None:\n'
+          regression = '''    def test_complete_kit_refuses_missing_required_credentials_before_passphrase(self) -> None:\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            paths = self._seed(root)\n            offline = root / "offline.age"\n            offline.write_text("OFFLINE-PRIVATE", encoding="utf-8")\n            values = {\n                "vaultwarden_admin_token": "vw-admin-secret",\n                "admin_basic_auth_password": "caddy-admin-secret",\n            }\n\n            def fake_runner(argv, *, env=None, cwd=None):\n                del env, cwd\n                if tuple(argv[:3]) == ("sops", "--decrypt", "--output-type"):\n                    return command_result(argv, json.dumps(values))\n                raise AssertionError(argv)\n\n            passphrase = mock.Mock(return_value=("correct horse battery staple", "correct horse battery staple"))\n            with (\n                mock.patch.object(recovery_ux.secrets, "derive_recipient", side_effect=[OPERATIONAL, OFFLINE]),\n                self.assertRaisesRegex(recovery_ux.RecoveryUXError, "requires required SOPS credential"),\n            ):\n                recovery_ux.export_recovery_kit(\n                    offline,\n                    publication_dir=root / "published",\n                    sensitive_root=root / "run",\n                    paths=paths,\n                    runner=fake_runner,\n                    passphrase_provider=passphrase,\n                    offer_email=False,\n                )\n            passphrase.assert_not_called()\n\n'''
+          if 'test_complete_kit_refuses_missing_required_credentials_before_passphrase' not in text:
+              if marker not in text:
+                  raise SystemExit('recovery test insertion marker not found')
+              recovery_tests.write_text(text.replace(marker, regression + marker, 1), encoding='utf-8')
+
+          # Durable/operator docs: make the first-run order explicit.
+          replace_once(
+              'docs/DECISIONS.md',
+              '''When setup is attached to an interactive terminal and no `--offline-recipient` was supplied, both normal interactive setup and terminal-driven `--auto` may generate the separate offline Age identity only in root-owned volatile storage, pass only its public recipient into the installation owner, and require the existing verified recovery-kit handoff before deleting the private identity. The recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries even when the install steps use `--auto`.\n''',
+              '''When setup is attached to an interactive terminal and no `--offline-recipient` was supplied, both normal interactive setup and terminal-driven `--auto` may generate the separate offline Age identity only in root-owned volatile storage, pass only its public recipient into the installation owner, and require the existing verified recovery-kit handoff before deleting the private identity. For this generated-custody path, setup completes and validates the external runtime config/SOPS credentials needed for a truthful complete initial kit and authenticated SMTP delivery before the kit is published or email is offered. The recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries even when the install steps use `--auto`.\n''',
+          )
+          replace_once(
+              'docs/DECISIONS.md',
+              '''- encrypted ZIP fully verified before email is attempted;\n- email failure must not be represented as successful handoff;\n- first-run generated custody includes the matching offline recovery private identity plus the operational identity and current generated/SOPS-managed credential values;\n''',
+              '''- encrypted ZIP fully verified before email is attempted;\n- email failure must not be represented as successful handoff;\n- setup-generated custody completes/validates required external runtime credentials before publishing the initial complete kit, so SMTP delivery is actually available and the kit is not frozen before those credentials exist;\n- first-run generated custody includes the matching offline recovery private identity plus the operational identity and current generated/SOPS-managed credential values;\n''',
+          )
+          replace_once(
+              'docs/INSTALL.md',
+              '''When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage, creates and verifies a complete encrypted recovery-kit ZIP, and removes the transient identity only after authenticated email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.\n''',
+              '''When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.\n''',
+          )
+          replace_once(
+              'docs/INSTALL.md',
+              '''When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.\n''',
+              '''When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but external credentials are still human-supplied through the validated editors before recovery-kit publication; the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.\n''',
+          )
+          replace_once(
+              'docs/INSTALL.md',
+              '''Complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.\n''',
+              '''For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.\n''',
+          )
+          PY
+
+          git rm .github/workflows/pr354-custody-order-hotfix.yml
+          git diff --check
+          python3 -m unittest tests.test_setup_auto_offline tests.test_recovery_ux -v
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add vaultwarden_oci/setup.py vaultwarden_oci/setup_frontend.py vaultwarden_oci/recovery_ux.py tests/test_setup_auto_offline.py tests/test_recovery_ux.py docs/DECISIONS.md docs/INSTALL.md
+          git commit -m 'Order credential completion before recovery custody'
+          git push origin HEAD:fix/blank-vm-offline-age-bootstrap-2026-08-27
