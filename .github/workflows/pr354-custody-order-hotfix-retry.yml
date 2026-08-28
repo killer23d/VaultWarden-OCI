@@ -31,49 +31,51 @@ jobs:
           shell = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
 
           extra = r'''
-# Keep older custody-focused test doubles compatible with the generated-custody defer flag,
-# and bypass the credential editor in tests that are specifically about workspace retention/removal.
-recovery_tests = Path('tests/test_recovery_ux.py')
-text = recovery_tests.read_text(encoding='utf-8')
-old = '''    def _successful_generated_setup(argv, *, offline_recipient_factory=None):
-        del argv
-        if offline_recipient_factory is None:
-            raise AssertionError("generated custody callback was not supplied")
-        offline_recipient_factory()
-        return 0
-'''
-new = '''    def _successful_generated_setup(
-        argv,
-        *,
-        offline_recipient_factory=None,
-        defer_next_actions=False,
-    ):
-        del argv
-        if offline_recipient_factory is None:
-            raise AssertionError("generated custody callback was not supplied")
-        if not defer_next_actions:
-            raise AssertionError("generated custody must defer setup next-actions until handoff")
-        offline_recipient_factory()
-        return 0
-'''
-if old not in text:
-    raise SystemExit('custody setup test double not found')
-text = text.replace(old, new, 1)
-needle = '''                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
-                mock.patch.object(
-                    setup_frontend.recovery_ux,
-'''
-replacement = '''                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
-                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
-                mock.patch.object(
-                    setup_frontend.recovery_ux,
-'''
-if text.count(needle) != 3:
-    raise SystemExit(f'expected three custody test contexts, found {text.count(needle)}')
-text = text.replace(needle, replacement)
-recovery_tests.write_text(text, encoding='utf-8')
-'''
+          # Keep older custody-focused test doubles compatible with the generated-custody defer flag,
+          # and bypass the credential editor in tests specifically about workspace retention/removal.
+          recovery_tests = Path('tests/test_recovery_ux.py')
+          text = recovery_tests.read_text(encoding='utf-8')
+          old = '''    def _successful_generated_setup(argv, *, offline_recipient_factory=None):
+              del argv
+              if offline_recipient_factory is None:
+                  raise AssertionError("generated custody callback was not supplied")
+              offline_recipient_factory()
+              return 0
+          '''
+          new = '''    def _successful_generated_setup(
+              argv,
+              *,
+              offline_recipient_factory=None,
+              defer_next_actions=False,
+          ):
+              del argv
+              if offline_recipient_factory is None:
+                  raise AssertionError("generated custody callback was not supplied")
+              if not defer_next_actions:
+                  raise AssertionError("generated custody must defer setup next-actions until handoff")
+              offline_recipient_factory()
+              return 0
+          '''
+          if old not in text:
+              raise SystemExit('custody setup test double not found')
+          text = text.replace(old, new, 1)
+          needle = '''                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                          mock.patch.object(
+                              setup_frontend.recovery_ux,
+          '''
+          replacement = '''                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                          mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
+                          mock.patch.object(
+                              setup_frontend.recovery_ux,
+          '''
+          if text.count(needle) != 3:
+              raise SystemExit(f'expected three custody test contexts, found {text.count(needle)}')
+          text = text.replace(needle, replacement)
+          recovery_tests.write_text(text, encoding='utf-8')
+          '''
 
+          # The YAML indentation above becomes part of the raw string; strip the ten-space workflow indent.
+          extra = '\n'.join(line[10:] if line.startswith('          ') else line for line in extra.splitlines())
           closing = '\nPY\n\ngit rm .github/workflows/pr354-custody-order-hotfix.yml\n'
           if closing not in shell:
               raise SystemExit('original hotfix closing marker not found')
