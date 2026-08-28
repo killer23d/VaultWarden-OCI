@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 
-from . import cli
+from . import cli, operator_output
 
 _BASE_RUN_COMMAND = cli.run_command
 _LIFECYCLE_ACTIONS = {"start", "restart"}
@@ -83,6 +84,25 @@ def _cleanup_interrupted_lifecycle(action: str) -> bool:
     return True
 
 
+def _colorable(args: Sequence[str]) -> bool:
+    """Keep structured output and raw application logs byte-stable."""
+    return "--json" not in args and args[:1] != ["logs"]
+
+
+@contextmanager
+def _human_output(args: Sequence[str]) -> Iterator[None]:
+    stdout, stderr = sys.stdout, sys.stderr
+    if not _colorable(args):
+        yield
+        return
+    sys.stdout = operator_output.ColorizingWriter(stdout)
+    sys.stderr = operator_output.ColorizingWriter(stderr)
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = stdout, stderr
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     global _COMPOSE_LIFECYCLE_STARTED
     _COMPOSE_LIFECYCLE_STARTED = False
@@ -98,11 +118,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from . import update_cli
 
     try:
-        return update_cli.main(args)
-    except KeyboardInterrupt:
-        print(file=sys.stderr)
-        cleanup_ok = _cleanup_interrupted_lifecycle(lifecycle_action or "")
-        print(f"FAIL: {lifecycle_action or 'vwctl'} interrupted", file=sys.stderr)
-        return 130 if cleanup_ok else 1
+        with _human_output(args):
+            try:
+                return update_cli.main(args)
+            except KeyboardInterrupt:
+                print(file=sys.stderr)
+                cleanup_ok = _cleanup_interrupted_lifecycle(lifecycle_action or "")
+                print(f"FAIL: {lifecycle_action or 'vwctl'} interrupted", file=sys.stderr)
+                return 130 if cleanup_ok else 1
     finally:
         cli.run_command = _BASE_RUN_COMMAND
