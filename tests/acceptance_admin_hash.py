@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import platform
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from vaultwarden_oci import admin
 from vaultwarden_oci.update_versions import resolve_pinned_file
 
 
-ROOT = Path(__file__).resolve().parents[1]
 TEST_SECRET = "vwoci-acceptance-admin-secret-2026"
 
 
