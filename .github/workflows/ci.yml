@@ -21,6 +21,8 @@ jobs:
         run: python3 -m compileall -q vaultwarden_oci tests
       - name: Parse shell glue
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
+      - name: Real exact-image admin credential boundary
+        run: python3 tests/acceptance_admin_hash.py
       - name: Supported predecessor update and coherent rollback compatibility
         run: |
           host_root="$(mktemp -d /tmp/vwoci-update-host.XXXXXX)"
