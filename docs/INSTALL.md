@@ -25,6 +25,19 @@ On a clean Ubuntu host, terminal-generated custody does not assume `age-keygen` 
 
 Setup creates the operator config skeleton, operational Age identity, encrypted SOPS document, immutable installed release, storage identity/marker, and systemd storage guard. It does not invent external SMTP, Cloudflare, notification-provider, or rclone credentials.
 
+## Prepare Cloudflare credentials
+
+Create Cloudflare credentials before starting an interactive first-run so the values are ready when the validated SOPS editor opens. The appliance exposes the field names; it never invents external API-token values.
+
+Use **two separate Cloudflare user API tokens**:
+
+- `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
+- `cloudflare_remediation_token` is used only when CrowdSec Cloudflare remediation is enabled. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions.
+
+Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
+
+See [Cloudflare tokens](CLOUDFLARE-TOKENS.md) for the current Cloudflare dashboard steps, exact permission tables, resource scoping, and token-storage guidance.
+
 ## Interactive blank-VM install
 
 **Prerequisite:** Ubuntu 24.04, root access, Internet access for dependencies, and an attached non-boot data volume.
@@ -117,6 +130,20 @@ sudo vwctl secrets validate
 ```
 
 For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
+
+A fresh encrypted secrets document exposes the complete first-run field map:
+
+```yaml
+cloudflare_api_token: ""
+cloudflare_remediation_token: ""
+smtp_username: ""
+smtp_password: ""
+email_api_token: ""
+vaultwarden_admin_token: <generated>
+admin_basic_auth_password: <generated>
+```
+
+The first three normal first-run requirements are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` may remain empty until CrowdSec Cloudflare remediation is enabled. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
 
 **Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
