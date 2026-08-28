@@ -44,7 +44,7 @@ class StorageContractTests(unittest.TestCase):
             with self.assertRaisesRegex(storage.StorageError, "mount is absent"): storage.verify()
         actual = storage.StorageIdentity("aaaa-bbbb", "ext4", "/dev/vdb"); expected = storage.StorageIdentity("cccc-dddd", "ext4", "/dev/vdc")
         with mock.patch.object(storage, "_identity_from_mount", return_value=actual), mock.patch.object(storage, "load_identity", return_value=expected), mock.patch.object(storage, "load_volume_marker", return_value=actual):
-            with self.assertRaises(storage.StorageError): storage.verify()
+            with self.assertRaisesRegex(storage.StorageError, "wrong filesystem"): storage.verify()
 
     def test_volume_marker_cannot_self_authenticate_against_host_identity(self) -> None:
         actual = storage.StorageIdentity("aaaa-bbbb", "ext4", "/dev/vdb"); expected = storage.StorageIdentity("cccc-dddd", "ext4", "/dev/vdc")
