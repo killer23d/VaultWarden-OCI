@@ -292,6 +292,7 @@ class RecoveryKitTests(unittest.TestCase):
             values = {
                 "vaultwarden_admin_token": "vw-admin-secret",
                 "admin_basic_auth_password": "caddy-admin-secret",
+                "cloudflare_api_token": "cfut_" + "a" * 32,
                 "smtp_username": "smtp-user",
                 "smtp_password": "smtp-pass",
             }
@@ -343,6 +344,39 @@ class RecoveryKitTests(unittest.TestCase):
             self.assertTrue(result.archive.exists())
             self.assertEqual(calls, ["verified", "email"])
             self.assertFalse(any(sensitive.glob("recovery-kit-*")))
+
+    def test_complete_kit_refuses_missing_required_credentials_before_passphrase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self._seed(root)
+            offline = root / "offline.age"
+            offline.write_text("OFFLINE-PRIVATE", encoding="utf-8")
+            values = {
+                "vaultwarden_admin_token": "vw-admin-secret",
+                "admin_basic_auth_password": "caddy-admin-secret",
+            }
+
+            def fake_runner(argv, *, env=None, cwd=None):
+                del env, cwd
+                if tuple(argv[:3]) == ("sops", "--decrypt", "--output-type"):
+                    return command_result(argv, json.dumps(values))
+                raise AssertionError(argv)
+
+            passphrase = mock.Mock(return_value=("correct horse battery staple", "correct horse battery staple"))
+            with (
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", side_effect=[OPERATIONAL, OFFLINE]),
+                self.assertRaisesRegex(recovery_ux.RecoveryUXError, "requires required SOPS credential"),
+            ):
+                recovery_ux.export_recovery_kit(
+                    offline,
+                    publication_dir=root / "published",
+                    sensitive_root=root / "run",
+                    paths=paths,
+                    runner=fake_runner,
+                    passphrase_provider=passphrase,
+                    offer_email=False,
+                )
+            passphrase.assert_not_called()
 
     def test_later_complete_export_refuses_mismatched_offline_identity_before_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -428,6 +462,21 @@ class RecoveryKitTests(unittest.TestCase):
 
 
 class SetupRecoveryCustodyTests(unittest.TestCase):
+    @staticmethod
+    def _successful_generated_setup(
+        argv,
+        *,
+        offline_recipient_factory=None,
+        defer_next_actions=False,
+    ):
+        del argv
+        if offline_recipient_factory is None:
+            raise AssertionError("generated custody callback was not supplied")
+        if not defer_next_actions:
+            raise AssertionError("generated custody must defer setup next-actions until handoff")
+        offline_recipient_factory()
+        return 0
+
     def test_setup_frontend_preserves_setup_must_input_and_env_contract(self) -> None:
         env = os.environ.copy()
         env["VWOCI_SETUP_FRONTEND_TEST"] = "yes"
@@ -454,7 +503,8 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -477,7 +527,8 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -499,7 +550,8 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
+                mock.patch.object(setup_frontend, "_complete_external_credentials_before_handoff"),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",

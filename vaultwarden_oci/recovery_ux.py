@@ -459,9 +459,14 @@ def _decrypt_all_sops(
         raise RecoveryUXError("SOPS credential decryption did not return a JSON object") from exc
     if not isinstance(payload, dict) or not payload:
         raise RecoveryUXError("SOPS credential document is empty or invalid")
+    optional_empty = set(secrets.OPTIONAL + secrets.TRANSIENT_ONLY)
     values: dict[str, str] = {}
     for key, value in payload.items():
-        if not isinstance(key, str) or not key or not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
+        if not isinstance(key, str) or not key:
+            raise RecoveryUXError("SOPS credential document contains an unsupported key/value")
+        if key in optional_empty and value in (None, ""):
+            continue
+        if not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
             raise RecoveryUXError("SOPS credential document contains an unsupported key/value")
         values[key] = value
     return values
@@ -497,9 +502,16 @@ def _kit_readme(config: runtime.RuntimeConfig) -> str:
 
 
 def _prompt_passphrase() -> tuple[str, str]:
-    first = getpass.getpass("Recovery-kit ZIP passphrase (minimum 16 characters): ")
-    second = getpass.getpass("Confirm recovery-kit ZIP passphrase: ")
-    return first, second
+    ui = UI()
+    while True:
+        first = getpass.getpass("Recovery-kit ZIP passphrase (minimum 16 characters): ")
+        second = getpass.getpass("Confirm recovery-kit ZIP passphrase: ")
+        try:
+            _validate_passphrase(first, second)
+        except RecoveryUXError as exc:
+            ui.warn(f"{exc}; try again or press Ctrl+C to cancel")
+            continue
+        return first, second
 
 
 def _validate_passphrase(first: str, second: str) -> str:
@@ -656,6 +668,15 @@ def export_recovery_kit(
     offline_values = _decrypt_all_sops(paths.encrypted_secrets, offline_identity, runner=runner)
     if operational_values != offline_values:
         raise RecoveryUXError("operational and offline SOPS decryption results do not match")
+    missing = sorted(set(secrets.REQUIRED) - set(operational_values))
+    if missing:
+        raise RecoveryUXError(
+            "complete recovery-kit export requires required SOPS credential(s): " + ", ".join(missing)
+        )
+    try:
+        secrets.admin_enabled(operational_values)
+    except secrets.SecretsError as exc:
+        raise RecoveryUXError(str(exc)) from exc
 
     first, second = passphrase_provider()
     passphrase = _validate_passphrase(first, second)

@@ -14,11 +14,10 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import notification, recovery_ux, secrets, setup, sevenzip_secure
+from . import notification, recovery_ux, runtime, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
-
 
 
 class SetupFrontendError(RuntimeError):
@@ -38,18 +37,27 @@ def _setup_run_7zip_compat(argv: Sequence[str], *, input_text=None, env=None):
 setup._run = _setup_run_7zip_compat
 
 
+def _ui() -> setup.UI:
+    return setup.UI(color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+
+
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
     recovery_ux._safe_private_dir(root)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
-    os.chmod(workspace, 0o700)
-    identity = workspace / "offline-age-identity.txt"
-    result = recovery_ux.recovery.run_command(["age-keygen", "-o", str(identity)])
-    if not result.ok:
-        recovery_ux._cleanup_workspace(workspace)
-        raise SetupFrontendError("offline recovery Age identity generation failed")
-    os.chmod(identity, 0o600)
-    recipient = secrets.derive_recipient(identity)
-    return workspace, identity, recipient
+    completed = False
+    try:
+        os.chmod(workspace, 0o700)
+        identity = workspace / "offline-age-identity.txt"
+        result = recovery_ux.recovery.run_command(["age-keygen", "-o", str(identity)])
+        if not result.ok:
+            raise SetupFrontendError("offline recovery Age identity generation failed")
+        os.chmod(identity, 0o600)
+        recipient = secrets.derive_recipient(identity)
+        completed = True
+        return workspace, identity, recipient
+    finally:
+        if not completed:
+            recovery_ux._cleanup_workspace(workspace)
 
 
 def _cleanup_generated(workspace: Path) -> None:
@@ -90,10 +98,7 @@ def _confirm_use_latest(args: Sequence[str]) -> bool:
         "--use-latest bypasses the project's tested release pins. Vaultwarden, Caddy, all xcaddy addon refs, "
         "and architecture image digests will be resolved once and frozen exactly for this install."
     )
-    if sys.stderr.isatty() and not os.environ.get("NO_COLOR"):
-        print(f"\033[33mWARN\033[0m {warning}", file=sys.stderr)
-    else:
-        print(f"WARN {warning}", file=sys.stderr)
+    _ui().warn(warning, file=sys.stderr)
     if parsed.auto or not sys.stdin.isatty():
         return True
     try:
@@ -106,8 +111,10 @@ def _confirm_use_latest(args: Sequence[str]) -> bool:
 def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
     if result.emailed:
         return
-    print(f"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}")
-    print("ACTION Keep its ZIP passphrase separately from the archive.")
+    ui = _ui()
+    ui.action(f"Copy the verified encrypted recovery kit off-host now: {result.archive}")
+    ui.action("Keep its ZIP passphrase separately from the archive.")
+    ui.info("If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.")
     try:
         answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()
     except EOFError as exc:
@@ -116,12 +123,66 @@ def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
         raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")
 
 
+def _complete_external_credentials_before_handoff() -> None:
+    ui = _ui()
+    config = runtime.load_config()
+    secret_paths = runtime.Paths().secret_paths()
+    try:
+        secrets.validate_encrypted(config.offline_recovery_recipient, paths=secret_paths)
+        secrets_ready = True
+    except secrets.SecretsError:
+        secrets_ready = False
+    config_ready = config.smtp_host != "smtp.invalid"
+    if config_ready and secrets_ready:
+        ui.ok("External runtime config and required SOPS credentials already validate before recovery-kit publication.")
+        return
+
+    ui.header("External credentials before recovery handoff")
+    ui.info("Complete the credentials first so the initial recovery kit contains the final required credential set and authenticated SMTP delivery is available.")
+    if not config_ready:
+        ui.action("The validated config editor will open now. Replace smtp.invalid and complete the [smtp] settings. Operational HTTPS notifications are optional and can be configured after first-run custody.")
+        runtime.edit_config()
+        config = runtime.load_config()
+        if config.smtp_host == "smtp.invalid":
+            raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")
+
+    if not secrets_ready:
+        ui.action(
+            "The validated SOPS editor will open now. Fill required cloudflare_api_token, smtp_username, and smtp_password. "
+            "Optional cloudflare_remediation_token and email_api_token are pre-populated and may remain empty unless those features are enabled; "
+            "keep the generated admin credentials unchanged unless intentionally rotating them."
+        )
+        secrets.edit_encrypted(
+            config.offline_recovery_recipient,
+            paths=runtime.Paths().secret_paths(),
+        )
+
+    config = runtime.load_config()
+    if config.smtp_host == "smtp.invalid":
+        raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")
+    secrets.validate_encrypted(
+        config.offline_recovery_recipient,
+        paths=runtime.Paths().secret_paths(),
+    )
+    ui.ok("External runtime config and required SOPS credentials validate before recovery-kit publication.")
+
+
+def _print_post_handoff_next_actions() -> None:
+    ui = _ui()
+    ui.header("Next actions")
+    ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
+    ui.action("run: sudo vwctl secrets validate")
+    ui.action("run: sudo vwctl doctor")
+    ui.action("when doctor is ready, run: sudo vwctl start")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    ui = _ui()
     if args[:1] == ["recovery-kit"]:
         return recovery_ux.main(args)
     if not _confirm_use_latest(args):
-        print("ACTION setup cancelled before installation changes", file=sys.stderr)
+        ui.action("setup cancelled before installation changes", file=sys.stderr)
         return 2
     if not _should_generate(args):
         return setup.main(args)
@@ -129,44 +190,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace: Path | None = None
     identity: Path | None = None
     try:
-        print("\n== Offline recovery custody ==")
-        print("INFO Generating the separate offline Age identity in root-only volatile /run storage.")
-        print("INFO Its public recipient will be configured on the server; the private identity will only enter the encrypted recovery kit.")
-        workspace, identity, recipient = _generate_offline_identity()
-        code = setup.main([*args, "--offline-recipient", recipient])
-        if code != 0:
-            print(
-                f"ACTION Setup did not complete. The generated offline identity remains temporarily at {identity}; "
-                "secure it before reboot if config/secrets were already written.",
-                file=sys.stderr,
-            )
-            return code
+        def provide_offline_recipient() -> str:
+            nonlocal workspace, identity
+            ui.info("Generating the separate offline Age identity in root-only volatile /run storage.")
+            ui.info("Its public recipient will be configured on the server; the private identity will only enter the encrypted recovery kit.")
+            workspace, identity, recipient = _generate_offline_identity()
+            return recipient
 
-        print("\n== Initial credential recovery-kit handoff ==")
+        code = setup.main(
+            args,
+            offline_recipient_factory=provide_offline_recipient,
+            defer_next_actions=True,
+        )
+        if code != 0:
+            if identity is not None and identity.exists():
+                ui.action(
+                    f"Setup did not complete. The generated offline identity remains temporarily at {identity}; "
+                    "secure it before reboot if config/secrets were already written.",
+                    file=sys.stderr,
+                )
+            return code
+        if workspace is None or identity is None:
+            raise SetupFrontendError("setup completed without producing the requested offline recovery identity")
+
+        _complete_external_credentials_before_handoff()
+        ui.header("Initial credential recovery-kit handoff")
         result = recovery_ux.export_recovery_kit(identity)
-        print(f"PASS Verified complete recovery kit: {result.archive}")
+        ui.ok(f"Verified complete recovery kit: {result.archive}")
         _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():
             raise SetupFrontendError("offline identity remained in volatile server state after successful recovery-kit handoff")
-        print("PASS Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
-        print("ACTION Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
+        ui.ok("Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
+        ui.action("Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
+        _print_post_handoff_next_actions()
         return 0
     except (
         SetupFrontendError,
         notification.NotificationError,
         recovery_ux.RecoveryUXError,
+        runtime.RuntimeConfigError,
         secrets.SecretsError,
         sevenzip_secure.SevenZipError,
         OSError,
     ) as exc:
-        print(f"FAIL: initial recovery custody handoff failed: {exc}", file=sys.stderr)
+        ui.fail(f"initial recovery custody handoff failed: {exc}", file=sys.stderr)
         if identity is not None and identity.exists():
-            print(
-                f"ACTION The offline private identity remains only in volatile root-only storage at {identity}; "
+            ui.action(
+                f"The offline private identity remains only in volatile root-only storage at {identity}; "
                 "secure it before reboot, then retry recovery-kit export.",
                 file=sys.stderr,
             )
+            if setup.CONFIG.exists() and setup.ENCRYPTED.exists():
+                ui.action("Complete external credentials with: sudo vwctl config edit && sudo vwctl secrets edit", file=sys.stderr)
+                ui.action(
+                    f"Then export the complete kit with: sudo vwctl recovery-kit export --offline-identity {identity}",
+                    file=sys.stderr,
+                )
+                ui.action(
+                    f"Remove {identity.parent} only after the verified kit is in off-host custody.",
+                    file=sys.stderr,
+                )
         return 1
 
 

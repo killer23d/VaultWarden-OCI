@@ -82,6 +82,20 @@ class StorageContractTests(unittest.TestCase):
         with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value="ext4"), mock.patch.object(storage, "_signature_types", return_value={"ext4", "crypto_LUKS"}):
             with self.assertRaisesRegex(storage.StorageError, "mixed/unknown"): storage.provision("/dev/vdb", acknowledge_existing=True, runner=lambda argv: result(argv, "disk\n"))
 
+    def test_signature_scan_uses_read_only_wipefs_listing_mode(self) -> None:
+        seen: list[tuple[str, ...]] = []
+        def runner(argv):
+            seen.append(tuple(argv))
+            return result(argv, "ext4\n")
+        self.assertEqual(storage._signature_types("/dev/vdb", runner=runner), {"ext4"})
+        self.assertEqual(seen, [("wipefs", "--noheadings", "--output", "TYPE", "/dev/vdb")])
+        self.assertNotIn("--all", seen[0])
+
+    def test_signature_scan_surfaces_wipefs_failure_detail(self) -> None:
+        error = "wipefs: mutually exclusive arguments: --output --all --offset"
+        with self.assertRaisesRegex(storage.StorageError, "mutually exclusive arguments"):
+            storage._signature_types("/dev/vdb", runner=lambda argv: result(argv, rc=1, stderr=error))
+
     def test_auto_does_not_guess_storage(self) -> None:
         args = Namespace(data_mount=str(storage.STATE_ROOT), data_device=None, auto=True)
         with self.assertRaisesRegex(setup.SetupError, "requires --data-device"): setup._select_storage(args, setup.UI(color=False))

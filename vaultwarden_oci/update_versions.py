@@ -22,9 +22,9 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RELEASE_URLS = {
     "vaultwarden": "https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest",
     "caddy": "https://api.github.com/repos/caddyserver/caddy/releases/latest",
-    "caddy_dns_cloudflare": "https://api.github.com/repos/caddy-dns/cloudflare/releases/latest",
 }
 _TAG_URLS = {
+    "caddy_dns_cloudflare": "https://api.github.com/repos/caddy-dns/cloudflare/tags?per_page=1",
     "caddy_combine_ip_ranges": "https://api.github.com/repos/fvbommel/caddy-combine-ip-ranges/tags?per_page=1",
     "caddy_ratelimit": "https://api.github.com/repos/mholt/caddy-ratelimit/tags?per_page=1",
 }
@@ -155,6 +155,9 @@ class RemoteLookup:
         self._get_json = get_json
 
     def latest_release(self, component: str) -> str:
+        # caddy-dns/cloudflare publishes version tags but no GitHub Releases.
+        if component == "caddy_dns_cloudflare":
+            return self.latest_ref(component)
         try:
             url = _RELEASE_URLS[component]
         except KeyError as exc:

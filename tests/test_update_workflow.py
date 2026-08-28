@@ -193,6 +193,22 @@ class VersionResolutionTests(unittest.TestCase):
         self.assertIn("registry-1.docker.io/v2/library/caddy/manifests/9.9.9-alpine", calls[2][0])
         self.assertIn("Authorization", calls[2][1])
 
+    def test_cloudflare_dns_latest_uses_tag_endpoint_not_release_endpoint(self) -> None:
+        calls: list[str] = []
+
+        def get_json(url: str, headers=None):
+            del headers
+            calls.append(url)
+            return [{"name": "v0.2.4"}]
+
+        lookup = update_versions.RemoteLookup(get_json=get_json)
+        self.assertEqual(lookup.latest_release("caddy_dns_cloudflare"), "v0.2.4")
+        self.assertEqual(
+            calls,
+            ["https://api.github.com/repos/caddy-dns/cloudflare/tags?per_page=1"],
+        )
+        self.assertNotIn("/releases/latest", calls[0])
+
 
 class UpdateTransactionTests(unittest.TestCase):
     def _source(self, parent: Path, name: str, version: str, *, baseline_manifest: bool = False) -> Path:

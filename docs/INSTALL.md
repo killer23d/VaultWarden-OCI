@@ -13,6 +13,8 @@ lsblk -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL
 
 For fully headless noninteractive setup, create an offline Age identity on a trusted separate workstation and keep its private key off the appliance. Pass only its `age1...` public recipient to setup. When `--auto` is run from an interactive terminal and no `--offline-recipient` is supplied, setup instead generates the offline identity transiently and hands it off through the verified encrypted recovery kit after installation. If `--offline-recipient` is supplied, that explicit recipient is authoritative and setup does not generate a replacement.
 
+On a clean Ubuntu host, terminal-generated custody does not assume `age-keygen` is already installed. Before generating the transient offline identity, setup bootstraps and verifies the Ubuntu `age` package through the setup dependency owner. This prerequisite happens before the offline private identity is created and before dedicated-storage provisioning; if the Age bootstrap fails, setup stops without generating custody material or formatting/adopting the data device.
+
 **Expected success:** a clearly separate candidate volume is visible. **On failure:** attach or correct dedicated storage before continuing; do not create application state on `/`.
 
 ## What `--domain`, `--url`, and `--email` mean
@@ -22,6 +24,19 @@ For fully headless noninteractive setup, create an offline Age identity on a tru
 - `--email` is the administrator/ACME contact written to `[site].acme_email`. Setup also prepopulates `smtp.from_email` as `vaultwarden@<resolved-site-host>`.
 
 Setup creates the operator config skeleton, operational Age identity, encrypted SOPS document, immutable installed release, storage identity/marker, and systemd storage guard. It does not invent external SMTP, Cloudflare, notification-provider, or rclone credentials.
+
+## Prepare Cloudflare credentials
+
+Create Cloudflare credentials before starting an interactive first-run so the values are ready when the validated SOPS editor opens. The appliance exposes the field names; it never invents external API-token values.
+
+Use **two separate Cloudflare user API tokens**:
+
+- `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
+- `cloudflare_remediation_token` is used only when CrowdSec Cloudflare remediation is enabled. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions.
+
+Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
+
+See [Cloudflare tokens](CLOUDFLARE-TOKENS.md) for the current Cloudflare dashboard steps, exact permission tables, resource scoping, and token-storage guidance.
 
 ## Interactive blank-VM install
 
@@ -36,7 +51,7 @@ sudo ./setup.sh install \
 
 Interactive setup lists plausible non-boot devices with size/filesystem/mount/model. Adopting an existing ext4/xfs filesystem requires explicit acknowledgement. Formatting a blank device requires an independent confirmation. If no acceptable separate volume exists, setup exits instead of falling back to root storage.
 
-When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage, creates and verifies a complete encrypted recovery-kit ZIP, and removes the transient identity only after authenticated email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.
+When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.
 
 **Expected success:** setup ends in `PASS` with a dedicated mounted/identified volume and an explicit external-config/recovery-custody checkpoint. **On failure:** follow the displayed `ACTION`; if setup says a transient offline identity remains, secure it before reboot, correct the cause, and rerun the same command.
 
@@ -44,7 +59,7 @@ When no `--offline-recipient` is supplied in an interactive TTY, setup generates
 
 `--auto` automates install decisions that were supplied explicitly; it never guesses storage, never implies format/adoption consent, and does not imply `--use-latest`. It does not necessarily mean that no human is present for recovery custody.
 
-When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
+When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but external credentials are still human-supplied through the validated editors before recovery-kit publication; the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
 
 Terminal-driven automatic install with setup-generated offline recovery custody:
 
@@ -114,7 +129,21 @@ sudo vwctl secrets edit
 sudo vwctl secrets validate
 ```
 
-Complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
+For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
+
+A fresh encrypted secrets document exposes the complete first-run field map:
+
+```yaml
+cloudflare_api_token: ""
+cloudflare_remediation_token: ""
+smtp_username: ""
+smtp_password: ""
+email_api_token: ""
+vaultwarden_admin_token: <generated>
+admin_basic_auth_password: <generated>
+```
+
+The first three normal first-run requirements are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` may remain empty until CrowdSec Cloudflare remediation is enabled. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
 
 **Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
