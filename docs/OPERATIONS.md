@@ -101,7 +101,7 @@ sudo vwctl doctor --json
 
 ## CrowdSec and Cloudflare remediation
 
-The supported CrowdSec path restores the useful V1 detection breadth without restoring its competing Docker-firewall ownership. `vwctl crowdsec setup` installs and manages:
+The supported CrowdSec path restores the useful earlier-product detection breadth without restoring its competing Docker-firewall ownership. `vwctl crowdsec setup` installs and manages:
 
 - the CrowdSec Security Engine;
 - `crowdsecurity/caddy`, `crowdsecurity/linux`, `crowdsecurity/iptables`, and `Dominic-Wagner/vaultwarden` Hub collections;
