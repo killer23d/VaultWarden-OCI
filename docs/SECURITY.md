@@ -18,7 +18,7 @@ Caddy is an exact-pinned xcaddy build with Cloudflare DNS, Cloudflare trusted-pr
 
 The host-level `DOCKER-USER` path is separate. It allows published HTTPS only from strictly validated Cloudflare IPv4/IPv6 sources, uses bounded last-known-good data, and fails closed if no safe policy exists. Never disable this filter merely to make an origin test work.
 
-CrowdSec is separate again: it reads proxied web-client activity and remediates decisions through Cloudflare. A CrowdSec host firewall bouncer is not part of the supported architecture.
+CrowdSec is separate again. It ingests the appliance-owned Caddy and Vaultwarden logs plus Ubuntu SSH and kernel/firewall signals. The Cloudflare Worker remediates locally generated proxied web-client decisions where the trusted real client IP is enforceable. A CrowdSec nftables firewall bouncer may consume broader CrowdSec/community/list decisions for host services, but it is constrained to the host `input` hook and must not claim Docker `forward` or `DOCKER-USER` ownership.
 
 ## `/admin`
 
@@ -38,7 +38,7 @@ Application updates stage exact immutable content, verify a pre-update recovery 
 
 ## Unsupported security-expanding designs
 
-Do not add a second firewall backend, host CrowdSec bouncer, enterprise identity stack, arbitrary notification scripting, KMS/provider framework, dynamic plugin framework, Postfix/queue, generic repair engine, HA/Kubernetes layer, or compatibility reader for an earlier archive format without an explicit new product decision.
+Do not add another Docker firewall owner, give the CrowdSec firewall bouncer `forward`/`DOCKER-USER` ownership, add an enterprise identity stack, arbitrary notification scripting, KMS/provider framework, dynamic plugin framework, Postfix/queue, generic repair engine, HA/Kubernetes layer, or compatibility reader for an earlier archive format without an explicit new product decision.
 
 After security or credential changes:
 
