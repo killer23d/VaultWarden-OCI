@@ -361,7 +361,9 @@ timeout_seconds = 15
             self.assertNotIn("DOCKER-USER", firewall_text)
             self.assertTrue((acquisition_parent / "vaultwarden.log").exists())
             self.assertTrue((acquisition_parent / "vaultwarden-logrotate").exists())
-            self.assertEqual(stat_mode(acquisition_parent), 0o755)
+            # This test layout deliberately colocates the synthetic Vaultwarden log
+            # under acquis.d; production uses /var/lib/vaultwarden-oci/vaultwarden/log.
+            self.assertEqual(stat_mode(acquisition_parent), 0o700)
             self.assertEqual(stat_mode(dropin_parent), 0o755)
 
 
