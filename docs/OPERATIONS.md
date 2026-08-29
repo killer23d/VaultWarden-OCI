@@ -136,7 +136,7 @@ sudo vwctl crowdsec decisions
 sudo vwctl crowdsec unban 203.0.113.7
 ```
 
-`cloudflare_remediation_token` must carry the Worker/KV and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the local Cloudflare Worker LAPI credential. The packaged firewall bouncer keeps its own local LAPI credential in its package-owned base configuration; VaultWarden-OCI writes only a `.yaml.local` policy override so package upgrades can retain credential ownership.
+`cloudflare_remediation_token` must carry the Worker/KV and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the Cloudflare Worker's local LAPI credential. For the host firewall bouncer, `vwctl crowdsec setup` creates a separate `vaultwarden-oci-firewall` LAPI credential only after the CrowdSec engine is healthy and writes that key plus the loopback LAPI URL into the root-only `.yaml.local` override. The package-owned base firewall-bouncer config remains unchanged, so package upgrades retain ownership of package defaults while the appliance owns its narrow credential/policy override.
 
 **Expected success:** engine, required Hub collections, host-input firewall remediation, and explicitly armed Cloudflare remediation all report healthy state. **On failure:** inspect the named CrowdSec doctor check, `systemctl status crowdsec.service`, `systemctl status crowdsec-firewall-bouncer.service`, and the Cloudflare Worker service before changing firewall policy. Never add the CrowdSec firewall bouncer to Docker `FORWARD`/`DOCKER-USER` to make a check green.
 
