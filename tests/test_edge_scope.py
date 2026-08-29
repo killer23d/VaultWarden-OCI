@@ -43,7 +43,7 @@ source: file
 
 
 class CrowdSecScopeTests(unittest.TestCase):
-    def test_setup_disables_service_discovery_and_leaves_bouncer_boot_disabled(self) -> None:
+    def test_setup_disables_discovery_keeps_worker_boot_disabled_and_bounds_firewall_to_host(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = edge_paths(root)
@@ -61,10 +61,12 @@ class CrowdSecScopeTests(unittest.TestCase):
                 edge.setup_crowdsec(paths=paths, runner=runner)
 
             argv_calls = [call for call, _ in calls]
-            install_index = argv_calls.index(
-                ("apt-get", "install", "-y", "crowdsec", "crowdsec-cloudflare-worker-bouncer")
-            )
+            install_call = next(call for call in argv_calls if call[:3] == ("apt-get", "install", "-y"))
+            install_index = argv_calls.index(install_call)
             self.assertEqual(calls[install_index][1].get("CROWDSEC_SETUP_UNATTENDED_DISABLE"), "1")
+            self.assertIn("crowdsec", install_call)
+            self.assertIn("crowdsec-cloudflare-worker-bouncer", install_call)
+            self.assertIn("crowdsec-firewall-bouncer-nftables", install_call)
             self.assertIn(
                 ("systemctl", "disable", "--now", edge.BOUNCER_SERVICE),
                 argv_calls,
@@ -74,12 +76,18 @@ class CrowdSecScopeTests(unittest.TestCase):
                 argv_calls,
             )
             self.assertIn(
-                ("cscli", "collections", "install", "crowdsecurity/caddy"),
+                ("systemctl", "enable", "--now", edge.FIREWALL_BOUNCER_SERVICE),
                 argv_calls,
             )
+            for collection in edge.CROWDSEC_COLLECTIONS:
+                self.assertIn(("cscli", "collections", "install", collection), argv_calls)
             self.assertTrue(paths.acquisition.exists())
-            self.assertEqual(paths.acquisition.parent.stat().st_mode & 0o777, 0o755)
-            self.assertFalse(any("firewall-bouncer" in " ".join(call) for call in argv_calls))
+            firewall_local = paths.acquisition.parent / "crowdsec-firewall-bouncer.yaml.local"
+            self.assertTrue(firewall_local.exists())
+            policy = firewall_local.read_text(encoding="utf-8")
+            self.assertIn("nftables_hooks:\n  - input", policy)
+            self.assertNotIn("forward", policy.lower())
+            self.assertNotIn("DOCKER-USER", policy)
 
     def test_setup_removes_cscli_generated_acquisition_residue_before_scope_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
