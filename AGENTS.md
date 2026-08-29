@@ -32,7 +32,7 @@ For each task, use this order of authority:
 - Caddy remains an exact-pinned xcaddy custom build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare IP ranges, and Caddy rate limiting.
 - Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. Do not also generate a static trusted-proxy CIDR block in Caddy.
 - Host-level Cloudflare-only origin protection is separate: keep one small fail-closed Docker `DOCKER-USER` path allowing published HTTPS only from validated Cloudflare ranges.
-- CrowdSec remediates proxied web-client decisions through Cloudflare; no CrowdSec host firewall bouncer is required.
+- CrowdSec detects Caddy, Vaultwarden, SSH/Linux, and kernel/firewall abuse. Proxied real-client web decisions are remediated through Cloudflare. A separate nftables firewall bouncer may enforce broad/community decisions on host `INPUT` only; it must never claim Docker `FORWARD` or `DOCKER-USER` ownership.
 - Preserve lightweight `/admin` defense in depth: Vaultwarden admin token, Caddy-side rate limiting, and one simple outer authentication gate.
 - Vaultwarden application mail uses direct authenticated SMTP. Operational notification providers remain the closed source-controlled catalog.
 - CyberPersons current catalog behavior is authoritative unless official provider documentation is deliberately re-verified for a focused change: `503` is status-only retry/fallback eligible; `429` account-wide quota/rate-limit and `500 send_failed` are not transient by status alone.
