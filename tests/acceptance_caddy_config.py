@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vaultwarden_oci import runtime
+from vaultwarden_oci import runtime, update_candidate
 
 OFFLINE = "age1" + "q" * 58
 
@@ -94,8 +94,8 @@ def main() -> None:
         env_args = [
             "-e", "ACME_EMAIL=admin@example.net",
             "-e", "VAULTWARDEN_DOMAIN=vault.example.net",
-            "-e", "CLOUDFLARE_API_TOKEN=" + "A" * 40,
-            "-e", "ADMIN_BASIC_AUTH_HASH=$2a$14$abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUV123456789",
+            "-e", "CLOUDFLARE_API_TOKEN=" + update_candidate.CADDY_VALIDATION_API_TOKEN,
+            "-e", "ADMIN_BASIC_AUTH_HASH=" + update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH,
         ]
         run([
             "docker", "run", "--rm", *env_args,
