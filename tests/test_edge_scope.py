@@ -42,6 +42,19 @@ source: file
 '''
 
 
+def successful_setup_runner(calls=None):
+    def runner(argv, *, env=None, cwd=None):
+        if calls is not None:
+            calls.append((tuple(argv), dict(env or {})))
+        if tuple(argv[:4]) == ("cscli", "-oraw", "bouncers", "add"):
+            return result(argv, stdout="firewall-lapi-key\n")
+        if tuple(argv[:4]) == ("cscli", "config", "show", "-oraw"):
+            return result(argv, stdout="127.0.0.1:8080\n")
+        return result(argv)
+
+    return runner
+
+
 class CrowdSecScopeTests(unittest.TestCase):
     def test_setup_disables_discovery_keeps_worker_boot_disabled_and_bounds_firewall_to_host(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -53,12 +66,8 @@ class CrowdSecScopeTests(unittest.TestCase):
             installer.write_text("exit 0\n", encoding="utf-8")
             calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
-            def runner(argv, *, env=None, cwd=None):
-                calls.append((tuple(argv), dict(env or {})))
-                return result(argv)
-
             with mock.patch.object(edge, "_download_installer", return_value=installer):
-                edge.setup_crowdsec(paths=paths, runner=runner)
+                edge.setup_crowdsec(paths=paths, runner=successful_setup_runner(calls))
 
             argv_calls = [call for call, _ in calls]
             install_call = next(call for call in argv_calls if call[:3] == ("apt-get", "install", "-y"))
@@ -76,6 +85,10 @@ class CrowdSecScopeTests(unittest.TestCase):
                 argv_calls,
             )
             self.assertIn(
+                ("cscli", "-oraw", "bouncers", "add", edge.FIREWALL_BOUNCER_ID),
+                argv_calls,
+            )
+            self.assertIn(
                 ("systemctl", "enable", "--now", edge.FIREWALL_BOUNCER_SERVICE),
                 argv_calls,
             )
@@ -85,6 +98,8 @@ class CrowdSecScopeTests(unittest.TestCase):
             firewall_local = paths.acquisition.parent / "crowdsec-firewall-bouncer.yaml.local"
             self.assertTrue(firewall_local.exists())
             policy = firewall_local.read_text(encoding="utf-8")
+            self.assertIn('api_key: "firewall-lapi-key"', policy)
+            self.assertIn('api_url: "http://127.0.0.1:8080"', policy)
             self.assertIn("nftables_hooks:\n  - input", policy)
             self.assertNotIn("forward", policy.lower())
             self.assertNotIn("DOCKER-USER", policy)
@@ -103,11 +118,8 @@ class CrowdSecScopeTests(unittest.TestCase):
             installer = root / "installer.sh"
             installer.write_text("exit 0\n", encoding="utf-8")
 
-            def runner(argv, *, env=None, cwd=None):
-                return result(argv)
-
             with mock.patch.object(edge, "_download_installer", return_value=installer):
-                edge.setup_crowdsec(paths=paths, runner=runner)
+                edge.setup_crowdsec(paths=paths, runner=successful_setup_runner())
 
             self.assertTrue(paths.acquisition.exists())
             self.assertFalse(generated[0].exists())
