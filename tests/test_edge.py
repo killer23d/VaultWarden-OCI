@@ -222,7 +222,7 @@ class OriginPolicyTests(unittest.TestCase):
 
 
 class CrowdSecBoundaryTests(unittest.TestCase):
-    def test_v1_detection_coverage_is_restored_without_docker_firewall_ownership(self) -> None:
+    def test_earlier_product_detection_coverage_is_restored_without_docker_firewall_ownership(self) -> None:
         acquisition = edge.acquisition_text(
             Path("/logs/caddy.json"),
             Path("/logs/vaultwarden.log"),
