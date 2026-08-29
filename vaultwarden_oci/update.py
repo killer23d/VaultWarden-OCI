@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from . import cli, install
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned
+
+CURRENT_HEALTH_SETTLE_SECONDS = 65
+CURRENT_HEALTH_POLL_SECONDS = 2
 
 
 class RuntimeActivationError(UpdateError):
@@ -72,12 +76,23 @@ def _detail(result: cli.CommandResult) -> str:
     return result.stderr.strip() or result.stdout.strip() or result.kind
 
 
+def _transient_runtime_health(detail: str) -> bool:
+    """Recognize Docker's bounded post-pause/restart healthcheck recovery window."""
+    return "running (health=unhealthy)" in detail
+
+
 def _gate_current(layout: install.Layout, runner: Runner) -> None:
     target, _, _ = _current(layout)
     vwctl = layout.path(install.INSTALL_ROOT) / target / "vwctl"
-    status = runner([str(vwctl), "status"])
-    if not status.ok:
-        raise UpdateError(f"current runtime status is not safe for update: {_detail(status)}")
+    deadline = time.monotonic() + CURRENT_HEALTH_SETTLE_SECONDS
+    while True:
+        status = runner([str(vwctl), "status"])
+        if status.ok:
+            break
+        detail = _detail(status)
+        if not _transient_runtime_health(detail) or time.monotonic() >= deadline:
+            raise UpdateError(f"current runtime status is not safe for update: {detail}")
+        time.sleep(CURRENT_HEALTH_POLL_SECONDS)
     doctor = runner([str(vwctl), "doctor", "--json"])
     if not doctor.ok:
         raise UpdateError(f"current doctor gate failed: {_detail(doctor)}")
