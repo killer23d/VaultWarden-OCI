@@ -169,7 +169,7 @@ class OriginPolicyTests(unittest.TestCase):
             self.assertEqual(runner.guards, {"iptables", "ip6tables"})
             self.assertEqual(runner.jumps, set())
 
-    def test_caddy_render_uses_same_validated_policy_and_json_log(self) -> None:
+    def test_caddy_render_uses_trusted_client_ip_and_vaultwarden_security_log(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             versions = root / "versions.toml"
@@ -180,6 +180,7 @@ class OriginPolicyTests(unittest.TestCase):
                 caddy_data=root / "state/caddy/data",
                 caddy_config=root / "state/caddy/config",
                 caddy_log=root / "state/caddy/log",
+                vaultwarden_log=root / "state/vaultwarden/log",
                 run=root / "run",
                 transient=root / "run/transient",
                 lock=root / "run/lock",
@@ -198,7 +199,6 @@ class OriginPolicyTests(unittest.TestCase):
                 smtp_from_name="Vaultwarden",
                 smtp_timeout_seconds=15,
             )
-            policy = edge.validate_policy(V4, V6, fetched_at=1000, source="test")
             runtime.render(config, versions, paths, admin_enabled=True)
 
             caddyfile = paths.caddyfile.read_text(encoding="utf-8")
@@ -208,20 +208,39 @@ class OriginPolicyTests(unittest.TestCase):
             self.assertNotIn("173.245.48.0/20", caddyfile)
             self.assertNotIn("2400:cb00::/32", caddyfile)
             self.assertIn("client_ip_headers CF-Connecting-IP", caddyfile)
+            self.assertIn("header_up X-Real-IP {client_ip}", caddyfile)
             self.assertIn("key {client_ip}", caddyfile)
             self.assertIn("basic_auth", caddyfile)
             self.assertIn("output file /var/log/caddy/access.log", caddyfile)
             self.assertIn(str(paths.caddy_log_path) + ":/var/log/caddy", compose)
+            self.assertIn(str(paths.vaultwarden_log_path) + ":/var/log/vaultwarden", compose)
+            self.assertIn('LOG_FILE: "/var/log/vaultwarden/vaultwarden.log"', compose)
+            self.assertIn('LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"', compose)
+            self.assertIn('EXTENDED_LOGGING: "true"', compose)
             self.assertIn('ports: ["443:443/tcp"]', compose)
             self.assertIn('restart: "no"', compose)
 
 
 class CrowdSecBoundaryTests(unittest.TestCase):
-    def test_product_acquisition_and_remediation_config_are_narrow(self) -> None:
-        acquisition = edge.acquisition_text(Path("/logs/caddy.json"))
+    def test_v1_detection_coverage_is_restored_without_docker_firewall_ownership(self) -> None:
+        acquisition = edge.acquisition_text(
+            Path("/logs/caddy.json"),
+            Path("/logs/vaultwarden.log"),
+        )
+        self.assertIn("type: Vaultwarden", acquisition)
+        self.assertIn("/logs/vaultwarden.log", acquisition)
         self.assertIn("type: caddy", acquisition)
         self.assertIn("/logs/caddy.json", acquisition)
-        self.assertNotIn("sshd", acquisition)
+        self.assertIn('"_SYSTEMD_UNIT=ssh.service"', acquisition)
+        self.assertIn('"_TRANSPORT=kernel"', acquisition)
+        self.assertNotIn("sshd.service", acquisition)
+
+        firewall = edge.firewall_bouncer_local_text()
+        self.assertIn("mode: nftables", firewall)
+        self.assertIn("origins: []", firewall)
+        self.assertIn("nftables_hooks:\n  - input", firewall)
+        self.assertNotIn("forward", firewall.lower())
+        self.assertNotIn("DOCKER-USER", firewall)
 
         rendered = edge.remediation_config_text(
             lapi_key="local-lapi-key",
@@ -232,6 +251,7 @@ class CrowdSecBoundaryTests(unittest.TestCase):
         )
         self.assertIn('"vault.example.net/*"', rendered)
         self.assertIn("default_action: ban", rendered)
+        self.assertIn('only_include_decisions_from: ["cscli", "crowdsec"]', rendered)
         self.assertIn("enabled: false", rendered)
         self.assertNotIn("firewall", rendered.lower())
 
@@ -287,7 +307,7 @@ timeout_seconds = 15
             self.assertIn('lapi_url: "http://127.0.0.1:8080"', output.read_text(encoding="utf-8"))
             self.assertNotIn(TOKEN, " ".join(item for call in calls for item in call))
 
-    def test_setup_uses_only_engine_caddy_collection_and_cloudflare_worker_bouncer(self) -> None:
+    def test_setup_installs_bounded_dual_remediation_and_all_managed_collections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             acquisition_parent = root / "etc/crowdsec/acquis.d"
@@ -315,11 +335,32 @@ timeout_seconds = 15
                 edge.setup_crowdsec(paths=paths, runner=runner)
 
             flat = [" ".join(call) for call in calls]
-            self.assertTrue(any("apt-get install -y crowdsec crowdsec-cloudflare-worker-bouncer" in call for call in flat))
-            self.assertTrue(any("cscli collections install crowdsecurity/caddy" in call for call in flat))
-            self.assertFalse(any("firewall-bouncer" in call for call in flat))
+            install = next(call for call in flat if call.startswith("apt-get install -y"))
+            self.assertIn("crowdsec", install)
+            self.assertIn("crowdsec-cloudflare-worker-bouncer", install)
+            self.assertIn("crowdsec-firewall-bouncer-nftables", install)
+            self.assertIn("logrotate", install)
+            self.assertIn("cscli hub update", flat)
+            for collection in edge.CROWDSEC_COLLECTIONS:
+                self.assertIn(f"cscli collections install {collection}", flat)
+            self.assertIn(
+                f"systemctl enable --now {edge.FIREWALL_BOUNCER_SERVICE}",
+                flat,
+            )
+            self.assertTrue(any(
+                call.startswith(f"{edge.FIREWALL_BOUNCER_BINARY} -c ") and call.endswith(" -t")
+                for call in flat
+            ))
             self.assertTrue(paths.acquisition.exists())
             self.assertTrue(paths.bouncer_dropin.exists())
+            firewall_local = acquisition_parent / "crowdsec-firewall-bouncer.yaml.local"
+            self.assertTrue(firewall_local.exists())
+            firewall_text = firewall_local.read_text(encoding="utf-8")
+            self.assertIn("nftables_hooks:\n  - input", firewall_text)
+            self.assertNotIn("forward", firewall_text.lower())
+            self.assertNotIn("DOCKER-USER", firewall_text)
+            self.assertTrue((acquisition_parent / "vaultwarden.log").exists())
+            self.assertTrue((acquisition_parent / "vaultwarden-logrotate").exists())
             self.assertEqual(stat_mode(acquisition_parent), 0o755)
             self.assertEqual(stat_mode(dropin_parent), 0o755)
 
