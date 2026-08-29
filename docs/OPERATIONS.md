@@ -101,15 +101,44 @@ sudo vwctl doctor --json
 
 ## CrowdSec and Cloudflare remediation
 
+The supported CrowdSec path restores the useful V1 detection breadth without restoring its competing Docker-firewall ownership. `vwctl crowdsec setup` installs and manages:
+
+- the CrowdSec Security Engine;
+- `crowdsecurity/caddy`, `crowdsecurity/linux`, `crowdsecurity/iptables`, and `Dominic-Wagner/vaultwarden` Hub collections;
+- acquisition of Caddy access logs, Vaultwarden security logs, Ubuntu `ssh.service`, and kernel/firewall journal events;
+- the Cloudflare Worker bouncer for locally generated proxied web decisions;
+- the nftables firewall bouncer for broad/community/list decisions on **host INPUT only**.
+
+The firewall bouncer is intentionally constrained to the nftables `input` hook. It must not own Docker `forward` or `DOCKER-USER`; the existing Cloudflare-only origin filter remains the single owner of published container ingress.
+
+First setup or a deliberate reconfiguration is:
+
+```bash
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec status
+sudo vwctl crowdsec remediation-start
+```
+
+`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
+
+```bash
+sudo vwctl crowdsec confirm-fail-open
+sudo vwctl crowdsec status
+```
+
+A healthy final state has four CrowdSec doctor checks: `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, and `crowdsec.cloudflare`, all `PASS`. The firewall bouncer should be active/enabled; the Cloudflare Worker should be active for the current explicit invocation but remain disabled at boot.
+
+Normal day-2 commands remain:
+
 ```bash
 sudo vwctl crowdsec status
 sudo vwctl crowdsec decisions
 sudo vwctl crowdsec unban 203.0.113.7
 ```
 
-CrowdSec consumes Caddy web logs and remediates proxied clients through Cloudflare. It does not need a host firewall bouncer; the `DOCKER-USER` source filter is a separate control. When remediation is enabled, `cloudflare_remediation_token` must carry the Worker/KV/Turnstile and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the local CrowdSec LAPI bouncer credential; those are not operator-supplied secrets.
+`cloudflare_remediation_token` must carry the Worker/KV and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the local Cloudflare Worker LAPI credential. The packaged firewall bouncer keeps its own local LAPI credential in its package-owned base configuration; VaultWarden-OCI writes only a `.yaml.local` policy override so package upgrades can retain credential ownership.
 
-**Expected success:** engine and Cloudflare remediation report healthy state. **On failure:** inspect CrowdSec service state and Cloudflare credentials/config before changing host firewall rules.
+**Expected success:** engine, required Hub collections, host-input firewall remediation, and explicitly armed Cloudflare remediation all report healthy state. **On failure:** inspect the named CrowdSec doctor check, `systemctl status crowdsec.service`, `systemctl status crowdsec-firewall-bouncer.service`, and the Cloudflare Worker service before changing firewall policy. Never add the CrowdSec firewall bouncer to Docker `FORWARD`/`DOCKER-USER` to make a check green.
 
 ## Notifications and email tests
 
@@ -146,7 +175,7 @@ sudo vwctl update check
 sudo vwctl update apply
 ```
 
-The updater discovers/stages exact immutable content before downtime where practical, verifies a pre-update `.vwrec`, activates the immutable release, and health-gates it. If candidate runtime activation may have changed persistent state, it refuses to pretend a binary-only rollback restored data; the verified pre-update recovery point is the downgrade boundary.
+The updater discovers/stages exact immutable content before downtime where practical, verifies a pre-update `.vwrec`, activates the immutable release, and health-gates it. A recovery snapshot briefly pauses/unpauses the running containers for consistency; the updater allows only a bounded Docker-health recovery window afterward. Unrelated failures still fail closed immediately. If candidate runtime activation may have changed persistent state, it refuses to pretend a binary-only rollback restored data; the verified pre-update recovery point is the downgrade boundary.
 
 Explicit current-upstream discovery:
 
@@ -176,6 +205,7 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 
 - **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
 - **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
+- **CrowdSec FAIL:** inspect the exact `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, or `crowdsec.cloudflare` check. Keep the firewall bouncer host-INPUT-only and the Worker Fail Open confirmation tied to its current explicit invocation.
 - **Secrets FAIL:** use `sudo vwctl secrets validate`/`edit`; do not copy decrypted YAML into files or shell history.
 - **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
 - **Recovery stale/missing:** create and verify a new recovery point before depending on it.
@@ -192,6 +222,9 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 | Operational Age private identity | `/etc/vaultwarden-oci/age-key.txt` (root-only) |
 | Expected storage identity | `/etc/vaultwarden-oci/storage-identity.json` |
 | Dedicated persistent data mount | `/var/lib/vaultwarden-oci` |
+| Vaultwarden CrowdSec security log | `/var/lib/vaultwarden-oci/vaultwarden/log/vaultwarden.log` |
+| Project CrowdSec acquisition | `/etc/crowdsec/acquis.d/vaultwarden-oci.yaml` |
+| CrowdSec firewall policy override | `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local` |
 | Local `.vwrec` recovery points | `/var/lib/vaultwarden-oci/backups` |
 | Volatile rendered/decrypted state | `/run/vaultwarden-oci` |
 | Immutable installed releases | `/opt/vaultwarden-oci/releases/<version>` |
