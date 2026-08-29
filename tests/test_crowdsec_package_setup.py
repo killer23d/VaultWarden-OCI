@@ -56,6 +56,10 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
                     self.assertIsNotNone(env)
                     self.assertEqual(env["DEBIAN_FRONTEND"], "noninteractive")
                     self.assertEqual(env["CROWDSEC_SETUP_UNATTENDED_DISABLE"], "1")
+                if call[:4] == ("cscli", "-oraw", "bouncers", "add"):
+                    return result(argv, stdout="firewall-lapi-key\n")
+                if call[:4] == ("cscli", "config", "show", "-oraw"):
+                    return result(argv, stdout="127.0.0.1:8080\n")
                 return result(argv)
 
             with mock.patch.object(edge, "_download_installer", return_value=installer):
@@ -66,6 +70,10 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
             install_index = next(i for i, call in enumerate(commands) if call[:3] == ("apt-get", "install", "-y"))
             disable_index = commands.index(("systemctl", "disable", "--now", edge.BOUNCER_SERVICE))
             self.assertLess(install_index, disable_index)
+            self.assertIn(
+                ("cscli", "-oraw", "bouncers", "add", edge.FIREWALL_BOUNCER_ID),
+                commands,
+            )
             self.assertTrue(paths.acquisition.is_file())
             self.assertTrue(paths.bouncer_dropin.is_file())
 
