@@ -34,6 +34,7 @@ BRIDGE_IFACE = "vwoci0"
 BOUNCER_ID = "vaultwarden-oci-cloudflare"
 BOUNCER_SERVICE = "crowdsec-cloudflare-worker-bouncer.service"
 BOUNCER_BINARY = "/usr/bin/crowdsec-cloudflare-worker-bouncer"
+FIREWALL_BOUNCER_ID = "vaultwarden-oci-firewall"
 FIREWALL_BOUNCER_SERVICE = "crowdsec-firewall-bouncer.service"
 FIREWALL_BOUNCER_BINARY = "crowdsec-firewall-bouncer"
 FIREWALL_BOUNCER_CONFIG = Path("/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml")
@@ -495,10 +496,13 @@ labels:
 '''
 
 
-def firewall_bouncer_local_text() -> str:
-    """Restrict the firewall bouncer to host INPUT; Docker forwarding stays project-owned."""
-    return '''# Managed by VaultWarden-OCI. Merged over the package-owned base config.
+def firewall_bouncer_local_text(*, api_key: str, lapi_url: str) -> str:
+    """Restrict the firewall bouncer to host INPUT with a project-owned LAPI key."""
+    q = json.dumps
+    return f'''# Managed by VaultWarden-OCI. Merged over the package-owned base config.
 mode: nftables
+api_url: {q(lapi_url)}
+api_key: {q(api_key)}
 origins: []
 disable_ipv4: false
 disable_ipv6: false
@@ -695,6 +699,45 @@ def _suppress_package_service_starts(path: Path) -> Iterator[None]:
                 raise EdgeError(f"cannot remove temporary package service policy {path}: {exc}") from exc
 
 
+def _create_lapi_bouncer_key(runner: Runner, bouncer_id: str, label: str) -> str:
+    runner(["cscli", "bouncers", "delete", bouncer_id, "--ignore-missing"])
+    created = runner(["cscli", "-oraw", "bouncers", "add", bouncer_id])
+    key = created.stdout.strip() if created.ok else ""
+    if not key or any(char.isspace() for char in key):
+        raise EdgeError(f"cannot create CrowdSec LAPI credential for {label}")
+    return key
+
+
+def _local_lapi_url(runner: Runner) -> str:
+    result = runner(["cscli", "config", "show", "-oraw", "--key", "Config.API.Server.ListenURI"])
+    raw = result.stdout.strip() if result.ok else ""
+    if not raw:
+        return DEFAULT_LAPI_URL
+    if raw.startswith(":"):
+        raw = "127.0.0.1" + raw
+    candidate = raw if "://" in raw else "http://" + raw
+    parsed = urllib.parse.urlparse(candidate)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise EdgeError("CrowdSec local API listen address is invalid") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise EdgeError("CrowdSec local API must listen on a local loopback address")
+    host = f"[{parsed.hostname}]" if parsed.hostname == "::1" else parsed.hostname
+    return f"{parsed.scheme}://{host}:{port}"
+
+
 def setup_crowdsec(
     *,
     paths: EdgePaths = EdgePaths(),
@@ -755,7 +798,6 @@ def setup_crowdsec(
         acquisition_text(paths.caddy_log, vaultwarden_log),
         0o600,
     )
-    _write_root_file(_firewall_local_path(paths), firewall_bouncer_local_text(), 0o600)
     _write_root_file(_logrotate_path(paths), vaultwarden_logrotate_text(vaultwarden_log), 0o644)
     _write_root_file(paths.bouncer_dropin, bouncer_dropin_text(paths.remediation_config), 0o644)
     _unlink_state(paths.remediation_start_token, "CrowdSec remediation start token")
@@ -763,6 +805,12 @@ def setup_crowdsec(
     _command(runner, ["systemctl", "daemon-reload"], "systemd reload")
     _command(runner, ["systemctl", "enable", "--now", CROWDSEC_SERVICE], "CrowdSec enable/start")
     _command(runner, ["systemctl", "restart", CROWDSEC_SERVICE], "CrowdSec restart")
+    firewall_key = _create_lapi_bouncer_key(runner, FIREWALL_BOUNCER_ID, "host firewall remediation")
+    _write_root_file(
+        _firewall_local_path(paths),
+        firewall_bouncer_local_text(api_key=firewall_key, lapi_url=_local_lapi_url(runner)),
+        0o600,
+    )
     _command(
         runner,
         [FIREWALL_BOUNCER_BINARY, "-c", str(_firewall_config_path(paths)), "-t"],
@@ -843,36 +891,6 @@ def resolve_cloudflare_zone(domain: str, token: str) -> tuple[str, str]:
     raise EdgeError("Cloudflare remediation token cannot resolve the configured site zone")
 
 
-def _local_lapi_url(runner: Runner) -> str:
-    result = runner(["cscli", "config", "show", "-oraw", "--key", "Config.API.Server.ListenURI"])
-    raw = result.stdout.strip() if result.ok else ""
-    if not raw:
-        return DEFAULT_LAPI_URL
-    if raw.startswith(":"):
-        raw = "127.0.0.1" + raw
-    candidate = raw if "://" in raw else "http://" + raw
-    parsed = urllib.parse.urlparse(candidate)
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise EdgeError("CrowdSec local API listen address is invalid") from exc
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
-        or port is None
-        or not 1 <= port <= 65535
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise EdgeError("CrowdSec local API must listen on a local loopback address")
-    host = f"[{parsed.hostname}]" if parsed.hostname == "::1" else parsed.hostname
-    return f"{parsed.scheme}://{host}:{port}"
-
-
 def remediation_config_text(
     *,
     lapi_key: str,
@@ -944,11 +962,7 @@ def prepare_remediation(
     token = values.get("cloudflare_remediation_token")
     if not token:
         raise EdgeError("SOPS secrets require cloudflare_remediation_token for CrowdSec Cloudflare remediation")
-    runner(["cscli", "bouncers", "delete", BOUNCER_ID, "--ignore-missing"])
-    created = runner(["cscli", "-oraw", "bouncers", "add", BOUNCER_ID])
-    if not created.ok or not created.stdout.strip() or any(c.isspace() for c in created.stdout.strip()):
-        raise EdgeError("cannot create CrowdSec LAPI credential for Cloudflare remediation")
-    lapi_key = created.stdout.strip()
+    lapi_key = _create_lapi_bouncer_key(runner, BOUNCER_ID, "Cloudflare remediation")
     account_id, zone_id = resolve_cloudflare_zone(config.domain, token)
     lapi_url = _local_lapi_url(runner)
     try:
@@ -1207,17 +1221,19 @@ def doctor_checks(
 
     firewall_config = _firewall_config_path(paths)
     firewall_test = runner([FIREWALL_BOUNCER_BINARY, "-c", str(firewall_config), "-t"])
+    firewall_bouncer = runner(["cscli", "bouncers", "inspect", FIREWALL_BOUNCER_ID, "-o", "json"])
     firewall_ok = (
         _active(FIREWALL_BOUNCER_SERVICE, runner)
         and _enabled(FIREWALL_BOUNCER_SERVICE, runner)
         and firewall_test.ok
+        and firewall_bouncer.ok
     )
     checks.append(DoctorCheck(
         "crowdsec.firewall",
         "PASS" if firewall_ok else "FAIL",
         "CrowdSec firewall bouncer enforces broad decisions on host INPUT only"
         if firewall_ok
-        else "CrowdSec host-input firewall remediation is inactive, disabled, or invalid",
+        else "CrowdSec host-input firewall remediation service/config/LAPI state is unhealthy",
     ))
 
     active = _active(BOUNCER_SERVICE, runner)
