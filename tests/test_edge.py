@@ -235,8 +235,13 @@ class CrowdSecBoundaryTests(unittest.TestCase):
         self.assertIn('"_TRANSPORT=kernel"', acquisition)
         self.assertNotIn("sshd.service", acquisition)
 
-        firewall = edge.firewall_bouncer_local_text()
+        firewall = edge.firewall_bouncer_local_text(
+            api_key="firewall-lapi-key",
+            lapi_url="http://127.0.0.1:8080",
+        )
         self.assertIn("mode: nftables", firewall)
+        self.assertIn('api_url: "http://127.0.0.1:8080"', firewall)
+        self.assertIn('api_key: "firewall-lapi-key"', firewall)
         self.assertIn("origins: []", firewall)
         self.assertIn("nftables_hooks:\n  - input", firewall)
         self.assertNotIn("forward", firewall.lower())
@@ -254,6 +259,17 @@ class CrowdSecBoundaryTests(unittest.TestCase):
         self.assertIn('only_include_decisions_from: ["cscli", "crowdsec"]', rendered)
         self.assertIn("enabled: false", rendered)
         self.assertNotIn("firewall", rendered.lower())
+
+    def test_lapi_bouncer_key_requires_nonempty_output(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(argv, *, env=None, cwd=None):
+            calls.append(tuple(argv))
+            return result(argv)
+
+        with self.assertRaisesRegex(edge.EdgeError, "cannot create CrowdSec LAPI credential"):
+            edge._create_lapi_bouncer_key(runner, "test-bouncer", "test remediation")
+        self.assertEqual(calls[-1], ("cscli", "-oraw", "bouncers", "add", "test-bouncer"))
 
     def test_prepare_remediation_keeps_cloudflare_token_out_of_argv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -329,6 +345,10 @@ timeout_seconds = 15
 
             def runner(argv, *, env=None, cwd=None):
                 calls.append(tuple(argv))
+                if tuple(argv[:4]) == ("cscli", "-oraw", "bouncers", "add"):
+                    return result(argv, "firewall-lapi-key\n")
+                if tuple(argv[:4]) == ("cscli", "config", "show", "-oraw"):
+                    return result(argv, "127.0.0.1:8080\n")
                 return result(argv)
 
             with mock.patch.object(edge, "_download_installer", return_value=installer):
@@ -344,6 +364,10 @@ timeout_seconds = 15
             for collection in edge.CROWDSEC_COLLECTIONS:
                 self.assertIn(f"cscli collections install {collection}", flat)
             self.assertIn(
+                f"cscli -oraw bouncers add {edge.FIREWALL_BOUNCER_ID}",
+                flat,
+            )
+            self.assertIn(
                 f"systemctl enable --now {edge.FIREWALL_BOUNCER_SERVICE}",
                 flat,
             )
@@ -356,6 +380,8 @@ timeout_seconds = 15
             firewall_local = acquisition_parent / "crowdsec-firewall-bouncer.yaml.local"
             self.assertTrue(firewall_local.exists())
             firewall_text = firewall_local.read_text(encoding="utf-8")
+            self.assertIn('api_key: "firewall-lapi-key"', firewall_text)
+            self.assertIn('api_url: "http://127.0.0.1:8080"', firewall_text)
             self.assertIn("nftables_hooks:\n  - input", firewall_text)
             self.assertNotIn("forward", firewall_text.lower())
             self.assertNotIn("DOCKER-USER", firewall_text)
