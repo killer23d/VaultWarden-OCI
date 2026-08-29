@@ -22,6 +22,14 @@ PRESTART_FAILURE = 20
 POSTSTART_FAILURE = 21
 _MANIFEST = "candidate-render.json"
 
+# Non-secret sentinels for local Caddy provisioning validation.  Keep these
+# syntactically valid for the exact modules Caddy loads without using operator
+# credentials during candidate pre-stage.
+CADDY_VALIDATION_API_TOKEN = "A" * 40
+CADDY_VALIDATION_BASIC_AUTH_HASH = (
+    "$2a$14$abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUV123456789"
+)
+
 
 class CandidateActivationError(UpdateError):
     def __init__(self, message: str, *, state_change_possible: bool) -> None:
@@ -165,9 +173,9 @@ def prepare(
             "--env",
             f"ACME_EMAIL={config.acme_email}",
             "--env",
-            "CLOUDFLARE_API_TOKEN=validation-only",
+            f"CLOUDFLARE_API_TOKEN={CADDY_VALIDATION_API_TOKEN}",
             "--env",
-            "ADMIN_BASIC_AUTH_HASH=$2a$14$validationonlyvalidationonlyvalidationonlyvalidationonly",
+            f"ADMIN_BASIC_AUTH_HASH={CADDY_VALIDATION_BASIC_AUTH_HASH}",
             "--volume",
             f"{paths.caddyfile}:/etc/caddy/Caddyfile:ro",
             frozen.caddy_image,
