@@ -9,7 +9,7 @@ VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. 
 | Vaultwarden | Password-manager application and persistent vault data. |
 | Custom Caddy | TLS, reverse proxying, Cloudflare real-client-IP trust, rate limiting, and the outer `/admin` authentication gate. |
 | Cloudflare | Supported public edge and the only allowed public source for origin TCP/443. |
-| CrowdSec | Detects abusive web clients from Caddy logs and remediates them through Cloudflare. |
+| CrowdSec | Detects abuse across Caddy, Vaultwarden, SSH/Linux, and kernel/firewall signals; locally generated proxied web decisions are remediated through Cloudflare while broad/community decisions can protect host INPUT through the nftables firewall bouncer. |
 | SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
 | rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
 | systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers. |
@@ -19,7 +19,7 @@ VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. 
 Internet
    |
    v
-Cloudflare  <----- CrowdSec decisions/remediation
+Cloudflare  <----- local CrowdSec web decisions / Worker remediation
    |
    v
 host TCP/443 origin filter (Cloudflare sources only; fail closed)
@@ -29,9 +29,14 @@ custom Caddy (real client IP, TLS, rate limits, /admin outer auth)
    |
    v
 internal Vaultwarden
+
+Direct host services (for example SSH)
+   ^
+   |
+CrowdSec nftables bouncer (host INPUT only; broad/community decisions)
 ```
 
-Caddy's trusted-proxy logic, the host origin filter, and CrowdSec remediation are separate controls. The dashboard is also separate from backend ownership: it is a supported human interface, but every mutation delegates to `vwctl` and the existing Python owners.
+Caddy's trusted-proxy logic, the host origin filter, CrowdSec host-input remediation, and Cloudflare Worker remediation are separate controls. The firewall bouncer never owns Docker `FORWARD` or `DOCKER-USER`; published container ingress stays under the single Cloudflare-origin filter. The dashboard is also separate from backend ownership: it is a supported human interface, but every mutation delegates to `vwctl` and the existing Python owners.
 
 ## Start here
 
@@ -56,7 +61,7 @@ sudo vwctl status
 sudo vwctl doctor --json
 ```
 
-A doctor `FAIL` is not a successful installation.
+A doctor `FAIL` is not a successful installation. CrowdSec setup/remediation is an explicit first-run security step documented in [Operations](docs/OPERATIONS.md); Cloudflare Worker routes must be set to Fail Open before their invocation is confirmed.
 
 For normal day-2 work:
 
