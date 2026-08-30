@@ -41,10 +41,15 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 acme_email="admin@example.net",
                 offline_recovery_recipient="age1" + "q" * 58,
             )
+            transition_manifest: dict[str, object] = {}
 
             def runner(argv, **_kwargs):
                 calls.append(tuple(argv))
                 return result(argv)
+
+            def transition_probe(target_release, *, runner):
+                transition_manifest.update(update_candidate._load_manifest(render_root))
+                return False
 
             with (
                 mock.patch.object(update_candidate, "resolve_pinned_file", return_value=frozen),
@@ -65,7 +70,7 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 mock.patch.object(
                     update_candidate.predecessor_transition,
                     "apply_if_required",
-                    return_value=False,
+                    side_effect=transition_probe,
                 ) as transition,
             ):
                 update_candidate.prepare(versions, render_root, runner=runner)
@@ -93,6 +98,9 @@ class CandidateCaddyValidationTests(unittest.TestCase):
         self.assertEqual(len(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH), 60)
         self.assertTrue(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH.startswith("$2a$14$"))
         transition.assert_called_once_with(frozen.project_version, runner=runner)
+        self.assertEqual(transition_manifest["project_version"], frozen.project_version)
+        self.assertEqual(transition_manifest["caddy_image"], frozen.caddy_image)
+        self.assertEqual(transition_manifest["render_sha256"], "d" * 64)
 
     def test_activate_materializes_admin_phc_without_mutating_sops_source_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
