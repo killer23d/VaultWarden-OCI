@@ -181,6 +181,8 @@ The updater discovers/stages exact immutable content before downtime where pract
 
 An update that changes the Cloudflare Worker decision-source contract may deliberately stop **before** creating the recovery point. In that case the candidate re-arms the Worker under the required local-only policy, invalidates the previous invocation's Fail Open confirmation, and prints an `ACTION` telling the operator to set every newly recreated Worker Route to **Fail Open** and run `sudo vwctl crowdsec confirm-fail-open`. After confirming the new invocation, rerun the **same installed `vwctl update apply` command**. Do not substitute a candidate checkout, run `crowdsec setup`, reuse the old Fail Open confirmation, or bypass this stop. The broader host CrowdSec package/Hub/acquisition/firewall transition is not allowed to occur until the rerun has created and verified the pre-update recovery point.
 
+An explicitly tested supported-predecessor transition may then install a host dependency required by the target appliance security/runtime contract. This is a narrow compatibility exception, not ordinary Ubuntu maintenance: it happens only after candidate prevalidation and verified recovery, does not include a kernel upgrade or reboot, and its host package/security-control changes are **forward-only state outside `.vwrec` rollback**. If later candidate activation fails and the application is coherently rolled back, the rollback restores application data, release selection, application systemd units, and update guard state; it does not uninstall or downgrade that compatibility dependency. Leave the retained host controls in place, require the predecessor to remain healthy with the Worker still local-only and Fail Open confirmed and the firewall still INPUT-only, then retry the same supported target update. Do not manually remove the dependency to make the host look like its pre-update package set.
+
 Explicit current-upstream discovery:
 
 ```bash
@@ -190,18 +192,18 @@ sudo vwctl update apply --use-latest
 
 `--use-latest` resolves supported mutable upstreams once to exact refs/digests and freezes them. It must never leave floating `latest` state. The update-check timer checks/notifies automatically; application **apply** remains operator-driven.
 
-**Expected success:** check reports a coherent candidate/no-update state; apply ends with exact active version plus healthy status/doctor. **On failure:** follow the updater's recovery/rollback message; do not manually point `current` at old code after possible persistent-state mutation.
+**Expected success:** check reports a coherent candidate/no-update state; apply ends with exact active version plus healthy status/doctor. **On failure:** follow the updater's recovery/rollback message; do not manually point `current` at old code after possible persistent-state mutation. If a supported compatibility dependency was already installed, do not manually remove it after application rollback; verify predecessor health and retry the supported target update.
 
 ## Ubuntu package updates and reboot-required state
 
-Host packages are deliberately separate:
+Routine host package maintenance is deliberately separate:
 
 ```bash
 sudo vwctl host-upgrade check
 sudo vwctl host-upgrade apply
 ```
 
-Application recovery does not roll back apt/kernel changes. The appliance never auto-reboots; dashboard/status surface `/var/run/reboot-required` and the administrator chooses when to reboot.
+The narrow supported-predecessor compatibility dependency described above does not turn application update into a general host-upgrade path. Application recovery does not roll back apt/kernel changes. The appliance never auto-reboots; dashboard/status surface `/var/run/reboot-required` and the administrator chooses when to reboot.
 
 **Expected success:** package outcome and reboot requirement are reported truthfully. **On failure:** use normal Ubuntu package diagnostics; do not use `.vwrec` as an apt rollback mechanism.
 
@@ -214,7 +216,7 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 - **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
 - **Recovery stale/missing:** create and verify a new recovery point before depending on it.
 - **Timer failure:** inspect `vwctl timers` plus the specific service journal.
-- **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary.
+- **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary. If a forward-only compatibility dependency was already installed, keep it in place, prove predecessor health, and retry the same supported target rather than attempting package rollback.
 - **Support diagnostics:** use `sudo vwctl support-bundle` and review it before sharing.
 
 ## Where things live
