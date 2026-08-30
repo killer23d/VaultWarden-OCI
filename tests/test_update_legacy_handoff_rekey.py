@@ -91,11 +91,8 @@ class LegacyHandoffRekeyTests(unittest.TestCase):
             versions = source / "versions.toml"
             versions.write_text(_legacy_frozen_versions(), encoding="utf-8")
 
-            corrected = update_versions.rekey_latest_frozen_source(
-                source,
-                versions,
-                machine="amd64",
-            )
+            real_rekey = update_versions.rekey_latest_frozen_source
+            corrected = real_rekey(source, versions, machine="amd64")
             self.assertNotEqual(corrected.project_version, _LEGACY_TARGET)
             corrected_controller = releases / corrected.project_version / "vwctl"
 
@@ -115,7 +112,7 @@ class LegacyHandoffRekeyTests(unittest.TestCase):
                 mock.patch.object(
                     update_controller_handoff.update_versions,
                     "rekey_latest_frozen_source",
-                    wraps=lambda source_root, versions_path: update_versions.rekey_latest_frozen_source(
+                    side_effect=lambda source_root, versions_path: real_rekey(
                         source_root,
                         versions_path,
                         machine="amd64",
