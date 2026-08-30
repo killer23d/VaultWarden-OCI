@@ -59,31 +59,6 @@ def nft_table(family: str, table: str) -> str:
     )
 
 
-def successful_runner(paths: edge.EdgePaths, calls):
-    firewall_local = paths.acquisition.parent / "crowdsec-firewall-bouncer.yaml.local"
-
-    def runner(argv, *, env=None, cwd=None):
-        call = tuple(argv)
-        calls.append((call, dict(env) if env is not None else None))
-        if call[:3] == ("apt-get", "install", "-y"):
-            self_text = firewall_local.read_text(encoding="utf-8")
-            if "nftables_hooks:\n  - input" not in self_text or "forward" in self_text.lower():
-                raise AssertionError("unsafe firewall bootstrap before apt")
-        if call[:4] == ("cscli", "-oraw", "bouncers", "add"):
-            return result(argv, stdout="firewall-lapi-key\n")
-        if call[:4] == ("cscli", "config", "show", "-oraw"):
-            return result(argv, stdout="127.0.0.1:8080\n")
-        if call and call[0] == edge.FIREWALL_BOUNCER_BINARY and call[-1:] == ("-T",):
-            return result(argv, stdout=firewall_local.read_text(encoding="utf-8"))
-        if call[:5] == ("nft", "--json", "list", "table", "ip"):
-            return result(argv, stdout=nft_table("ip", "crowdsec"))
-        if call[:5] == ("nft", "--json", "list", "table", "ip6"):
-            return result(argv, stdout=nft_table("ip6", "crowdsec6"))
-        return result(argv)
-
-    return runner
-
-
 class CrowdSecPackageSetupTests(unittest.TestCase):
     def test_package_install_has_preexisting_input_override_and_postapt_containment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -109,6 +84,7 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
                     self.assertIsNotNone(env)
                     self.assertEqual(env["DEBIAN_FRONTEND"], "noninteractive")
                     self.assertEqual(env["CROWDSEC_SETUP_UNATTENDED_DISABLE"], "1")
+                    self.assertEqual(env["SYSTEMD_OFFLINE"], "1")
                 if call[:4] == ("cscli", "-oraw", "bouncers", "add"):
                     return result(argv, stdout="firewall-lapi-key\n")
                 if call[:4] == ("cscli", "config", "show", "-oraw"):
@@ -127,10 +103,13 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
             self.assertFalse(policy.exists())
             commands = [call for call, _ in calls]
             install_index = next(i for i, call in enumerate(commands) if call[:3] == ("apt-get", "install", "-y"))
-            worker_disable = commands.index(("systemctl", "disable", "--now", edge.BOUNCER_SERVICE))
-            firewall_disable = commands.index(("systemctl", "disable", "--now", edge.FIREWALL_BOUNCER_SERVICE))
-            self.assertLess(install_index, worker_disable)
-            self.assertLess(install_index, firewall_disable)
+            for service in (
+                edge.CROWDSEC_SERVICE,
+                edge.BOUNCER_SERVICE,
+                edge.FIREWALL_BOUNCER_SERVICE,
+            ):
+                disable_index = commands.index(("systemctl", "disable", "--now", service))
+                self.assertLess(install_index, disable_index)
             self.assertIn(
                 ("cscli", "-oraw", "bouncers", "add", edge.FIREWALL_BOUNCER_ID),
                 commands,
@@ -160,8 +139,12 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
 
             self.assertEqual(policy.read_text(encoding="utf-8"), original)
             self.assertEqual(policy.stat().st_mode & 0o777, 0o755)
-            self.assertIn(("systemctl", "disable", "--now", edge.BOUNCER_SERVICE), calls)
-            self.assertIn(("systemctl", "disable", "--now", edge.FIREWALL_BOUNCER_SERVICE), calls)
+            for service in (
+                edge.CROWDSEC_SERVICE,
+                edge.BOUNCER_SERVICE,
+                edge.FIREWALL_BOUNCER_SERVICE,
+            ):
+                self.assertIn(("systemctl", "disable", "--now", service), calls)
 
     def test_apt_failure_keeps_input_override_and_contains_direct_postinst_enable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -182,6 +165,8 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
                     bootstrap = firewall_local.read_text(encoding="utf-8")
                     self.assertIn("nftables_hooks:\n  - input", bootstrap)
                     self.assertNotIn("forward", bootstrap.lower())
+                    self.assertIsNotNone(env)
+                    self.assertEqual(env["SYSTEMD_OFFLINE"], "1")
                     return result(
                         argv,
                         code=100,
@@ -202,8 +187,12 @@ class CrowdSecPackageSetupTests(unittest.TestCase):
 
             self.assertFalse(policy.exists())
             self.assertTrue(firewall_local.exists())
-            self.assertIn(("systemctl", "disable", "--now", edge.BOUNCER_SERVICE), calls)
-            self.assertIn(("systemctl", "disable", "--now", edge.FIREWALL_BOUNCER_SERVICE), calls)
+            for service in (
+                edge.CROWDSEC_SERVICE,
+                edge.BOUNCER_SERVICE,
+                edge.FIREWALL_BOUNCER_SERVICE,
+            ):
+                self.assertIn(("systemctl", "disable", "--now", service), calls)
 
 
 if __name__ == "__main__":
