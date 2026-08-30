@@ -116,7 +116,9 @@ def _release_edge_policy() -> Iterator[None]:
 
     original = edge.doctor_checks
 
-    def checked(*, paths=edge.EdgePaths(), runner=None, now=None):
+    # Preserve the mechanical owner's positional-compatible call shape. This is
+    # a read-model composition boundary, not a replacement API.
+    def checked(paths=edge.EdgePaths(), runner=None, now=None):
         effective_runner = cli.run_command if runner is None else runner
         checks = original(paths=paths, runner=effective_runner, now=now)
         return crowdsec_worker_policy.enforce_doctor_checks(
