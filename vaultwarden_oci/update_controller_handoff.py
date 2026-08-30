@@ -18,7 +18,8 @@ from . import cli, durability, install, update
 from .update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16"
-_TARGET = "0.1.0-dev.17"
+_TARGET = "0.1.0-dev.18"
+_SUPERSEDED_TARGET = "0.1.0-dev.17"
 _LATEST_MARKER = ".latest."
 _STATE = Path("/var/lib/vaultwarden-oci/state/update-controller-handoff.json")
 _SCHEMA_VERSION = 1
@@ -120,12 +121,66 @@ def _state_matches(
     return state == _payload(current_release, target_release, controller)
 
 
+def _recorded_controller(layout: install.Layout, state: dict[str, object]) -> Path:
+    release = str(state["target_release"])
+    recorded = Path(str(state["controller"]))
+    expected = _controller_path(layout, release)
+    if recorded != expected:
+        raise UpdateError("update-controller handoff state has an inconsistent controller path")
+    return recorded
+
+
+def _supersedable_state(
+    layout: install.Layout,
+    state: dict[str, object],
+    *,
+    current_release: str,
+    target_release: str,
+) -> Path | None:
+    """Recognize only the unselected dev.17 acceptance handoff superseded by dev.18.
+
+    The live arm64 run staged dev.17 code before discovering that root Python
+    bytecode could pollute a read-only release tree. Dev.17 was never selected
+    or released. A dev.16 host may therefore replace only that temporary
+    pre-recovery controller handoff with the corrected dev.18 target. The old
+    immutable directory is left untouched and unselected.
+    """
+    if (
+        str(state["predecessor_release"]) != current_release
+        or _base_release(current_release) != _PREDECESSOR
+        or _base_release(str(state["target_release"])) != _SUPERSEDED_TARGET
+        or _base_release(target_release) != _TARGET
+    ):
+        return None
+    return _recorded_controller(layout, state)
+
+
+def _is_superseded_controller(layout: install.Layout, controller: Path) -> bool:
+    releases = layout.path(install.RELEASES_DIR)
+    try:
+        relative = controller.relative_to(releases)
+    except ValueError:
+        return False
+    return (
+        len(relative.parts) == 2
+        and relative.parts[1] == "vwctl"
+        and _base_release(relative.parts[0]) == _SUPERSEDED_TARGET
+    )
+
+
 def _write_state(path: Path, payload: dict[str, object]) -> None:
     durability.atomic_write(
         path,
         (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         0o600,
     )
+
+
+def _restore_state(path: Path, previous: dict[str, object] | None) -> None:
+    if previous is None:
+        durability.unlink(path, missing_ok=True)
+    else:
+        _write_state(path, previous)
 
 
 def _validate_controller(controller: Path) -> None:
@@ -137,6 +192,56 @@ def _validate_controller(controller: Path) -> None:
         raise UpdateError(f"staged update controller is not a regular file: {controller}")
     if not (info.st_mode & stat.S_IXUSR):
         raise UpdateError(f"staged update controller is not executable: {controller}")
+
+
+def _handoff_context(
+    layout: install.Layout,
+    state: dict[str, object] | None,
+    launcher_target: Path,
+    *,
+    current_release: str,
+    target_release: str,
+    controller: Path,
+    canonical: Path,
+) -> tuple[bool, Path | None]:
+    """Validate current handoff state and return (already_target, superseded_controller)."""
+    if state is None:
+        if launcher_target != canonical:
+            raise UpdateError(
+                f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
+            )
+        return False, None
+
+    if _state_matches(
+        state,
+        current_release=current_release,
+        target_release=target_release,
+        controller=controller,
+    ):
+        allowed = {canonical, controller}
+        # A crash while superseding the known unselected dev.17 handoff can
+        # leave the new durable state published just before the launcher moves.
+        if _is_superseded_controller(layout, launcher_target):
+            allowed.add(launcher_target)
+        if launcher_target not in allowed:
+            raise UpdateError(
+                f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
+            )
+        return launcher_target == controller, None
+
+    superseded = _supersedable_state(
+        layout,
+        state,
+        current_release=current_release,
+        target_release=target_release,
+    )
+    if superseded is None:
+        raise UpdateError("another update-controller handoff is already recorded")
+    if launcher_target not in {canonical, superseded}:
+        raise UpdateError(
+            f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
+        )
+    return False, superseded
 
 
 def prepare_if_required(
@@ -180,55 +285,58 @@ def prepare_if_required(
     state_path = _state_path(layout)
     expected = _payload(current_release, target_release, controller)
     state = _load_state(state_path)
-    if state is not None and not _state_matches(
+    launcher_target = _read_symlink(launcher, "installed vwctl launcher")
+    already_target, _ = _handoff_context(
+        layout,
         state,
+        launcher_target,
         current_release=current_release,
         target_release=target_release,
         controller=controller,
-    ):
-        raise UpdateError("another update-controller handoff is already recorded")
-
-    launcher_target = _read_symlink(launcher, "installed vwctl launcher")
-    if launcher_target not in {canonical, controller}:
-        raise UpdateError(
-            f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
-        )
-    if launcher_target == controller and state is None:
-        raise UpdateError("installed vwctl launcher points to target controller without handoff state")
+        canonical=canonical,
+    )
 
     # Always re-run immutable staging, even when the handoff is already active.
     # Existing identical content is accepted idempotently; changed source bytes
     # under the same exact release identity fail before recovery.
     lock_path = install.ensure_lock_path(layout)
-    changed = launcher_target != controller
+    changed = not already_target or state != expected
     with cli.mutation_lock(lock_path):
         if update._current(layout)[1] != current_release:
             raise UpdateError("current release changed while staging update controller")
+
+        state = _load_state(state_path)
+        launcher_target = _read_symlink(launcher, "installed vwctl launcher")
+        already_target, _ = _handoff_context(
+            layout,
+            state,
+            launcher_target,
+            current_release=current_release,
+            target_release=target_release,
+            controller=controller,
+            canonical=canonical,
+        )
+        changed = changed or not already_target or state != expected
+
         release_dir = install.stage_release(source_root, layout, target_release)
         if release_dir != controller.parent:
             raise UpdateError("staged update-controller release path is inconsistent")
         _validate_controller(controller)
 
-        state = _load_state(state_path)
-        if state is None:
+        previous_state = state
+        if state != expected:
             _write_state(state_path, expected)
-        elif not _state_matches(
-            state,
-            current_release=current_release,
-            target_release=target_release,
-            controller=controller,
-        ):
-            raise UpdateError("update-controller handoff state changed while staging")
 
         if _read_symlink(launcher, "installed vwctl launcher") != controller:
             try:
                 durability.atomic_symlink(launcher, controller)
             except Exception:
-                # State is published first so a crash cannot expose the
-                # candidate controller without proof. If publication itself
-                # fails normally, restore the canonical no-handoff state.
+                # State is published before the launcher so a crash never
+                # exposes an unrecorded controller. On an ordinary publication
+                # failure restore the exact previous handoff record instead of
+                # discarding a still-valid predecessor controller handoff.
                 try:
-                    durability.unlink(state_path, missing_ok=True)
+                    _restore_state(state_path, previous_state)
                 except OSError:
                     pass
                 raise
