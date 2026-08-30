@@ -5,7 +5,14 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from vaultwarden_oci import cli, operator_entrypoint, runtime, update_cli
+from vaultwarden_oci import (
+    cli,
+    crowdsec_worker_policy,
+    edge,
+    operator_entrypoint,
+    runtime,
+    update_cli,
+)
 from vaultwarden_oci.cli import CommandResult, DoctorCheck
 
 
@@ -51,6 +58,54 @@ class OperatorEntrypointTests(unittest.TestCase):
         with mock.patch.object(runtime, "lifecycle") as lifecycle:
             self.assertTrue(operator_entrypoint._cleanup_interrupted_lifecycle("restart"))
         lifecycle.assert_not_called()
+
+    def test_release_edge_policy_composes_source_invariant_and_preserves_call_shape(self) -> None:
+        paths = edge.EdgePaths()
+        runner = mock.Mock()
+        mechanical = [DoctorCheck("crowdsec.cloudflare", "PASS", "mechanical")]
+        enforced = [DoctorCheck("crowdsec.cloudflare", "FAIL", "source policy")]
+
+        with (
+            mock.patch.object(edge, "doctor_checks", return_value=mechanical) as doctor,
+            mock.patch.object(
+                crowdsec_worker_policy,
+                "enforce_doctor_checks",
+                return_value=enforced,
+            ) as enforce,
+        ):
+            with operator_entrypoint._release_edge_policy():
+                # Preserve the underlying positional-compatible doctor API.
+                self.assertEqual(edge.doctor_checks(paths, runner, 123), enforced)
+
+        doctor.assert_called_once_with(paths=paths, runner=runner, now=123)
+        enforce.assert_called_once_with(mechanical, paths=paths, runner=runner)
+
+    def test_supported_remediation_start_attests_current_worker_invocation(self) -> None:
+        with mock.patch.object(crowdsec_worker_policy, "attest_current") as attest:
+            code = operator_entrypoint._attest_supported_worker_start(
+                ["crowdsec", "remediation-start"],
+                0,
+            )
+        self.assertEqual(code, 0)
+        attest.assert_called_once()
+        args = attest.call_args.args
+        self.assertEqual(args[0], edge.EdgePaths())
+        self.assertIs(args[1], cli.run_command)
+
+    def test_supported_remediation_start_fails_if_policy_attestation_fails(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(
+            crowdsec_worker_policy,
+            "attest_current",
+            side_effect=crowdsec_worker_policy.WorkerPolicyError("not local-only"),
+        ):
+            with redirect_stderr(stderr):
+                code = operator_entrypoint._attest_supported_worker_start(
+                    ["crowdsec", "remediation-start"],
+                    0,
+                )
+        self.assertEqual(code, 1)
+        self.assertIn("local-only policy cannot be proven", stderr.getvalue())
 
     def test_doctor_failure_guides_crowdsec_without_changing_json(self) -> None:
         output = TTY()
