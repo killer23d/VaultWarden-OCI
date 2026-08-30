@@ -1,7 +1,7 @@
 """One bounded host-state transition for the supported direct predecessor.
 
 This is deliberately not a generic migration framework. The current release
-needs one CrowdSec compatibility transition from dev.16 to dev.18. Every other
+needs one CrowdSec compatibility transition from dev.16 to dev.17. Every other
 release pair is a no-op here.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from . import cli, crowdsec_worker_policy, edge, install, update
 from .update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16"
-_TARGET = "0.1.0-dev.18"
+_TARGET = "0.1.0-dev.17"
 _LATEST_MARKER = ".latest."
 _WORKER_CONFIRM_ACTION = (
     "Cloudflare Worker was re-armed with only local cscli/crowdsec decisions. "
@@ -157,7 +157,7 @@ def prepare_worker_prerequisite(
 ) -> str | None:
     """Make the predecessor Worker safe before any recovery/update mutation.
 
-    The first dev.16 -> dev.18 apply may intentionally stop here after creating
+    The first dev.16 -> dev.17 apply may intentionally stop here after creating
     a new local-only Worker invocation. The operator sets that new route Fail
     Open and confirms it with the installed dev.16 ``vwctl``; rerunning the
     same update then proceeds. No application recovery or release activation
