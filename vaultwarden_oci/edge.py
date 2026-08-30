@@ -1221,6 +1221,19 @@ def start_remediation(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_co
         detail = result.kind if result.returncode is None else f"exit {result.returncode}"
         raise EdgeError(f"CrowdSec Cloudflare remediation start failed ({detail})")
 
+    # The start owner also owns proof of what this exact process invocation
+    # loaded. A config file that merely looks correct after start is not enough.
+    from . import crowdsec_worker_policy
+
+    try:
+        crowdsec_worker_policy.attest_current(paths, runner)
+    except crowdsec_worker_policy.WorkerPolicyError as exc:
+        stopped = runner(["systemctl", "stop", BOUNCER_SERVICE])
+        suffix = "" if stopped.ok and not _active(BOUNCER_SERVICE, runner) else "; unproven Worker stop could not be proven"
+        raise EdgeError(
+            f"CrowdSec Cloudflare remediation started but local-only decision policy could not be proven: {exc}{suffix}"
+        ) from exc
+
 
 def _service_invocation_id(runner: Runner) -> str | None:
     if not _active(BOUNCER_SERVICE, runner):
@@ -1439,4 +1452,13 @@ def doctor_checks(
         checks.append(DoctorCheck("crowdsec.cloudflare", "FAIL", "Cloudflare Worker bouncer is active but Fail Open is not confirmed for this service invocation"))
     else:
         checks.append(DoctorCheck("crowdsec.cloudflare", "FAIL", "CrowdSec Cloudflare remediation service/config/LAPI state is unhealthy or not explicitly armed"))
-    return checks
+
+    # Keep the source-policy proof in the canonical doctor owner so direct
+    # callers and every presentation layer see the same result.
+    from . import crowdsec_worker_policy
+
+    return crowdsec_worker_policy.enforce_doctor_checks(
+        checks,
+        paths=paths,
+        runner=runner,
+    )
