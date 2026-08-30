@@ -1,8 +1,32 @@
 #!/usr/bin/env python3
 """VaultWarden-OCI operator entrypoint."""
 
+from __future__ import annotations
+
+import sys
+
+from vaultwarden_oci import update_controller_handoff
 from vaultwarden_oci.operator_entrypoint import main
 
 
+def _run() -> int:
+    argv = sys.argv[1:]
+    try:
+        update_controller_handoff.delegate_non_update_if_handoff(argv)
+    except Exception as exc:
+        print(f"FAIL: update-controller handoff dispatch failed: {exc}", file=sys.stderr)
+        return 1
+
+    code = main()
+    try:
+        return update_controller_handoff.post_command(code, argv)
+    except update_controller_handoff.HandoffRequired as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"FAIL: update-controller handoff failed: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run())
