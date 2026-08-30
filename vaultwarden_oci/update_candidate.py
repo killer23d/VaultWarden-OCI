@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import cli, edge, runtime, secrets
+from . import admin, cli, edge, runtime, secrets
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
 PRESTART_FAILURE = 20
@@ -281,12 +281,12 @@ def activate(
         runtime.ensure_paths(production)
         config = runtime.load_config(production.config)
         edge.refresh_origin_policy(runner=runner)
-        values = secrets.load(
+        source_values = secrets.load(
             config.offline_recovery_recipient,
             paths=production.secret_paths(),
             runner=runner,
         )
-        admin_enabled = secrets.admin_enabled(values)
+        admin_enabled = secrets.admin_enabled(source_values)
         if manifest.get("admin_enabled") is not admin_enabled:
             raise UpdateError("admin enablement changed after candidate pre-validation")
 
@@ -305,12 +305,20 @@ def activate(
         if not compose.ok:
             raise UpdateError("prepared Compose failed validation at activation boundary")
 
+        runtime_values = dict(source_values)
         derived: dict[str, str] = {}
         if admin_enabled:
             derived["admin_basic_auth_hash"] = secrets.derive_admin_basic_auth_hash(
-                values["admin_basic_auth_password"], frozen.caddy_image
+                source_values["admin_basic_auth_password"], frozen.caddy_runtime_image.reference
             )
-        secrets.materialize(values, derived=derived, paths=production.secret_paths())
+            try:
+                runtime_values["vaultwarden_admin_token"] = admin.derive_vaultwarden_admin_phc(
+                    source_values["vaultwarden_admin_token"],
+                    frozen.vaultwarden_image.reference,
+                )
+            except admin.AdminCredentialError as exc:
+                raise UpdateError(str(exc)) from exc
+        secrets.materialize(runtime_values, derived=derived, paths=production.secret_paths())
     except Exception as exc:
         if isinstance(exc, KeyboardInterrupt):
             raise
