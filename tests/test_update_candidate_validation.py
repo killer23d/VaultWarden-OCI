@@ -62,6 +62,11 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 mock.patch.object(update_candidate.secrets, "admin_enabled", return_value=True),
                 mock.patch.object(update_candidate.runtime, "render"),
                 mock.patch.object(update_candidate, "_bundle_digest", return_value="d" * 64),
+                mock.patch.object(
+                    update_candidate.predecessor_transition,
+                    "apply_if_required",
+                    return_value=False,
+                ) as transition,
             ):
                 update_candidate.prepare(versions, render_root, runner=runner)
 
@@ -87,6 +92,7 @@ class CandidateCaddyValidationTests(unittest.TestCase):
         )
         self.assertEqual(len(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH), 60)
         self.assertTrue(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH.startswith("$2a$14$"))
+        transition.assert_called_once_with(frozen.project_version, runner=runner)
 
     def test_activate_materializes_admin_phc_without_mutating_sops_source_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
