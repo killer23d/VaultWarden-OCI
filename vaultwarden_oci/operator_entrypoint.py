@@ -132,6 +132,20 @@ def _release_edge_policy() -> Iterator[None]:
         edge.doctor_checks = original
 
 
+def _attest_supported_worker_start(args: Sequence[str], code: int) -> int:
+    """A supported remediation-start is not successful until policy is attested."""
+    if code != 0 or list(args[:2]) != ["crowdsec", "remediation-start"]:
+        return code
+    from . import crowdsec_worker_policy, edge
+
+    try:
+        crowdsec_worker_policy.attest_current(edge.EdgePaths(), cli.run_command)
+    except crowdsec_worker_policy.WorkerPolicyError as exc:
+        print(f"FAIL: Cloudflare Worker started but its local-only policy cannot be proven: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _automation_enable_action() -> str | None:
     """Return the supported first-run automation action only when it is needed."""
     from . import day2
@@ -195,6 +209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cleanup_ok = _cleanup_interrupted_lifecycle(lifecycle_action or "")
                 print(f"FAIL: {lifecycle_action or 'vwctl'} interrupted", file=sys.stderr)
                 return 130 if cleanup_ok else 1
+            code = _attest_supported_worker_start(args, code)
             _completion_guidance(args, code)
             return code
     finally:
