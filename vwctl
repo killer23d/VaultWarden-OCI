@@ -5,6 +5,12 @@ from __future__ import annotations
 
 import sys
 
+# Installed releases are immutable. Root can bypass their read-only mode bits,
+# so disable Python bytecode writes before importing any release-owned module.
+# Runtime execution must never mutate an immutable release tree with __pycache__
+# or .pyc files that would later invalidate exact-content verification.
+sys.dont_write_bytecode = True
+
 from vaultwarden_oci import update_controller_handoff
 from vaultwarden_oci.operator_entrypoint import main
 
