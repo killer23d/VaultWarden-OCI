@@ -59,18 +59,22 @@ def main() -> int:
         install_env = dict(os.environ)
         install_env["DEBIAN_FRONTEND"] = "noninteractive"
         install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
-        with edge._suppress_package_service_starts(edge.POLICY_RC_D):
-            command(
-                [
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "crowdsec",
-                    "crowdsec-firewall-bouncer-nftables",
-                ],
-                "real CrowdSec firewall package installation",
-                env=install_env,
-            )
+        try:
+            with edge._suppress_package_service_starts(edge.POLICY_RC_D):
+                edge._apt_command(
+                    cli.run_command,
+                    [
+                        "apt-get",
+                        "install",
+                        "-y",
+                        "crowdsec",
+                        "crowdsec-firewall-bouncer-nftables",
+                    ],
+                    "real CrowdSec firewall package installation",
+                    env=install_env,
+                )
+        except edge.EdgeError as exc:
+            raise RuntimeError(str(exc)) from exc
 
         postinst = POSTINST.read_text(encoding="utf-8")
         if "systemctl enable" not in postinst or "systemctl start" not in postinst:
