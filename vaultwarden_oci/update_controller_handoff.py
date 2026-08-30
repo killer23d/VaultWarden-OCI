@@ -180,7 +180,6 @@ def prepare_if_required(
     state_path = _state_path(layout)
     expected = _payload(current_release, target_release, controller)
     state = _load_state(state_path)
-
     if state is not None and not _state_matches(
         state,
         current_release=current_release,
@@ -190,15 +189,18 @@ def prepare_if_required(
         raise UpdateError("another update-controller handoff is already recorded")
 
     launcher_target = _read_symlink(launcher, "installed vwctl launcher")
-    if state is not None and launcher_target == controller:
-        _validate_controller(controller)
-        return False
-    if launcher_target != canonical:
+    if launcher_target not in {canonical, controller}:
         raise UpdateError(
             f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
         )
+    if launcher_target == controller and state is None:
+        raise UpdateError("installed vwctl launcher points to target controller without handoff state")
 
+    # Always re-run immutable staging, even when the handoff is already active.
+    # Existing identical content is accepted idempotently; changed source bytes
+    # under the same exact release identity fail before recovery.
     lock_path = install.ensure_lock_path(layout)
+    changed = launcher_target != controller
     with cli.mutation_lock(lock_path):
         if update._current(layout)[1] != current_release:
             raise UpdateError("current release changed while staging update controller")
@@ -218,17 +220,18 @@ def prepare_if_required(
         ):
             raise UpdateError("update-controller handoff state changed while staging")
 
-        try:
-            durability.atomic_symlink(launcher, controller)
-        except Exception:
-            # State is published first so a crash cannot expose the candidate
-            # controller without proof. If publication itself fails normally,
-            # restore the canonical no-handoff state before returning failure.
+        if _read_symlink(launcher, "installed vwctl launcher") != controller:
             try:
-                durability.unlink(state_path, missing_ok=True)
-            except OSError:
-                pass
-            raise
+                durability.atomic_symlink(launcher, controller)
+            except Exception:
+                # State is published first so a crash cannot expose the
+                # candidate controller without proof. If publication itself
+                # fails normally, restore the canonical no-handoff state.
+                try:
+                    durability.unlink(state_path, missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
     if _read_symlink(launcher, "installed vwctl launcher") != controller:
         raise UpdateError("update-controller launcher handoff could not be proven")
@@ -240,7 +243,7 @@ def prepare_if_required(
         controller=controller,
     ):
         raise UpdateError("update-controller handoff state could not be proven")
-    return True
+    return changed
 
 
 def _controller_for_this_process(controller_vwctl: Path | None) -> Path:
@@ -362,6 +365,8 @@ def post_command(
             raise HandoffRequired(HANDOFF_ACTION)
         return exit_code
 
-    if argv and argv[0] == "update":
+    # Only apply can publish a new target. A normal read-only update check must
+    # not require access to the root-only handoff state merely to return 0.
+    if len(argv) >= 2 and argv[0] == "update" and argv[1] == "apply":
         finalize_if_target_current(root=root)
     return exit_code
