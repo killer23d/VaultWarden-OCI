@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -42,14 +43,42 @@ source: file
 '''
 
 
+def nft_table(family: str, table: str) -> str:
+    return json.dumps(
+        {
+            "nftables": [
+                {
+                    "chain": {
+                        "family": family,
+                        "table": table,
+                        "name": "crowdsec-chain-input",
+                        "type": "filter",
+                        "hook": "input",
+                        "prio": -10,
+                    }
+                }
+            ]
+        }
+    )
+
+
 def successful_setup_runner(calls=None):
     def runner(argv, *, env=None, cwd=None):
+        call = tuple(argv)
         if calls is not None:
-            calls.append((tuple(argv), dict(env or {})))
-        if tuple(argv[:4]) == ("cscli", "-oraw", "bouncers", "add"):
+            calls.append((call, dict(env or {})))
+        if call[:4] == ("cscli", "-oraw", "bouncers", "add"):
             return result(argv, stdout="firewall-lapi-key\n")
-        if tuple(argv[:4]) == ("cscli", "config", "show", "-oraw"):
+        if call[:4] == ("cscli", "config", "show", "-oraw"):
             return result(argv, stdout="127.0.0.1:8080\n")
+        if call and call[0] == edge.FIREWALL_BOUNCER_BINARY and call[-1:] == ("-T",):
+            config = Path(call[call.index("-c") + 1])
+            local = Path(str(config) + ".local")
+            return result(argv, stdout=local.read_text(encoding="utf-8"))
+        if call[:5] == ("nft", "--json", "list", "table", "ip"):
+            return result(argv, stdout=nft_table("ip", "crowdsec"))
+        if call[:5] == ("nft", "--json", "list", "table", "ip6"):
+            return result(argv, stdout=nft_table("ip6", "crowdsec6"))
         return result(argv)
 
     return runner
@@ -82,6 +111,10 @@ class CrowdSecScopeTests(unittest.TestCase):
             )
             self.assertNotIn(
                 ("systemctl", "enable", "--now", edge.BOUNCER_SERVICE),
+                argv_calls,
+            )
+            self.assertIn(
+                ("systemctl", "disable", "--now", edge.FIREWALL_BOUNCER_SERVICE),
                 argv_calls,
             )
             self.assertIn(
