@@ -10,10 +10,8 @@ sys.path.insert(0, str(ROOT))
 from vaultwarden_oci import cli, edge
 
 
-TEST_DROPIN = Path(
-    "/etc/systemd/system/crowdsec-firewall-bouncer.service.d/zz-vwoci-ci-block.conf"
-)
-POSTINST = Path("/var/lib/dpkg/info/crowdsec-firewall-bouncer-nftables.postinst")
+FIREWALL_POSTINST = Path("/var/lib/dpkg/info/crowdsec-firewall-bouncer-nftables.postinst")
+CROWDSEC_POSTINST = Path("/var/lib/dpkg/info/crowdsec.postinst")
 
 
 def command(argv, label: str, *, env=None) -> None:
@@ -21,6 +19,14 @@ def command(argv, label: str, *, env=None) -> None:
     if not result.ok:
         detail = result.stderr.strip() or result.stdout.strip() or result.kind
         raise RuntimeError(f"{label} failed: {detail}")
+
+
+def active(service: str) -> bool:
+    return cli.run_command(["systemctl", "is-active", "--quiet", service]).ok
+
+
+def enabled(service: str) -> bool:
+    return cli.run_command(["systemctl", "is-enabled", "--quiet", service]).ok
 
 
 def main() -> int:
@@ -31,55 +37,47 @@ def main() -> int:
             f"refusing to overwrite existing host package policy {edge.POLICY_RC_D}"
         )
 
-    # The real Debian postinst directly calls systemctl enable/start. Block
-    # execution only in this CI fixture so the test can exercise those real
-    # maintainer scripts without applying packet-filter rules to the runner.
-    TEST_DROPIN.parent.mkdir(parents=True, exist_ok=True)
-    TEST_DROPIN.write_text(
-        "[Service]\nExecCondition=\nExecCondition=/bin/false\n",
-        encoding="utf-8",
+    edge._write_root_file(
+        edge.FIREWALL_BOUNCER_LOCAL,
+        edge.firewall_bouncer_bootstrap_local_text(),
+        0o600,
     )
-    os.chmod(TEST_DROPIN, 0o644)
-    command(["systemctl", "daemon-reload"], "test containment daemon-reload")
+
+    installer = edge._download_installer()
+    try:
+        command(["/bin/sh", str(installer)], "CrowdSec repository setup")
+    finally:
+        installer.unlink(missing_ok=True)
+    command(["apt-get", "update"], "apt metadata refresh")
+
+    install_env = edge._package_install_env()
+    if install_env.get("SYSTEMD_OFFLINE") != "1":
+        raise RuntimeError("production package environment did not enable SYSTEMD_OFFLINE")
 
     try:
-        edge._write_root_file(
-            edge.FIREWALL_BOUNCER_LOCAL,
-            edge.firewall_bouncer_bootstrap_local_text(),
-            0o600,
-        )
+        with edge._suppress_package_service_starts(edge.POLICY_RC_D):
+            edge._apt_command(
+                cli.run_command,
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "crowdsec",
+                    "crowdsec-firewall-bouncer-nftables",
+                ],
+                "real CrowdSec firewall package installation",
+                env=install_env,
+            )
 
-        installer = edge._download_installer()
-        try:
-            command(["/bin/sh", str(installer)], "CrowdSec repository setup")
-        finally:
-            installer.unlink(missing_ok=True)
-        command(["apt-get", "update"], "apt metadata refresh")
-
-        install_env = dict(os.environ)
-        install_env["DEBIAN_FRONTEND"] = "noninteractive"
-        install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
-        try:
-            with edge._suppress_package_service_starts(edge.POLICY_RC_D):
-                edge._apt_command(
-                    cli.run_command,
-                    [
-                        "apt-get",
-                        "install",
-                        "-y",
-                        "crowdsec",
-                        "crowdsec-firewall-bouncer-nftables",
-                    ],
-                    "real CrowdSec firewall package installation",
-                    env=install_env,
-                )
-        except edge.EdgeError as exc:
-            raise RuntimeError(str(exc)) from exc
-
-        postinst = POSTINST.read_text(encoding="utf-8")
-        if "systemctl enable" not in postinst or "systemctl start" not in postinst:
+        firewall_postinst = FIREWALL_POSTINST.read_text(encoding="utf-8")
+        if "systemctl enable" not in firewall_postinst or "systemctl start" not in firewall_postinst:
             raise RuntimeError(
                 "installed firewall-bouncer postinst no longer directly enables/starts systemd; re-audit package containment"
+            )
+        crowdsec_postinst = CROWDSEC_POSTINST.read_text(encoding="utf-8")
+        if "systemctl" not in crowdsec_postinst or "start" not in crowdsec_postinst:
+            raise RuntimeError(
+                "installed CrowdSec postinst no longer contains direct systemd startup behavior; re-audit package containment"
             )
 
         base = edge.FIREWALL_BOUNCER_CONFIG.read_text(encoding="utf-8")
@@ -92,36 +90,33 @@ def main() -> int:
         if hooks != ("input",):
             raise RuntimeError(f"pre-install safety override did not win merged config: hooks={hooks!r}")
 
-        enabled = cli.run_command(
-            ["systemctl", "is-enabled", "--quiet", edge.FIREWALL_BOUNCER_SERVICE]
-        )
-        if not enabled.ok:
-            raise RuntimeError(
-                "real package postinst did not leave firewall bouncer enabled; fixture no longer proves direct-enable containment"
-            )
+        # The real package scripts attempted their systemctl operations, but the
+        # apt child was offline to PID 1. Neither the engine nor firewall bouncer
+        # may have become active before the project has written acquisition and
+        # final firewall configuration.
+        for service in (edge.CROWDSEC_SERVICE, edge.FIREWALL_BOUNCER_SERVICE):
+            if active(service):
+                raise RuntimeError(
+                    f"{service} became active during the SYSTEMD_OFFLINE package transaction"
+                )
 
+        # Package scripts may still create enablement symlinks. Production must
+        # reconcile those immediately before project-owned configuration starts.
         containment = edge._contain_package_bouncers(cli.run_command)
         if containment:
-            raise RuntimeError("package bouncer containment failed: " + "; ".join(containment))
-        if cli.run_command(
-            ["systemctl", "is-enabled", "--quiet", edge.FIREWALL_BOUNCER_SERVICE]
-        ).ok:
-            raise RuntimeError("firewall bouncer remained boot-enabled after containment")
-        if cli.run_command(
-            ["systemctl", "is-active", "--quiet", edge.FIREWALL_BOUNCER_SERVICE]
-        ).ok:
-            raise RuntimeError("firewall bouncer remained active after containment")
+            raise RuntimeError("package service containment failed: " + "; ".join(containment))
+        for service in (edge.CROWDSEC_SERVICE, edge.FIREWALL_BOUNCER_SERVICE):
+            if active(service):
+                raise RuntimeError(f"{service} remained active after package containment")
+            if enabled(service):
+                raise RuntimeError(f"{service} remained boot-enabled after package containment")
     finally:
-        # Never leave the test-only start blocker behind, but keep the real
-        # package disabled before removing it.
         edge._contain_package_bouncers(cli.run_command)
-        TEST_DROPIN.unlink(missing_ok=True)
-        cli.run_command(["systemctl", "daemon-reload"])
 
     if edge.POLICY_RC_D.exists():
         raise RuntimeError("temporary package policy was not removed")
     print(
-        "PASS: real firewall-bouncer maintainer scripts saw a pre-existing INPUT-only override and package enable/start was contained"
+        "PASS: real CrowdSec/firewall maintainer scripts ran with SYSTEMD_OFFLINE, the pre-apt INPUT-only override won, and post-apt containment left services inactive/disabled"
     )
     return 0
 
