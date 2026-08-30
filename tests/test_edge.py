@@ -20,6 +20,35 @@ def result(argv, stdout="", stderr="", code=0):
     return CommandResult(tuple(argv), "success" if code == 0 else "nonzero", code, stdout, stderr)
 
 
+def nft_table(family: str, table: str, *, forward: bool = False) -> str:
+    chains = [
+        {
+            "chain": {
+                "family": family,
+                "table": table,
+                "name": "crowdsec-chain-input",
+                "type": "filter",
+                "hook": "input",
+                "prio": -10,
+            }
+        }
+    ]
+    if forward:
+        chains.append(
+            {
+                "chain": {
+                    "family": family,
+                    "table": table,
+                    "name": "crowdsec-chain-forward",
+                    "type": "filter",
+                    "hook": "forward",
+                    "prio": -10,
+                }
+            }
+        )
+    return json.dumps({"nftables": chains})
+
+
 def exact_versions() -> str:
     return '''schema_version = 1
 [vaultwarden_oci]
@@ -235,6 +264,11 @@ class CrowdSecBoundaryTests(unittest.TestCase):
         self.assertIn('"_TRANSPORT=kernel"', acquisition)
         self.assertNotIn("sshd.service", acquisition)
 
+        bootstrap = edge.firewall_bouncer_bootstrap_local_text()
+        self.assertIn("nftables_hooks:\n  - input", bootstrap)
+        self.assertNotIn("forward", bootstrap.lower())
+        self.assertNotIn("DOCKER-USER", bootstrap)
+
         firewall = edge.firewall_bouncer_local_text(
             api_key="firewall-lapi-key",
             lapi_url="http://127.0.0.1:8080",
@@ -259,6 +293,45 @@ class CrowdSecBoundaryTests(unittest.TestCase):
         self.assertIn('only_include_decisions_from: ["cscli", "crowdsec"]', rendered)
         self.assertIn("enabled: false", rendered)
         self.assertNotIn("firewall", rendered.lower())
+
+    def test_effective_and_live_firewall_proof_rejects_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = edge.EdgePaths(acquisition=root / "acquis.d/vaultwarden-oci.yaml")
+            config = paths.acquisition.parent / "crowdsec-firewall-bouncer.yaml"
+            local = Path(str(config) + ".local")
+            local.parent.mkdir(parents=True)
+            local.write_text(edge.firewall_bouncer_local_text(
+                api_key="key", lapi_url="http://127.0.0.1:8080"
+            ), encoding="utf-8")
+
+            def safe_runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[-1:] == ("-T",):
+                    return result(argv, local.read_text(encoding="utf-8"))
+                if call[:5] == ("nft", "--json", "list", "table", "ip"):
+                    return result(argv, nft_table("ip", "crowdsec"))
+                if call[:5] == ("nft", "--json", "list", "table", "ip6"):
+                    return result(argv, nft_table("ip6", "crowdsec6"))
+                return result(argv)
+
+            self.assertTrue(edge._firewall_boundary_healthy(paths, safe_runner, require_live=True))
+
+            def forward_config_runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[-1:] == ("-T",):
+                    return result(argv, "nftables_hooks:\n  - input\n  - forward\n")
+                return safe_runner(argv, env=env, cwd=cwd)
+
+            self.assertFalse(edge._firewall_boundary_healthy(paths, forward_config_runner, require_live=True))
+
+            def forward_live_runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[:5] == ("nft", "--json", "list", "table", "ip"):
+                    return result(argv, nft_table("ip", "crowdsec", forward=True))
+                return safe_runner(argv, env=env, cwd=cwd)
+
+            self.assertFalse(edge._firewall_boundary_healthy(paths, forward_live_runner, require_live=True))
 
     def test_lapi_bouncer_key_requires_nonempty_output(self) -> None:
         calls: list[tuple[str, ...]] = []
@@ -342,13 +415,21 @@ timeout_seconds = 15
             installer = root / "installer.sh"
             installer.write_text("exit 0\n", encoding="utf-8")
             calls: list[tuple[str, ...]] = []
+            firewall_local = acquisition_parent / "crowdsec-firewall-bouncer.yaml.local"
 
             def runner(argv, *, env=None, cwd=None):
-                calls.append(tuple(argv))
-                if tuple(argv[:4]) == ("cscli", "-oraw", "bouncers", "add"):
+                call = tuple(argv)
+                calls.append(call)
+                if call[:4] == ("cscli", "-oraw", "bouncers", "add"):
                     return result(argv, "firewall-lapi-key\n")
-                if tuple(argv[:4]) == ("cscli", "config", "show", "-oraw"):
+                if call[:4] == ("cscli", "config", "show", "-oraw"):
                     return result(argv, "127.0.0.1:8080\n")
+                if call and call[0] == edge.FIREWALL_BOUNCER_BINARY and call[-1:] == ("-T",):
+                    return result(argv, firewall_local.read_text(encoding="utf-8"))
+                if call[:5] == ("nft", "--json", "list", "table", "ip"):
+                    return result(argv, nft_table("ip", "crowdsec"))
+                if call[:5] == ("nft", "--json", "list", "table", "ip6"):
+                    return result(argv, nft_table("ip6", "crowdsec6"))
                 return result(argv)
 
             with mock.patch.object(edge, "_download_installer", return_value=installer):
@@ -377,7 +458,6 @@ timeout_seconds = 15
             ))
             self.assertTrue(paths.acquisition.exists())
             self.assertTrue(paths.bouncer_dropin.exists())
-            firewall_local = acquisition_parent / "crowdsec-firewall-bouncer.yaml.local"
             self.assertTrue(firewall_local.exists())
             firewall_text = firewall_local.read_text(encoding="utf-8")
             self.assertIn('api_key: "firewall-lapi-key"', firewall_text)
