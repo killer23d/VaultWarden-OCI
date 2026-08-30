@@ -8,13 +8,14 @@ operator commands continue to execute from ``/opt/vaultwarden-oci/current``.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 from pathlib import Path
 from typing import Sequence
 
-from . import cli, durability, install, update
+from . import cli, durability, install, update, update_versions
 from .update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16"
@@ -136,13 +137,13 @@ def _supersedable_state(
     current_release: str,
     target_release: str,
 ) -> Path | None:
-    """Recognize an older unselected snapshot of this same bounded target.
+    """Recognize an older unselected latest snapshot of this same target.
 
-    ``--use-latest`` snapshots have exact immutable identities. If the source
-    tree or resolved component snapshot changes while a pre-recovery handoff is
-    active, the selected predecessor is still authoritative. The newer exact
-    snapshot may supersede only that temporary controller handoff; the older
-    immutable directory remains untouched and unselected.
+    ``--use-latest`` snapshots have exact immutable identities. If candidate
+    source bytes change while a pre-recovery handoff is active, the selected
+    predecessor is still authoritative. A newer exact snapshot may supersede
+    only that temporary latest-snapshot controller handoff; the older immutable
+    directory remains untouched and unselected.
     """
     recorded_target = str(state["target_release"])
     if (
@@ -150,6 +151,8 @@ def _supersedable_state(
         or _base_release(current_release) != _PREDECESSOR
         or _base_release(recorded_target) != _TARGET
         or _base_release(target_release) != _TARGET
+        or _LATEST_MARKER not in recorded_target
+        or _LATEST_MARKER not in target_release
         or recorded_target == target_release
     ):
         return None
@@ -170,6 +173,8 @@ def _is_prior_target_controller(
     return (
         len(relative.parts) == 2
         and relative.parts[1] == "vwctl"
+        and _LATEST_MARKER in relative.parts[0]
+        and _LATEST_MARKER in target_release
         and _base_release(relative.parts[0]) == _TARGET
         and relative.parts[0] != target_release
     )
@@ -453,6 +458,54 @@ def finalize_if_target_current(
     return True
 
 
+def _prepare_handoff_from_candidate_versions(
+    versions_path: Path,
+    *,
+    root: Path,
+) -> bool:
+    source_root = versions_path.parent.resolve()
+    try:
+        original_target = cli.load_versions(versions_path).version
+    except cli.VersionsError as exc:
+        raise UpdateError(f"cannot read candidate prepare target version: {exc}") from exc
+
+    layout = install.Layout(root.resolve())
+    current_release = update._current(layout)[1]
+
+    if _LATEST_MARKER not in original_target:
+        return prepare_if_required(
+            original_target,
+            source_root,
+            current_release=current_release,
+            root=root,
+        )
+
+    corrected = update_versions.rekey_latest_frozen_source(source_root, versions_path)
+    target_release = corrected.project_version
+    if target_release == original_target:
+        return prepare_if_required(
+            target_release,
+            source_root,
+            current_release=current_release,
+            root=root,
+        )
+
+    # The parent may be the immutable predecessor-era/older handoff controller
+    # and therefore may have frozen a legacy component-only snapshot identity.
+    # Build a second temporary source with the same exact components/digests but
+    # the source-aware target identity. The update intentionally stops before
+    # recovery after publishing this newer exact controller; the next identical
+    # command is then planned entirely by that corrected controller.
+    versions_toml = update_versions.frozen_versions_toml(corrected)
+    with install._frozen_source(source_root, versions_toml) as corrected_source:
+        return prepare_if_required(
+            target_release,
+            corrected_source,
+            current_release=current_release,
+            root=root,
+        )
+
+
 def post_command(
     exit_code: int,
     argv: Sequence[str],
@@ -469,18 +522,7 @@ def post_command(
             versions_path = Path(argv[index + 1])
         except (ValueError, IndexError) as exc:
             raise UpdateError("candidate prepare did not provide a usable --versions path") from exc
-        try:
-            target_release = cli.load_versions(versions_path).version
-        except cli.VersionsError as exc:
-            raise UpdateError(f"cannot read candidate prepare target version: {exc}") from exc
-        layout = install.Layout(root.resolve())
-        current_release = update._current(layout)[1]
-        if prepare_if_required(
-            target_release,
-            versions_path.parent,
-            current_release=current_release,
-            root=root,
-        ):
+        if _prepare_handoff_from_candidate_versions(versions_path, root=root):
             raise HandoffRequired(HANDOFF_ACTION)
         return exit_code
 
