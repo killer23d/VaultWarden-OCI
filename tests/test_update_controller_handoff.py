@@ -51,10 +51,11 @@ class UpdateControllerHandoffTests(unittest.TestCase):
         def stage(_source: Path, actual_layout: install.Layout, release: str) -> Path:
             assert actual_layout.root == layout.root
             destination = actual_layout.path(install.RELEASES_DIR) / release
-            destination.mkdir(parents=True, exist_ok=True)
             controller = destination / "vwctl"
-            controller.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            controller.chmod(0o555)
+            if not destination.exists():
+                destination.mkdir(parents=True)
+                controller.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                controller.chmod(0o555)
             return destination
 
         return stage
