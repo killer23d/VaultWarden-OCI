@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
 import stat
 from pathlib import Path
 from typing import Sequence
@@ -156,7 +155,7 @@ def _load_attestation(paths: edge.EdgePaths) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _attestation_current(paths: edge.EdgePaths, runner: edge.Runner) -> bool:
+def attestation_current(paths: edge.EdgePaths, runner: edge.Runner) -> bool:
     invocation = edge._service_invocation_id(runner)
     if invocation is None:
         return False
@@ -186,25 +185,22 @@ def config_local_only(paths: edge.EdgePaths, runner: edge.Runner) -> bool:
 
 
 def runtime_policy_healthy(paths: edge.EdgePaths, runner: edge.Runner) -> bool:
-    """Prove the active Worker is constrained to local decision origins.
-
-    Native current-release config is self-proving because the supported start
-    path writes the local-only base config immediately before the process starts.
-    A migrated predecessor base remains legacy ``[]`` until a later dev.17
-    prepare-remediation run, so that compatibility case additionally requires
-    an invocation/config-digest attestation written by the candidate re-arm.
-    """
+    """Prove this active invocation started from the exact local-only policy."""
     if not edge._active(edge.BOUNCER_SERVICE, runner) or not config_local_only(paths, runner):
         return False
     try:
         base, local, _ = source_state(paths)
     except WorkerPolicyError:
         return False
-    if base == LOCAL_DECISION_SOURCES:
-        return local in {None, LOCAL_DECISION_SOURCES}
-    if base == () and local == LOCAL_DECISION_SOURCES and managed_override_present(paths):
-        return _attestation_current(paths, runner)
-    return False
+    supported = (
+        (base == LOCAL_DECISION_SOURCES and local in {None, LOCAL_DECISION_SOURCES})
+        or (
+            base == ()
+            and local == LOCAL_DECISION_SOURCES
+            and managed_override_present(paths)
+        )
+    )
+    return supported and attestation_current(paths, runner)
 
 
 def attest_current(paths: edge.EdgePaths, runner: edge.Runner) -> None:
@@ -213,10 +209,7 @@ def attest_current(paths: edge.EdgePaths, runner: edge.Runner) -> None:
     invocation = edge._service_invocation_id(runner)
     if invocation is None:
         raise WorkerPolicyError("Cloudflare Worker is not active with a valid invocation")
-    try:
-        base, local, _ = source_state(paths)
-    except WorkerPolicyError:
-        raise
+    base, local, _ = source_state(paths)
     if base != LOCAL_DECISION_SOURCES and not (
         base == () and local == LOCAL_DECISION_SOURCES and managed_override_present(paths)
     ):
@@ -265,7 +258,7 @@ def enforce_doctor_checks(
                 cli.DoctorCheck(
                     check.check_id,
                     "FAIL",
-                    "Cloudflare Worker is not proven to use exactly local cscli/crowdsec decision sources",
+                    "Cloudflare Worker is not proven to use exactly local cscli/crowdsec decision sources for its current invocation",
                 )
             )
         else:
