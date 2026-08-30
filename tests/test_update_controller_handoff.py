@@ -12,6 +12,7 @@ from vaultwarden_oci.update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16.latest.aaaaaaaaaaaa"
 _TARGET = "0.1.0-dev.17.latest.bbbbbbbbbbbb"
+_PRIOR_TARGET = "0.1.0-dev.17.latest.111111111111"
 
 
 def _versions(path: Path, version: str = _TARGET) -> None:
@@ -129,6 +130,60 @@ class UpdateControllerHandoffTests(unittest.TestCase):
                         current_release=_PREDECESSOR,
                         root=root,
                     )
+
+    def test_new_exact_latest_snapshot_supersedes_only_unselected_prior_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout, source, launcher, _ = self._host(root)
+            releases = layout.path(install.RELEASES_DIR)
+            prior = releases / _PRIOR_TARGET
+            prior.mkdir(parents=True)
+            prior_controller = prior / "vwctl"
+            prior_controller.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            prior_controller.chmod(0o555)
+
+            launcher.unlink()
+            launcher.symlink_to(prior_controller)
+            state_path = root / "var/lib/vaultwarden-oci/state/update-controller-handoff.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "predecessor_release": _PREDECESSOR,
+                        "target_release": _PRIOR_TARGET,
+                        "controller": str(prior_controller),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path.chmod(0o600)
+
+            controller = releases / _TARGET / "vwctl"
+            with mock.patch.object(
+                update_controller_handoff.install,
+                "stage_release",
+                side_effect=self._fake_stage(layout),
+            ):
+                changed = update_controller_handoff.prepare_if_required(
+                    _TARGET,
+                    source,
+                    current_release=_PREDECESSOR,
+                    root=root,
+                )
+
+            self.assertTrue(changed)
+            self.assertTrue(prior_controller.exists())
+            self.assertEqual(Path(os.readlink(launcher)), controller)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["predecessor_release"], _PREDECESSOR)
+            self.assertEqual(state["target_release"], _TARGET)
+            self.assertEqual(state["controller"], str(controller))
+            self.assertEqual(
+                (layout.path(install.CURRENT_LINK).resolve()).name,
+                _PREDECESSOR,
+            )
 
     def test_existing_state_with_canonical_launcher_repairs_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -275,7 +330,7 @@ class UpdateControllerHandoffTests(unittest.TestCase):
             versions = source / "versions.toml"
             with mock.patch.object(
                 update_controller_handoff,
-                "prepare_if_required",
+                "_prepare_handoff_from_candidate_versions",
                 return_value=True,
             ) as prepare:
                 with self.assertRaisesRegex(
@@ -294,16 +349,11 @@ class UpdateControllerHandoffTests(unittest.TestCase):
                         ],
                         root=root,
                     )
-                prepare.assert_called_once_with(
-                    _TARGET,
-                    source,
-                    current_release=_PREDECESSOR,
-                    root=root,
-                )
+                prepare.assert_called_once_with(versions, root=root)
 
             with mock.patch.object(
                 update_controller_handoff,
-                "prepare_if_required",
+                "_prepare_handoff_from_candidate_versions",
             ) as prepare:
                 self.assertEqual(
                     update_controller_handoff.post_command(
