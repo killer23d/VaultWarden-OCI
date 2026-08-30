@@ -21,12 +21,13 @@ def result(argv, stdout="", stderr="", code=0):
 
 
 def nft_table(family: str, table: str, *, forward: bool = False) -> str:
+    chain_base = "crowdsec-chain" if family == "ip" else "crowdsec6-chain"
     chains = [
         {
             "chain": {
                 "family": family,
                 "table": table,
-                "name": "crowdsec-chain-input",
+                "name": f"{chain_base}-input",
                 "type": "filter",
                 "hook": "input",
                 "prio": -10,
@@ -39,7 +40,7 @@ def nft_table(family: str, table: str, *, forward: bool = False) -> str:
                 "chain": {
                     "family": family,
                     "table": table,
-                    "name": "crowdsec-chain-forward",
+                    "name": f"{chain_base}-forward",
                     "type": "filter",
                     "hook": "forward",
                     "prio": -10,
