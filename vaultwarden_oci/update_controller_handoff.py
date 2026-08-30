@@ -266,7 +266,16 @@ def delegate_non_update_if_handoff(
         return False
     layout = install.Layout(root.resolve())
     controller = _controller_for_this_process(controller_vwctl)
-    if _read_symlink(_launcher(layout), "installed vwctl launcher") != controller:
+    launcher = _launcher(layout)
+    try:
+        launcher_target = _read_symlink(launcher, "installed vwctl launcher")
+    except UpdateError:
+        # Source-checkout/test invocation has no installed launcher. A dangling
+        # or incompatible installed launcher remains a fail-closed condition.
+        if not launcher.exists() and not launcher.is_symlink():
+            return False
+        raise
+    if launcher_target != controller:
         return False
 
     _, current_release, current_dir = update._current(layout)
