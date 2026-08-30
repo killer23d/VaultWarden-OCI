@@ -41,15 +41,17 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 acme_email="admin@example.net",
                 offline_recovery_recipient="age1" + "q" * 58,
             )
-            transition_manifest: dict[str, object] = {}
+            prerequisite_manifest: dict[str, object] = {}
+            predecessor = "0.1.0-dev.16"
 
             def runner(argv, **_kwargs):
                 calls.append(tuple(argv))
                 return result(argv)
 
-            def transition_probe(target_release, *, runner):
-                transition_manifest.update(update_candidate._load_manifest(render_root))
-                return False
+            def prerequisite_probe(target_release, *, current_release, runner):
+                prerequisite_manifest.update(update_candidate._load_manifest(render_root))
+                self.assertEqual(current_release, predecessor)
+                return current_release
 
             with (
                 mock.patch.object(update_candidate, "resolve_pinned_file", return_value=frozen),
@@ -69,9 +71,18 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 mock.patch.object(update_candidate, "_bundle_digest", return_value="d" * 64),
                 mock.patch.object(
                     update_candidate.predecessor_transition,
+                    "installed_current_release",
+                    return_value=predecessor,
+                ),
+                mock.patch.object(
+                    update_candidate.predecessor_transition,
+                    "prepare_worker_prerequisite",
+                    side_effect=prerequisite_probe,
+                ) as prerequisite,
+                mock.patch.object(
+                    update_candidate.predecessor_transition,
                     "apply_if_required",
-                    side_effect=transition_probe,
-                ) as transition,
+                ) as host_transition,
             ):
                 update_candidate.prepare(versions, render_root, runner=runner)
 
@@ -97,10 +108,16 @@ class CandidateCaddyValidationTests(unittest.TestCase):
         )
         self.assertEqual(len(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH), 60)
         self.assertTrue(update_candidate.CADDY_VALIDATION_BASIC_AUTH_HASH.startswith("$2a$14$"))
-        transition.assert_called_once_with(frozen.project_version, runner=runner)
-        self.assertEqual(transition_manifest["project_version"], frozen.project_version)
-        self.assertEqual(transition_manifest["caddy_image"], frozen.caddy_image)
-        self.assertEqual(transition_manifest["render_sha256"], "d" * 64)
+        prerequisite.assert_called_once_with(
+            frozen.project_version,
+            current_release=predecessor,
+            runner=runner,
+        )
+        host_transition.assert_not_called()
+        self.assertEqual(prerequisite_manifest["project_version"], frozen.project_version)
+        self.assertEqual(prerequisite_manifest["caddy_image"], frozen.caddy_image)
+        self.assertEqual(prerequisite_manifest["render_sha256"], "d" * 64)
+        self.assertEqual(prerequisite_manifest["predecessor_release"], predecessor)
 
     def test_activate_materializes_admin_phc_without_mutating_sops_source_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -123,14 +140,24 @@ class CandidateCaddyValidationTests(unittest.TestCase):
             source_snapshot = dict(source_values)
             derived_phc = "$argon2id$v=19$m=65540,t=3,p=4$YWJjZA$ZWZnaA"
             captured: dict[str, object] = {}
+            order: list[str] = []
+            predecessor = "0.1.0-dev.16"
 
             def runner(argv, **_kwargs):
+                call = tuple(argv)
+                if call[:3] == ("docker", "compose", "-f") and "up" in call:
+                    order.append("compose-up")
                 return result(argv)
 
             def capture_materialize(values, *, derived, paths, **_kwargs):
                 captured["values"] = dict(values)
                 captured["derived"] = dict(derived)
                 captured["paths"] = paths
+                order.append("materialize")
+
+            def host_transition(*_args, **_kwargs):
+                order.append("host-transition")
+                return True
 
             manifest = {
                 "schema_version": 1,
@@ -138,6 +165,7 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                 "caddy_image": frozen.caddy_image,
                 "admin_enabled": True,
                 "render_sha256": "d" * 64,
+                "predecessor_release": predecessor,
             }
 
             with (
@@ -168,6 +196,11 @@ class CandidateCaddyValidationTests(unittest.TestCase):
                     "materialize",
                     side_effect=capture_materialize,
                 ),
+                mock.patch.object(
+                    update_candidate.predecessor_transition,
+                    "apply_if_required",
+                    side_effect=host_transition,
+                ) as transition,
             ):
                 update_candidate.activate(versions, render_root, runner=runner)
 
@@ -180,6 +213,13 @@ class CandidateCaddyValidationTests(unittest.TestCase):
             source_values["admin_basic_auth_password"],
             frozen.caddy_runtime_image.reference,
         )
+        transition.assert_called_once_with(
+            frozen.project_version,
+            current_release=predecessor,
+            runner=runner,
+        )
+        self.assertLess(order.index("materialize"), order.index("host-transition"))
+        self.assertLess(order.index("host-transition"), order.index("compose-up"))
 
 
 if __name__ == "__main__":
