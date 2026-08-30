@@ -35,9 +35,13 @@ jobs:
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
 
-          # Actual predecessor code creates the host CrowdSec state; candidate
-          # code then performs only the bounded direct-predecessor expansion.
+          # Actual predecessor code creates its real all-origin Worker config.
+          # Candidate first pass re-arms it local-only and must stop for a new
+          # Fail Open confirmation. The actual predecessor confirmation schema
+          # then binds that proof to the new invocation before host expansion.
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py rearm-candidate "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py confirm-predecessor "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
 
           # Prove an ordinary successful forward transaction with the actual
