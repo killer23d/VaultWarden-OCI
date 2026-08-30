@@ -76,9 +76,51 @@ def _detail(result: cli.CommandResult) -> str:
     return result.stderr.strip() or result.stdout.strip() or result.kind
 
 
+def _runtime_status_rows(detail: str) -> dict[str, tuple[str, str]] | None:
+    """Parse only the two stable human runtime rows emitted by ``vwctl status``."""
+    rows: dict[str, tuple[str, str]] = {}
+    for raw in detail.splitlines():
+        line = raw.strip()
+        for service in ("vaultwarden", "caddy"):
+            prefix = f"{service}: "
+            if not line.startswith(prefix):
+                continue
+            if service in rows or not line.endswith(")") or " (health=" not in line:
+                return None
+            state, health_tail = line[len(prefix):].split(" (health=", 1)
+            health = health_tail[:-1]
+            if not state or not health:
+                return None
+            rows[service] = (state, health)
+    return rows if set(rows) == {"vaultwarden", "caddy"} else None
+
+
 def _transient_runtime_health(detail: str) -> bool:
-    """Recognize Docker's bounded post-pause/restart healthcheck recovery window."""
-    return "running (health=unhealthy)" in detail
+    """Recognize only a bounded all-running Docker healthcheck recovery state."""
+    rows = _runtime_status_rows(detail)
+    if rows is None:
+        return False
+    if any(state != "running" for state, _ in rows.values()):
+        return False
+    if any(health not in {"healthy", "unhealthy"} for _, health in rows.values()):
+        return False
+    if not any(health == "unhealthy" for _, health in rows.values()):
+        return False
+
+    # Human status also includes edge/CrowdSec/notification rows. The Caddy
+    # health doctor line is a derivative of the same unhealthy container and is
+    # allowed while it settles; any independent FAIL means this is not the
+    # narrow post-recovery healthcheck condition and must fail immediately.
+    caddy_unhealthy = rows["caddy"][1] == "unhealthy"
+    for raw in detail.splitlines():
+        line = raw.strip()
+        if line.startswith("notification: failure"):
+            return False
+        if line.startswith(("edge.", "crowdsec.")) and ": FAIL" in line:
+            if line.startswith("edge.caddy.health: FAIL") and caddy_unhealthy:
+                continue
+            return False
+    return True
 
 
 def _gate_current(layout: install.Layout, runner: Runner) -> None:
