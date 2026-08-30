@@ -26,11 +26,10 @@ jobs:
       - name: Supported predecessor transition, forward-only host rollback, and retry
         run: |
           success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
-          failure_host="$(mktemp -d /tmp/vwoci-update-failure.XXXXXX)"
           state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
           crowdsec_root="$(mktemp -d /tmp/vwoci-crowdsec-transition.XXXXXX)"
           crowdsec_state="$(mktemp /tmp/vwoci-crowdsec-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$failure_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$failure_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
+          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
           previous_ref="$(git merge-base HEAD origin/v2)"
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
@@ -47,15 +46,16 @@ jobs:
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
 
-          # Simulate a candidate post-start application failure only after the
-          # forward-only host dependency transition above has succeeded. The
-          # application rollback restores data/code/units/guard, but does not
-          # claim to undo apt or the retained host security controls.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$failure_host"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$failure_host" "$state_file"
+          # Use the same synthetic host for the actual predecessor install,
+          # simulated post-start application failure, candidate-owned rollback,
+          # retained host security state, predecessor doctor, and target retry.
+          # This proves application rollback does not need to undo the bounded
+          # forward-only host dependency transition to remain supported.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$crowdsec_root"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$crowdsec_root" "$state_file"
           candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
-          candidate_python="$failure_host/opt/vaultwarden-oci/releases/$candidate_version"
-          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$failure_host" "$state_file"
+          candidate_python="$crowdsec_root/opt/vaultwarden-oci/releases/$candidate_version"
+          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$crowdsec_root" "$state_file"
 
           # The durable compatibility exception requires the rolled-back
           # predecessor to remain supported with the forward host state in
