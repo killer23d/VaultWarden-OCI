@@ -238,6 +238,8 @@ Rollback must respect persistent-state safety. If candidate runtime activation m
 
 A verified pre-update recovery snapshot may transiently pause/unpause the running containers. The post-snapshot current-runtime gate may wait only for the bounded Docker healthcheck recovery window; persistent unhealthy/stopped services or any unrelated doctor failure still fail closed.
 
+One deliberately narrow supported-predecessor compatibility handoff is allowed when immutable predecessor update code cannot implement a target-required orchestration safety fix. After the exact candidate has passed source/build/config validation and any pre-recovery operator prerequisite, but before recovery or application mutation, the appliance may pre-stage that exact immutable target release and temporarily route only `vwctl update ...` through its update controller. The selected/running predecessor release remains unchanged, and every non-update `vwctl` command must continue to execute from the selected predecessor. The handoff must be durable, idempotent, bound to one explicitly supported release pair and exact target identity, fail closed on launcher/state drift, and restore the canonical `/opt/vaultwarden-oci/current/vwctl` launcher after successful target selection. It must not patch predecessor files in place, alter application data/systemd/runtime state by itself, require a source-checkout command, or become a generic multi-version dispatcher or second mutation authority.
+
 ## 15. Ubuntu host package updates
 
 **Decision:** General Ubuntu package maintenance is a separate workflow from normal application updates. Application recovery does not claim to roll back apt/kernel changes, and the project must never auto-reboot the host.
