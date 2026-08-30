@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import stat
 import tomllib
 import urllib.parse
 import urllib.request
@@ -338,6 +339,61 @@ def resolve_pinned(source_root: Path, *, machine: str | None = None) -> FrozenVe
     )
 
 
+def _release_source_digest(source_root: Path) -> str:
+    """Hash exactly the release tree that immutable staging would copy.
+
+    Development ``--use-latest`` snapshots must identify both their resolved
+    upstream pins and the candidate code bytes. Otherwise two different source
+    revisions with unchanged components can collide at one immutable release
+    path. Bytecode/cache artifacts are ignored here exactly as they are by the
+    release copier.
+    """
+    source_root = source_root.resolve()
+    hasher = hashlib.sha256()
+
+    def add_directory(relative: Path) -> None:
+        hasher.update(b"D\0")
+        hasher.update(relative.as_posix().encode("utf-8"))
+        hasher.update(b"\0")
+
+    def add_file(relative: Path, path: Path) -> None:
+        try:
+            info = path.stat()
+            data = path.read_bytes()
+        except OSError as exc:
+            raise UpdateError(f"cannot hash release source file {path}: {exc}") from exc
+        hasher.update(b"F\0")
+        hasher.update(relative.as_posix().encode("utf-8"))
+        hasher.update(b"\0X\0" if info.st_mode & stat.S_IXUSR else b"\0-\0")
+        hasher.update(str(len(data)).encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(data)
+        hasher.update(b"\0")
+
+    for name in install.RELEASE_FILES:
+        path = source_root / name
+        if not path.is_file():
+            raise UpdateError(f"required release file is missing while hashing source: {path}")
+        add_file(Path(name), path)
+
+    for name in install.RELEASE_DIRS:
+        directory = source_root / name
+        if not directory.is_dir():
+            raise UpdateError(f"required release directory is missing while hashing source: {directory}")
+        add_directory(Path(name))
+        for path in sorted(directory.rglob("*")):
+            relative = path.relative_to(source_root)
+            if "__pycache__" in relative.parts or path.name.endswith(".pyc"):
+                continue
+            if path.is_dir():
+                add_directory(relative)
+            elif path.is_file():
+                add_file(relative, path)
+            else:
+                raise UpdateError(f"unsupported release source path while hashing: {path}")
+    return hasher.hexdigest()
+
+
 def _latest_snapshot(
     source_root: Path,
     *,
@@ -390,6 +446,7 @@ def _latest_snapshot(
         "caddy_combine_ip_ranges": combine_ranges,
         "caddy_ratelimit": rate_limit,
         "digests": digests,
+        "release_source_sha256": _release_source_digest(source_root),
     }
     suffix = hashlib.sha256(
         json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("utf-8")
