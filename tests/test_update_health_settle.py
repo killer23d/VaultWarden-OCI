@@ -104,6 +104,61 @@ class CurrentRuntimeHealthSettleTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertEqual(len(calls), 1)
 
+    def test_mixed_unhealthy_and_stopped_runtime_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            calls: list[tuple[str, ...]] = []
+
+            def runner(argv, **_kwargs):
+                calls.append(tuple(argv))
+                return command(
+                    argv,
+                    ok=False,
+                    stderr=(
+                        "vaultwarden: running (health=unhealthy)\n"
+                        "caddy: exited (health=-)"
+                    ),
+                )
+
+            with mock.patch.object(update.time, "sleep") as sleep:
+                with self.assertRaisesRegex(UpdateError, "caddy: exited"):
+                    update._gate_current(layout, runner)
+
+        sleep.assert_not_called()
+        self.assertEqual(len(calls), 1)
+
+    def test_unhealthy_runtime_plus_independent_failure_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            calls: list[tuple[str, ...]] = []
+
+            def runner(argv, **_kwargs):
+                calls.append(tuple(argv))
+                return command(
+                    argv,
+                    ok=False,
+                    stderr=(
+                        "vaultwarden: running (health=unhealthy)\n"
+                        "caddy: running (health=healthy)\n"
+                        "crowdsec.engine: FAIL (engine unavailable)"
+                    ),
+                )
+
+            with mock.patch.object(update.time, "sleep") as sleep:
+                with self.assertRaisesRegex(UpdateError, "crowdsec.engine: FAIL"):
+                    update._gate_current(layout, runner)
+
+        sleep.assert_not_called()
+        self.assertEqual(len(calls), 1)
+
+    def test_caddy_health_doctor_derivative_can_settle_with_unhealthy_caddy(self) -> None:
+        detail = (
+            "vaultwarden: running (health=healthy)\n"
+            "caddy: running (health=unhealthy)\n"
+            "edge.caddy.health: FAIL (Caddy container is stopped, unhealthy, or could not be inspected)"
+        )
+        self.assertTrue(update._transient_runtime_health(detail))
+
 
 if __name__ == "__main__":
     unittest.main()
