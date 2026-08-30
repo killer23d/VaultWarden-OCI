@@ -723,6 +723,18 @@ def _suppress_package_service_starts(path: Path) -> Iterator[None]:
                 raise EdgeError(f"cannot remove temporary package service policy {path}: {exc}") from exc
 
 
+def _package_install_env() -> dict[str, str]:
+    """Build the isolated apt environment used for CrowdSec packages only."""
+    install_env = dict(os.environ)
+    install_env["DEBIAN_FRONTEND"] = "noninteractive"
+    install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
+    # Current CrowdSec and firewall-bouncer Debian maintainer scripts call
+    # systemctl directly. SYSTEMD_OFFLINE makes start/restart no-ops for this
+    # child transaction without contaminating later project-owned systemctl.
+    install_env["SYSTEMD_OFFLINE"] = "1"
+    return install_env
+
+
 def _service_absent(result: CommandResult) -> bool:
     detail = (result.stdout + "\n" + result.stderr).lower()
     return any(
@@ -738,9 +750,10 @@ def _service_absent(result: CommandResult) -> bool:
 
 
 def _contain_package_bouncers(runner: Runner) -> list[str]:
-    """Prove package bouncers boot-disabled/stopped after any apt outcome."""
+    """Disable/stop package-owned services before project configuration begins."""
     problems: list[str] = []
     for service, label in (
+        (CROWDSEC_SERVICE, "CrowdSec engine"),
         (BOUNCER_SERVICE, "Cloudflare bouncer"),
         (FIREWALL_BOUNCER_SERVICE, "firewall bouncer"),
     ):
@@ -807,7 +820,7 @@ def _nft_table_input_only(
     entries = payload.get("nftables") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
         return False
-    chains: list[tuple[str, str]] = []
+    hooked_chains: list[tuple[str, str]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -816,14 +829,14 @@ def _nft_table_input_only(
             continue
         if chain.get("family") != family or chain.get("table") != table:
             continue
-        name = chain.get("name")
-        if not isinstance(name, str) or not name.startswith(chain_base + "-"):
-            continue
         hook = chain.get("hook")
-        if not isinstance(hook, str):
+        if hook is None:
+            continue
+        name = chain.get("name")
+        if not isinstance(name, str) or not isinstance(hook, str):
             return False
-        chains.append((name, hook))
-    return sorted(chains) == [(f"{chain_base}-input", "input")]
+        hooked_chains.append((name, hook))
+    return sorted(hooked_chains) == [(f"{chain_base}-input", "input")]
 
 
 def _live_firewall_input_only(runner: Runner) -> bool:
@@ -909,16 +922,14 @@ def setup_crowdsec(
         if installer is not None:
             installer.unlink(missing_ok=True)
     _command(runner, ["apt-get", "update"], "apt metadata refresh")
-    install_env = dict(os.environ)
-    install_env["DEBIAN_FRONTEND"] = "noninteractive"
-    install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
+    install_env = _package_install_env()
     if policy_path is None:
         policy_path = POLICY_RC_D if paths == EdgePaths() else paths.acquisition.parent / ".policy-rc.d"
 
-    # The firewall-bouncer package postinst calls systemctl directly, bypassing
-    # policy-rc.d. Establish the INPUT-only merge override before apt can unpack
-    # or configure the package, so even a maintainer-script start cannot claim
-    # FORWARD/DOCKER-USER ownership.
+    # The firewall-bouncer package ships INPUT+FORWARD defaults and package
+    # scripts call systemctl directly. Establish the INPUT-only merge override
+    # before apt and keep SYSTEMD_OFFLINE scoped to the apt child so neither
+    # CrowdSec nor either bouncer can actually start during package configure.
     _write_root_file(
         _firewall_local_path(paths),
         firewall_bouncer_bootstrap_local_text(),
@@ -949,12 +960,12 @@ def setup_crowdsec(
     if install_error is not None:
         if containment_errors:
             raise EdgeError(
-                f"{install_error}; package bouncer containment also failed: "
+                f"{install_error}; package service containment also failed: "
                 + "; ".join(containment_errors)
             ) from install_error
         raise install_error
     if containment_errors:
-        raise EdgeError("package bouncer containment failed: " + "; ".join(containment_errors))
+        raise EdgeError("package service containment failed: " + "; ".join(containment_errors))
 
     _command(runner, ["systemctl", "stop", CROWDSEC_SERVICE], "CrowdSec stop before source restriction")
     _command(runner, ["cscli", "collections", "remove", "--all"], "CrowdSec collection reset")
