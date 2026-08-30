@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from vaultwarden_oci import cli, edge
 
@@ -9,6 +13,7 @@ from vaultwarden_oci import cli, edge
 TEST_DROPIN = Path(
     "/etc/systemd/system/crowdsec-firewall-bouncer.service.d/zz-vwoci-ci-block.conf"
 )
+POSTINST = Path("/var/lib/dpkg/info/crowdsec-firewall-bouncer-nftables.postinst")
 
 
 def command(argv, label: str, *, env=None) -> None:
@@ -26,7 +31,7 @@ def main() -> int:
             f"refusing to overwrite existing host package policy {edge.POLICY_RC_D}"
         )
 
-    # The real Debian postinst directly calls systemctl enable/start.  Block
+    # The real Debian postinst directly calls systemctl enable/start. Block
     # execution only in this CI fixture so the test can exercise those real
     # maintainer scripts without applying packet-filter rules to the runner.
     TEST_DROPIN.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +70,12 @@ def main() -> int:
                 ],
                 "real CrowdSec firewall package installation",
                 env=install_env,
+            )
+
+        postinst = POSTINST.read_text(encoding="utf-8")
+        if "systemctl enable" not in postinst or "systemctl start" not in postinst:
+            raise RuntimeError(
+                "installed firewall-bouncer postinst no longer directly enables/starts systemd; re-audit package containment"
             )
 
         base = edge.FIREWALL_BOUNCER_CONFIG.read_text(encoding="utf-8")
