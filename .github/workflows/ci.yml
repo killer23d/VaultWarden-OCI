@@ -23,13 +23,14 @@ jobs:
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
       - name: Real exact-image admin credential boundary
         run: python3 tests/acceptance_admin_hash.py
-      - name: Supported predecessor transition, forward-only host rollback, and retry
+      - name: Supported predecessor transition, controller handoff, forward-only host rollback, and retry
         run: |
           success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
+          handoff_host="$(mktemp -d /tmp/vwoci-controller-handoff.XXXXXX)"
           state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
           crowdsec_root="$(mktemp -d /tmp/vwoci-crowdsec-transition.XXXXXX)"
           crowdsec_state="$(mktemp /tmp/vwoci-crowdsec-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
+          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$handoff_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$handoff_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
           previous_ref="$(git merge-base HEAD origin/v2)"
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
@@ -62,6 +63,14 @@ jobs:
           # place, and the same target update to converge safely on retry.
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_forward_only_host_rollback.py predecessor-health "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_forward_only_host_rollback.py candidate-retry "$crowdsec_root" "$crowdsec_state"
+
+          # Reproduce the real arm64 failure class using an installation made
+          # by the actual predecessor installer. The exact target controller is
+          # pre-staged without changing current, ordinary commands remain on
+          # the predecessor, and target-owned health settling accepts the
+          # observed all-running unhealthy recovery window before finalization.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$handoff_host"
+          PYTHONPATH="$PWD" python3 tests/acceptance_predecessor_controller_handoff.py "$PWD" "$handoff_host"
 
           # Retain a separate ordinary successful forward transaction with the
           # actual supported predecessor updater.
