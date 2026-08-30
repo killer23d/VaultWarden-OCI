@@ -240,9 +240,20 @@ A verified pre-update recovery snapshot may transiently pause/unpause the runnin
 
 ## 15. Ubuntu host package updates
 
-**Decision:** Host package updates are a separate workflow from application updates.
+**Decision:** General Ubuntu package maintenance is a separate workflow from normal application updates. Application recovery does not claim to roll back apt/kernel changes, and the project must never auto-reboot the host.
 
-Application recovery does not claim to roll back apt/kernel changes. The project may guide safe Ubuntu package maintenance, but it must never auto-reboot the host.
+One deliberately narrow compatibility exception is allowed: an explicitly tested supported-predecessor application transition may install a host package that is required for the target appliance's own security/runtime contract when all of the following are true:
+
+- the dependency is bounded to that named compatibility transition rather than being a general host-upgrade mechanism;
+- candidate source/build/config validation has already succeeded;
+- the pre-update `.vwrec` has been created and verified before the package transaction begins;
+- package maintainer service starts are contained and the resulting appliance-owned host policy is fail-closed and explicitly health-proven;
+- the transition does not install a kernel, perform a general Ubuntu upgrade, or reboot the host;
+- package/host-control changes are treated as **forward-only host state outside `.vwrec` rollback** rather than being silently uninstalled or downgraded during application rollback.
+
+If later candidate activation fails after such a host dependency transition, coherent application rollback restores application data/release selection/systemd application units/guard state only. It must not claim that apt state was restored. The retained forward host state must itself be safe for the predecessor: predecessor health must be proven, security ownership must remain within the approved boundary, and retrying the same supported target update must safely converge without requiring destructive host cleanup.
+
+This exception does not authorize ordinary package drift during application updates. Routine Ubuntu package updates remain owned by the separate host-maintenance workflow.
 
 ## 16. Testing boundary
 
