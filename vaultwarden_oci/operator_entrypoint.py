@@ -103,6 +103,35 @@ def _human_output(args: Sequence[str]) -> Iterator[None]:
         sys.stdout, sys.stderr = stdout, stderr
 
 
+@contextmanager
+def _release_edge_policy() -> Iterator[None]:
+    """Compose the release-specific Worker source invariant into public checks.
+
+    ``edge.doctor_checks`` remains the mechanical edge owner. The installed
+    operator entrypoint adds the dev.17 release invariant so every public
+    doctor/status/CrowdSec-status path sees the same truth without duplicating
+    those command implementations.
+    """
+    from . import crowdsec_worker_policy, edge
+
+    original = edge.doctor_checks
+
+    def checked(*, paths=edge.EdgePaths(), runner=None, now=None):
+        effective_runner = cli.run_command if runner is None else runner
+        checks = original(paths=paths, runner=effective_runner, now=now)
+        return crowdsec_worker_policy.enforce_doctor_checks(
+            checks,
+            paths=paths,
+            runner=effective_runner,
+        )
+
+    edge.doctor_checks = checked
+    try:
+        yield
+    finally:
+        edge.doctor_checks = original
+
+
 def _automation_enable_action() -> str | None:
     """Return the supported first-run automation action only when it is needed."""
     from . import day2
@@ -158,7 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from . import update_cli
 
     try:
-        with _human_output(args):
+        with _release_edge_policy(), _human_output(args):
             try:
                 code = update_cli.main(args)
             except KeyboardInterrupt:
