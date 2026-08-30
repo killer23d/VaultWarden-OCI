@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import admin, cli, edge, runtime, secrets
+from . import admin, cli, edge, predecessor_transition, runtime, secrets
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
 PRESTART_FAILURE = 20
@@ -189,6 +189,12 @@ def prepare(
     )
     if not caddy.ok:
         raise UpdateError(f"candidate Caddy validation failed: {_detail(caddy)}")
+
+    # The actual supported predecessor lacks host state that this candidate
+    # requires.  Its installed updater already delegates pre-stage semantics to
+    # this candidate command, so the one bounded transition can complete before
+    # recovery/activation without adding a migration framework or operator step.
+    predecessor_transition.apply_if_required(frozen.project_version, runner=runner)
 
     payload: dict[str, object] = {
         "schema_version": 1,
