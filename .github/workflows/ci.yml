@@ -23,7 +23,7 @@ jobs:
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
       - name: Real exact-image admin credential boundary
         run: python3 tests/acceptance_admin_hash.py
-      - name: Supported predecessor transition, successful update, and coherent rollback
+      - name: Supported predecessor transition, forward-only host rollback, and retry
         run: |
           success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
           failure_host="$(mktemp -d /tmp/vwoci-update-failure.XXXXXX)"
@@ -47,17 +47,26 @@ jobs:
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
 
-          # Prove an ordinary successful forward transaction with the actual
-          # supported predecessor updater, not only its rollback behavior.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$success_host"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$success_host"
-
-          # Retain the independent post-start fail-closed/coherent rollback proof.
+          # Simulate a candidate post-start application failure only after the
+          # forward-only host dependency transition above has succeeded. The
+          # application rollback restores data/code/units/guard, but does not
+          # claim to undo apt or the retained host security controls.
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$failure_host"
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$failure_host" "$state_file"
           candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
           candidate_python="$failure_host/opt/vaultwarden-oci/releases/$candidate_version"
           PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$failure_host" "$state_file"
+
+          # The durable compatibility exception requires the rolled-back
+          # predecessor to remain supported with the forward host state in
+          # place, and the same target update to converge safely on retry.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_forward_only_host_rollback.py predecessor-health "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_forward_only_host_rollback.py candidate-retry "$crowdsec_root" "$crowdsec_state"
+
+          # Retain a separate ordinary successful forward transaction with the
+          # actual supported predecessor updater.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$success_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$success_host"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
