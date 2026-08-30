@@ -47,7 +47,7 @@ def runner(argv, **_kwargs):
 
 
 class CloudflareWorkerPolicyTests(unittest.TestCase):
-    def test_native_local_only_config_is_healthy_without_migration_attestation(self) -> None:
+    def test_native_local_only_config_requires_current_invocation_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = paths_for(Path(directory))
             paths.remediation_config.parent.mkdir(parents=True)
@@ -55,7 +55,15 @@ class CloudflareWorkerPolicyTests(unittest.TestCase):
                 'crowdsec_config:\n  only_include_decisions_from: ["cscli", "crowdsec"]\n',
                 encoding="utf-8",
             )
+            self.assertFalse(crowdsec_worker_policy.runtime_policy_healthy(paths, runner))
+            crowdsec_worker_policy.attest_current(paths, runner)
             self.assertTrue(crowdsec_worker_policy.runtime_policy_healthy(paths, runner))
+
+            paths.remediation_config.write_text(
+                'crowdsec_config:\n  only_include_decisions_from: ["cscli", "crowdsec"]\n# drift\n',
+                encoding="utf-8",
+            )
+            self.assertFalse(crowdsec_worker_policy.runtime_policy_healthy(paths, runner))
 
     def test_legacy_base_requires_managed_override_and_current_invocation_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
