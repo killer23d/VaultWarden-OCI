@@ -23,19 +23,34 @@ jobs:
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
       - name: Real exact-image admin credential boundary
         run: python3 tests/acceptance_admin_hash.py
-      - name: Supported predecessor update and coherent rollback compatibility
+      - name: Supported predecessor transition, successful update, and coherent rollback
         run: |
-          host_root="$(mktemp -d /tmp/vwoci-update-host.XXXXXX)"
+          success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
+          failure_host="$(mktemp -d /tmp/vwoci-update-failure.XXXXXX)"
           state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$host_root" >/dev/null 2>&1 || true; rm -rf "$host_root" "$state_file" || true' EXIT
+          crowdsec_root="$(mktemp -d /tmp/vwoci-crowdsec-transition.XXXXXX)"
+          crowdsec_state="$(mktemp /tmp/vwoci-crowdsec-state.XXXXXX)"
+          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$failure_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$failure_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
           previous_ref="$(git merge-base HEAD origin/v2)"
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$host_root"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$host_root" "$state_file"
+
+          # Actual predecessor code creates the host CrowdSec state; candidate
+          # code then performs only the bounded direct-predecessor expansion.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
+
+          # Prove an ordinary successful forward transaction with the actual
+          # supported predecessor updater, not only its rollback behavior.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$success_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$success_host"
+
+          # Retain the independent post-start fail-closed/coherent rollback proof.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$failure_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$failure_host" "$state_file"
           candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
-          candidate_python="$host_root/opt/vaultwarden-oci/releases/$candidate_version"
-          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$host_root" "$state_file"
+          candidate_python="$failure_host/opt/vaultwarden-oci/releases/$candidate_version"
+          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$failure_host" "$state_file"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
