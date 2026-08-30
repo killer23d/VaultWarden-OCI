@@ -38,6 +38,7 @@ def test_paths(root: Path) -> edge.EdgePaths:
 
 
 def nft_table(family: str, table: str) -> str:
+    chain_base = "crowdsec-chain" if family == "ip" else "crowdsec6-chain"
     return json.dumps(
         {
             "nftables": [
@@ -46,7 +47,7 @@ def nft_table(family: str, table: str) -> str:
                     "chain": {
                         "family": family,
                         "table": table,
-                        "name": "crowdsec-chain-input",
+                        "name": f"{chain_base}-input",
                         "type": "filter",
                         "hook": "input",
                         "prio": -10,
