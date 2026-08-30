@@ -159,6 +159,8 @@ def _provision_candidate_crowdsec(paths: edge.EdgePaths, runner: Runner) -> None
     edge._assert_acquisition_scope(paths)
     edge._command(runner, ["cscli", "hub", "update"], "CrowdSec Hub metadata refresh")
     for collection in edge.CROWDSEC_COLLECTIONS:
+        if runner(["cscli", "collections", "inspect", collection]).ok:
+            continue
         edge._command(
             runner,
             ["cscli", "collections", "install", collection],
@@ -202,6 +204,7 @@ def _provision_candidate_crowdsec(paths: edge.EdgePaths, runner: Runner) -> None
         raise UpdateError(
             "CrowdSec firewall bouncer effective configuration is not valid INPUT-only nftables policy"
         )
+    edge._command(runner, ["systemctl", "daemon-reload"], "systemd reload")
     edge._command(
         runner,
         ["systemctl", "enable", "--now", edge.FIREWALL_BOUNCER_SERVICE],
@@ -250,23 +253,20 @@ def _migrate(
 ) -> None:
     worker = _worker_snapshot(paths, runner)
     acquisition_before = _capture_text_file(paths.acquisition)
-    firewall_key_created = False
     try:
         _install_packages(paths, runner, policy_path=policy_path)
         _provision_candidate_crowdsec(paths, runner)
-        firewall_key_created = True
         _prove_candidate_crowdsec(paths, runner, worker)
     except Exception as exc:
         cleanup: list[str] = []
         containment_error = _contain_firewall(runner)
         if containment_error:
             cleanup.append(containment_error)
-        if firewall_key_created:
-            deleted = runner(
-                ["cscli", "bouncers", "delete", edge.FIREWALL_BOUNCER_ID, "--ignore-missing"]
-            )
-            if not deleted.ok:
-                cleanup.append("new firewall LAPI identity could not be removed")
+        deleted = runner(
+            ["cscli", "bouncers", "delete", edge.FIREWALL_BOUNCER_ID, "--ignore-missing"]
+        )
+        if not deleted.ok:
+            cleanup.append("new firewall LAPI identity could not be removed")
         try:
             _restore_acquisition(paths.acquisition, acquisition_before)
             restarted = runner(["systemctl", "restart", edge.CROWDSEC_SERVICE])
@@ -295,10 +295,7 @@ def apply_if_required(
         # parent updater has already proven this path in real update execution.
         if not current.exists() and not current.is_symlink():
             return False
-        try:
-            _, current_release, _ = update._current(layout)
-        except UpdateError:
-            raise
+        _, current_release, _ = update._current(layout)
     if not _required(current_release, target_release):
         return False
     if paths == edge.EdgePaths() and os.geteuid() != 0:
