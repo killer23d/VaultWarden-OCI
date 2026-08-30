@@ -87,10 +87,9 @@ class LegacyHandoffRekeyTests(unittest.TestCase):
 
             source = root / "candidate"
             source.mkdir()
+            install._copy_release_tree(Path(__file__).resolve().parents[1], source)
             versions = source / "versions.toml"
             versions.write_text(_legacy_frozen_versions(), encoding="utf-8")
-            (source / "vwctl").write_text("#!/usr/bin/env python3\nprint('corrected')\n", encoding="utf-8")
-            (source / "vwctl").chmod(0o755)
 
             corrected = update_versions.rekey_latest_frozen_source(
                 source,
