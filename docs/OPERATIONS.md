@@ -109,6 +109,8 @@ The supported CrowdSec path restores the useful earlier-product detection breadt
 - the Cloudflare Worker bouncer for locally generated proxied web decisions;
 - the nftables firewall bouncer for broad/community/list decisions on **host INPUT only**.
 
+The Cloudflare Worker is intentionally limited to exactly `only_include_decisions_from: ["cscli", "crowdsec"]`. Broad CAPI/community/list decisions stay off the Worker/KV path and are consumed by the host firewall bouncer instead. `crowdsec.cloudflare` can report `PASS` only when the active Worker invocation is bound to a policy attestation containing that exact source set and a digest of the exact base/local config files it started from. Editing the config after start, starting the service outside the supported `vwctl` flow, or carrying an attestation across a new systemd invocation therefore fails the check.
+
 The firewall bouncer is intentionally constrained to the nftables `input` hook. It must not own Docker `forward` or `DOCKER-USER`; the existing Cloudflare-only origin filter remains the single owner of published container ingress.
 
 First setup or a deliberate reconfiguration is:
@@ -119,7 +121,7 @@ sudo vwctl crowdsec status
 sudo vwctl crowdsec remediation-start
 ```
 
-`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
+`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. `remediation-start` starts the Worker only through the supported one-shot token path and records the current invocation/config policy attestation before returning success. After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
 
 ```bash
 sudo vwctl crowdsec confirm-fail-open
@@ -177,6 +179,8 @@ sudo vwctl update apply
 
 The updater discovers/stages exact immutable content before downtime where practical, verifies a pre-update `.vwrec`, activates the immutable release, and health-gates it. A recovery snapshot briefly pauses/unpauses the running containers for consistency; the updater allows only a bounded Docker-health recovery window afterward. Unrelated failures still fail closed immediately. If candidate runtime activation may have changed persistent state, it refuses to pretend a binary-only rollback restored data; the verified pre-update recovery point is the downgrade boundary.
 
+An update that changes the Cloudflare Worker decision-source contract may deliberately stop **before** creating the recovery point. In that case the candidate re-arms the Worker under the required local-only policy, invalidates the previous invocation's Fail Open confirmation, and prints an `ACTION` telling the operator to set every newly recreated Worker Route to **Fail Open** and run `sudo vwctl crowdsec confirm-fail-open`. After confirming the new invocation, rerun the **same installed `vwctl update apply` command**. Do not substitute a candidate checkout, run `crowdsec setup`, reuse the old Fail Open confirmation, or bypass this stop. The broader host CrowdSec package/Hub/acquisition/firewall transition is not allowed to occur until the rerun has created and verified the pre-update recovery point.
+
 Explicit current-upstream discovery:
 
 ```bash
@@ -225,6 +229,10 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 | Vaultwarden CrowdSec security log | `/var/lib/vaultwarden-oci/vaultwarden/log/vaultwarden.log` |
 | Project CrowdSec acquisition | `/etc/crowdsec/acquis.d/vaultwarden-oci.yaml` |
 | CrowdSec firewall policy override | `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local` |
+| Cloudflare Worker runtime config | `/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml` |
+| Cloudflare Worker local policy override | `/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml.local` |
+| Cloudflare Worker invocation/policy attestation | `/var/lib/vaultwarden-oci/state/crowdsec-cloudflare-worker-policy.json` |
+| Cloudflare Worker Fail Open confirmation | `/var/lib/vaultwarden-oci/state/crowdsec-cloudflare-fail-open.json` |
 | Local `.vwrec` recovery points | `/var/lib/vaultwarden-oci/backups` |
 | Volatile rendered/decrypted state | `/run/vaultwarden-oci` |
 | Immutable installed releases | `/opt/vaultwarden-oci/releases/<version>` |
