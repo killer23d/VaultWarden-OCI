@@ -255,26 +255,27 @@ def delegate_non_update_if_handoff(
     root: Path = Path("/"),
     controller_vwctl: Path | None = None,
 ) -> bool:
-    """Delegate ordinary commands to the selected predecessor during handoff."""
+    """Delegate ordinary commands to the selected predecessor during handoff.
+
+    This path deliberately does not read the root-only handoff state file so
+    ordinary read-only ``vwctl`` commands remain usable by the same users as
+    before the handoff. The installed launcher target itself proves whether
+    this exact controller is currently acting as the temporary dispatcher.
+    """
     if argv and argv[0] in {"update", "__update-candidate"}:
         return False
     layout = install.Layout(root.resolve())
-    state = _load_state(_state_path(layout))
-    if state is None:
-        return False
-
-    controller = Path(str(state["controller"])).resolve()
-    if _controller_for_this_process(controller_vwctl) != controller:
+    controller = _controller_for_this_process(controller_vwctl)
+    if _read_symlink(_launcher(layout), "installed vwctl launcher") != controller:
         return False
 
     _, current_release, current_dir = update._current(layout)
-    target_release = str(state["target_release"])
-    predecessor_release = str(state["predecessor_release"])
+    target_release = controller.parent.name
     if current_release == target_release:
         return False
-    if current_release != predecessor_release:
+    if not _required(current_release, target_release):
         raise UpdateError(
-            "selected release is outside the recorded update-controller handoff boundary"
+            "installed vwctl launcher points to a controller outside the supported predecessor handoff"
         )
 
     current_vwctl = current_dir / "vwctl"
@@ -352,5 +353,6 @@ def post_command(
             raise HandoffRequired(HANDOFF_ACTION)
         return exit_code
 
-    finalize_if_target_current(root=root)
+    if argv and argv[0] == "update":
+        finalize_if_target_current(root=root)
     return exit_code
