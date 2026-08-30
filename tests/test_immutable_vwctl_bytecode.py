@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -24,7 +25,8 @@ class ImmutableVwctlBytecodeTests(unittest.TestCase):
                 if path.is_dir():
                     path.chmod(0o755)
                 elif path.is_file():
-                    path.chmod(0o755 if path.stat().st_mode & os.X_OK else 0o644)
+                    executable = bool(path.stat().st_mode & stat.S_IXUSR)
+                    path.chmod(0o755 if executable else 0o644)
 
             self.assertFalse(any(release.rglob("*.pyc")))
             self.assertFalse(any(path.name == "__pycache__" for path in release.rglob("*")))
