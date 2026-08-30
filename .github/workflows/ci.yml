@@ -38,10 +38,13 @@ jobs:
           # Actual predecessor code creates its real all-origin Worker config.
           # Candidate first pass re-arms it local-only and must stop for a new
           # Fail Open confirmation. The actual predecessor confirmation schema
-          # then binds that proof to the new invocation before host expansion.
+          # then binds that proof to the new invocation. The real predecessor
+          # doctor must still be green before any host firewall migration or
+          # recovery is allowed; host expansion happens only after recovery.
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py rearm-candidate "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py confirm-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
           PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
 
           # Prove an ordinary successful forward transaction with the actual
