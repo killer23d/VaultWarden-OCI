@@ -10,7 +10,7 @@ import stat
 import tomllib
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
@@ -38,6 +38,7 @@ _MANIFEST_ACCEPT = ", ".join(
         "application/vnd.docker.distribution.manifest.list.v2+json",
     )
 )
+_LATEST_MARKER = ".latest."
 
 
 class UpdateError(RuntimeError):
@@ -340,21 +341,29 @@ def resolve_pinned(source_root: Path, *, machine: str | None = None) -> FrozenVe
 
 
 def _release_source_digest(source_root: Path) -> str:
-    """Hash exactly the release tree that immutable staging would copy.
+    """Hash the release-owned source bytes that are not generated when frozen.
 
-    Development ``--use-latest`` snapshots must identify both their resolved
-    upstream pins and the candidate code bytes. Otherwise two different source
-    revisions with unchanged components can collide at one immutable release
-    path. Bytecode/cache artifacts are ignored here exactly as they are by the
-    release copier.
+    ``versions.toml`` is deliberately excluded because a ``--use-latest``
+    update replaces it with the exact frozen snapshot manifest. Its base
+    project version, components and image digests are already explicit inputs
+    to the snapshot identity below. Cache artifacts are ignored exactly as the
+    immutable release copier ignores them.
+
+    Missing release paths are represented deterministically instead of making
+    version resolution double as source-layout validation. Actual immutable
+    staging remains the fail-closed authority for required release content.
     """
     source_root = source_root.resolve()
     hasher = hashlib.sha256()
 
-    def add_directory(relative: Path) -> None:
-        hasher.update(b"D\0")
+    def marker(kind: bytes, relative: Path) -> None:
+        hasher.update(kind)
+        hasher.update(b"\0")
         hasher.update(relative.as_posix().encode("utf-8"))
         hasher.update(b"\0")
+
+    def add_directory(relative: Path) -> None:
+        marker(b"D", relative)
 
     def add_file(relative: Path, path: Path) -> None:
         try:
@@ -362,25 +371,32 @@ def _release_source_digest(source_root: Path) -> str:
             data = path.read_bytes()
         except OSError as exc:
             raise UpdateError(f"cannot hash release source file {path}: {exc}") from exc
-        hasher.update(b"F\0")
-        hasher.update(relative.as_posix().encode("utf-8"))
-        hasher.update(b"\0X\0" if info.st_mode & stat.S_IXUSR else b"\0-\0")
+        marker(b"F", relative)
+        hasher.update(b"X\0" if info.st_mode & stat.S_IXUSR else b"-\0")
         hasher.update(str(len(data)).encode("ascii"))
         hasher.update(b"\0")
         hasher.update(data)
         hasher.update(b"\0")
 
     for name in install.RELEASE_FILES:
+        if name == "versions.toml":
+            continue
         path = source_root / name
-        if not path.is_file():
-            raise UpdateError(f"required release file is missing while hashing source: {path}")
-        add_file(Path(name), path)
+        relative = Path(name)
+        if path.is_file():
+            add_file(relative, path)
+        elif path.exists() or path.is_symlink():
+            marker(b"T", relative)
+        else:
+            marker(b"M", relative)
 
     for name in install.RELEASE_DIRS:
         directory = source_root / name
+        relative_root = Path(name)
         if not directory.is_dir():
-            raise UpdateError(f"required release directory is missing while hashing source: {directory}")
-        add_directory(Path(name))
+            marker(b"T" if directory.exists() or directory.is_symlink() else b"M", relative_root)
+            continue
+        add_directory(relative_root)
         for path in sorted(directory.rglob("*")):
             relative = path.relative_to(source_root)
             if "__pycache__" in relative.parts or path.name.endswith(".pyc"):
@@ -390,8 +406,59 @@ def _release_source_digest(source_root: Path) -> str:
             elif path.is_file():
                 add_file(relative, path)
             else:
-                raise UpdateError(f"unsupported release source path while hashing: {path}")
+                marker(b"T", relative)
     return hasher.hexdigest()
+
+
+def _latest_project_version(
+    base_version: str,
+    frozen: FrozenVersions,
+    source_root: Path,
+) -> str:
+    exact = {
+        "architecture": frozen.architecture,
+        "vaultwarden": frozen.vaultwarden,
+        "caddy": frozen.caddy,
+        "caddy_dns_cloudflare": frozen.caddy_dns_cloudflare,
+        "caddy_cloudflare_ip": frozen.caddy_cloudflare_ip,
+        "caddy_combine_ip_ranges": frozen.caddy_combine_ip_ranges,
+        "caddy_ratelimit": frozen.caddy_ratelimit,
+        "digests": {
+            "vaultwarden": frozen.vaultwarden_image.digest,
+            "caddy_builder": frozen.caddy_builder_image.digest,
+            "caddy_runtime": frozen.caddy_runtime_image.digest,
+        },
+        "release_source_sha256": _release_source_digest(source_root),
+    }
+    suffix = hashlib.sha256(
+        json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    try:
+        return install.validate_release_name(f"{base_version}.latest.{suffix}")
+    except install.InstallError as exc:
+        raise UpdateError(str(exc)) from exc
+
+
+def rekey_latest_frozen_source(
+    source_root: Path,
+    versions_path: Path,
+    *,
+    machine: str | None = None,
+) -> FrozenVersions:
+    """Derive the source-aware identity from an already-frozen latest source.
+
+    This compatibility boundary lets a newer candidate source repair a
+    pre-recovery handoff created by an older immutable controller whose latest
+    snapshot identity did not include candidate code bytes. No network lookup
+    is needed: the frozen manifest already contains the exact resolved
+    components and image digest for this architecture.
+    """
+    frozen = resolve_pinned_file(versions_path, machine=machine)
+    if _LATEST_MARKER not in frozen.project_version:
+        return frozen
+    base_version = frozen.project_version.split(_LATEST_MARKER, 1)[0]
+    project = _latest_project_version(base_version, frozen, source_root)
+    return replace(frozen, source="latest", project_version=project)
 
 
 def _latest_snapshot(
@@ -437,28 +504,12 @@ def _latest_snapshot(
         "caddy_builder": remote.image_digest("caddy", f"{caddy}-builder-alpine", arch),
         "caddy_runtime": remote.image_digest("caddy", f"{caddy}-alpine", arch),
     }
-    exact = {
-        "architecture": arch,
-        "vaultwarden": vaultwarden,
-        "caddy": caddy,
-        "caddy_dns_cloudflare": plugin,
-        "caddy_cloudflare_ip": trusted_proxy,
-        "caddy_combine_ip_ranges": combine_ranges,
-        "caddy_ratelimit": rate_limit,
-        "digests": digests,
-        "release_source_sha256": _release_source_digest(source_root),
-    }
-    suffix = hashlib.sha256(
-        json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:12]
-    try:
-        project = install.validate_release_name(f"{base.version}.latest.{suffix}")
-    except install.InstallError as exc:
-        raise UpdateError(str(exc)) from exc
-    return _freeze(
-        "latest", arch, project, vaultwarden, caddy, plugin,
+    provisional = _freeze(
+        "latest", arch, base.version, vaultwarden, caddy, plugin,
         trusted_proxy, combine_ranges, rate_limit, digests,
     )
+    project = _latest_project_version(base.version, provisional, source_root)
+    return replace(provisional, project_version=project)
 
 
 def resolve_latest(
