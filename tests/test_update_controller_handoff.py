@@ -26,7 +26,6 @@ def _versions(path: Path, version: str = _TARGET) -> None:
 class UpdateControllerHandoffTests(unittest.TestCase):
     def _host(self, root: Path) -> tuple[install.Layout, Path, Path, Path]:
         layout = install.Layout(root.resolve())
-        install_root = layout.path(install.INSTALL_ROOT)
         releases = layout.path(install.RELEASES_DIR)
         predecessor = releases / _PREDECESSOR
         predecessor.mkdir(parents=True)
@@ -60,7 +59,7 @@ class UpdateControllerHandoffTests(unittest.TestCase):
 
         return stage
 
-    def test_prepare_stages_exact_controller_and_is_idempotent(self) -> None:
+    def test_prepare_stages_exact_controller_and_revalidates_active_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout, source, launcher, _ = self._host(root)
@@ -94,7 +93,41 @@ class UpdateControllerHandoffTests(unittest.TestCase):
                     root=root,
                 )
                 self.assertFalse(again)
-                self.assertEqual(staged.call_count, 1)
+                self.assertEqual(staged.call_count, 2)
+
+    def test_active_handoff_refuses_changed_source_under_same_release_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout, source, _, _ = self._host(root)
+            with mock.patch.object(
+                update_controller_handoff.install,
+                "stage_release",
+                side_effect=self._fake_stage(layout),
+            ):
+                update_controller_handoff.prepare_if_required(
+                    _TARGET,
+                    source,
+                    current_release=_PREDECESSOR,
+                    root=root,
+                )
+
+            def reject_changed(_source: Path, _layout: install.Layout, _release: str) -> Path:
+                raise install.InstallError(
+                    "release already exists with different content; choose a new immutable release version"
+                )
+
+            with mock.patch.object(
+                update_controller_handoff.install,
+                "stage_release",
+                side_effect=reject_changed,
+            ):
+                with self.assertRaisesRegex(install.InstallError, "different content"):
+                    update_controller_handoff.prepare_if_required(
+                        _TARGET,
+                        source,
+                        current_release=_PREDECESSOR,
+                        root=root,
+                    )
 
     def test_existing_state_with_canonical_launcher_repairs_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -280,6 +313,33 @@ class UpdateControllerHandoffTests(unittest.TestCase):
                     1,
                 )
                 prepare.assert_not_called()
+
+    def test_read_only_update_check_never_finalizes_root_handoff(self) -> None:
+        with mock.patch.object(
+            update_controller_handoff,
+            "finalize_if_target_current",
+        ) as finalize:
+            self.assertEqual(
+                update_controller_handoff.post_command(
+                    0,
+                    ["update", "check", "--json"],
+                ),
+                0,
+            )
+            finalize.assert_not_called()
+
+        with mock.patch.object(
+            update_controller_handoff,
+            "finalize_if_target_current",
+        ) as finalize:
+            self.assertEqual(
+                update_controller_handoff.post_command(
+                    0,
+                    ["update", "apply", "--yes"],
+                ),
+                0,
+            )
+            finalize.assert_called_once()
 
 
 if __name__ == "__main__":
