@@ -81,7 +81,9 @@ discover stable project release
 
 Automated update checking/notification is desirable. Unattended application update apply is not the default.
 
-Ubuntu host package updates are a separate workflow. Application recovery must not pretend to roll back apt/kernel changes, and the product must never auto-reboot.
+General Ubuntu package maintenance remains a separate workflow. Application recovery must not pretend to roll back apt/kernel changes, and the product must never auto-reboot.
+
+A narrowly bounded exception is permitted for an explicitly tested supported-predecessor compatibility transition: after candidate prevalidation and a verified pre-update `.vwrec`, the application transition may install a host package that is required for the target appliance security/runtime contract. That dependency is **forward-only host state** outside `.vwrec` rollback; it is not a general Ubuntu upgrade and must not include a kernel or reboot. If the application subsequently rolls back, the retained host state must remain safe for the predecessor, predecessor health must be proven, and retrying the same supported target update must converge safely without destructive package cleanup.
 
 ## Explicit non-goals
 
