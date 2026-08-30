@@ -18,8 +18,7 @@ from . import cli, durability, install, update
 from .update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16"
-_TARGET = "0.1.0-dev.18"
-_SUPERSEDED_TARGET = "0.1.0-dev.17"
+_TARGET = "0.1.0-dev.17"
 _LATEST_MARKER = ".latest."
 _STATE = Path("/var/lib/vaultwarden-oci/state/update-controller-handoff.json")
 _SCHEMA_VERSION = 1
@@ -137,25 +136,32 @@ def _supersedable_state(
     current_release: str,
     target_release: str,
 ) -> Path | None:
-    """Recognize only the unselected dev.17 acceptance handoff superseded by dev.18.
+    """Recognize an older unselected snapshot of this same bounded target.
 
-    The live arm64 run staged dev.17 code before discovering that root Python
-    bytecode could pollute a read-only release tree. Dev.17 was never selected
-    or released. A dev.16 host may therefore replace only that temporary
-    pre-recovery controller handoff with the corrected dev.18 target. The old
-    immutable directory is left untouched and unselected.
+    ``--use-latest`` snapshots have exact immutable identities. If the source
+    tree or resolved component snapshot changes while a pre-recovery handoff is
+    active, the selected predecessor is still authoritative. The newer exact
+    snapshot may supersede only that temporary controller handoff; the older
+    immutable directory remains untouched and unselected.
     """
+    recorded_target = str(state["target_release"])
     if (
         str(state["predecessor_release"]) != current_release
         or _base_release(current_release) != _PREDECESSOR
-        or _base_release(str(state["target_release"])) != _SUPERSEDED_TARGET
+        or _base_release(recorded_target) != _TARGET
         or _base_release(target_release) != _TARGET
+        or recorded_target == target_release
     ):
         return None
     return _recorded_controller(layout, state)
 
 
-def _is_superseded_controller(layout: install.Layout, controller: Path) -> bool:
+def _is_prior_target_controller(
+    layout: install.Layout,
+    controller: Path,
+    *,
+    target_release: str,
+) -> bool:
     releases = layout.path(install.RELEASES_DIR)
     try:
         relative = controller.relative_to(releases)
@@ -164,7 +170,8 @@ def _is_superseded_controller(layout: install.Layout, controller: Path) -> bool:
     return (
         len(relative.parts) == 2
         and relative.parts[1] == "vwctl"
-        and _base_release(relative.parts[0]) == _SUPERSEDED_TARGET
+        and _base_release(relative.parts[0]) == _TARGET
+        and relative.parts[0] != target_release
     )
 
 
@@ -204,7 +211,7 @@ def _handoff_context(
     controller: Path,
     canonical: Path,
 ) -> tuple[bool, Path | None]:
-    """Validate current handoff state and return (already_target, superseded_controller)."""
+    """Validate current handoff state and return (already_target, prior_controller)."""
     if state is None:
         if launcher_target != canonical:
             raise UpdateError(
@@ -219,9 +226,13 @@ def _handoff_context(
         controller=controller,
     ):
         allowed = {canonical, controller}
-        # A crash while superseding the known unselected dev.17 handoff can
-        # leave the new durable state published just before the launcher moves.
-        if _is_superseded_controller(layout, launcher_target):
+        # A crash while superseding an older exact snapshot can leave the new
+        # durable state published just before the launcher moves.
+        if _is_prior_target_controller(
+            layout,
+            launcher_target,
+            target_release=target_release,
+        ):
             allowed.add(launcher_target)
         if launcher_target not in allowed:
             raise UpdateError(
@@ -229,19 +240,19 @@ def _handoff_context(
             )
         return launcher_target == controller, None
 
-    superseded = _supersedable_state(
+    prior = _supersedable_state(
         layout,
         state,
         current_release=current_release,
         target_release=target_release,
     )
-    if superseded is None:
+    if prior is None:
         raise UpdateError("another update-controller handoff is already recorded")
-    if launcher_target not in {canonical, superseded}:
+    if launcher_target not in {canonical, prior}:
         raise UpdateError(
             f"installed vwctl launcher changed outside the supported handoff: {launcher_target}"
         )
-    return False, superseded
+    return False, prior
 
 
 def prepare_if_required(
