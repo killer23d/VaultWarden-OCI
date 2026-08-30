@@ -496,6 +496,30 @@ labels:
 '''
 
 
+def firewall_bouncer_bootstrap_local_text() -> str:
+    """Install the INPUT-only invariant before package maintainer scripts can run."""
+    return '''# Managed by VaultWarden-OCI. Safety override written before package configuration.
+mode: nftables
+disable_ipv4: false
+disable_ipv6: false
+nftables:
+  ipv4:
+    enabled: true
+    set-only: false
+    table: crowdsec
+    chain: crowdsec-chain
+    priority: -10
+  ipv6:
+    enabled: true
+    set-only: false
+    table: crowdsec6
+    chain: crowdsec6-chain
+    priority: -10
+nftables_hooks:
+  - input
+'''
+
+
 def firewall_bouncer_local_text(*, api_key: str, lapi_url: str) -> str:
     """Restrict the firewall bouncer to host INPUT with a project-owned LAPI key."""
     q = json.dumps
@@ -699,6 +723,137 @@ def _suppress_package_service_starts(path: Path) -> Iterator[None]:
                 raise EdgeError(f"cannot remove temporary package service policy {path}: {exc}") from exc
 
 
+def _service_absent(result: CommandResult) -> bool:
+    detail = (result.stdout + "\n" + result.stderr).lower()
+    return any(
+        marker in detail
+        for marker in (
+            "does not exist",
+            "could not be found",
+            "not loaded",
+            "no such file",
+            "unit file not found",
+        )
+    )
+
+
+def _contain_package_bouncers(runner: Runner) -> list[str]:
+    """Prove package bouncers boot-disabled/stopped after any apt outcome."""
+    problems: list[str] = []
+    for service, label in (
+        (BOUNCER_SERVICE, "Cloudflare bouncer"),
+        (FIREWALL_BOUNCER_SERVICE, "firewall bouncer"),
+    ):
+        result = runner(["systemctl", "disable", "--now", service])
+        if result.ok or _service_absent(result):
+            continue
+        detail = result.kind if result.returncode is None else f"exit {result.returncode}"
+        problems.append(f"{label} disable/stop could not be proven ({detail})")
+    return problems
+
+
+def _parse_hook_list(text: str) -> tuple[str, ...] | None:
+    lines = text.splitlines()
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped.startswith("nftables_hooks:"):
+            continue
+        tail = stripped.split(":", 1)[1].strip()
+        if tail:
+            if not (tail.startswith("[") and tail.endswith("]")):
+                return None
+            inner = tail[1:-1].strip()
+            if not inner:
+                return ()
+            return tuple(item.strip().strip("\"'") for item in inner.split(","))
+        hooks: list[str] = []
+        for following in lines[index + 1:]:
+            item = following.strip()
+            if not item or item.startswith("#"):
+                continue
+            if not item.startswith("-"):
+                break
+            value = item[1:].strip().strip("\"'")
+            if not value:
+                return None
+            hooks.append(value)
+        return tuple(hooks)
+    return None
+
+
+def _effective_firewall_hooks(paths: EdgePaths, runner: Runner) -> tuple[str, ...] | None:
+    result = runner(
+        [FIREWALL_BOUNCER_BINARY, "-c", str(_firewall_config_path(paths)), "-T"]
+    )
+    if not result.ok:
+        return None
+    return _parse_hook_list(result.stdout)
+
+
+def _nft_table_input_only(
+    runner: Runner,
+    *,
+    family: str,
+    table: str,
+    chain_base: str,
+) -> bool:
+    result = runner(["nft", "--json", "list", "table", family, table])
+    if not result.ok:
+        return False
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    entries = payload.get("nftables") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return False
+    chains: list[tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        chain = entry.get("chain")
+        if not isinstance(chain, dict):
+            continue
+        if chain.get("family") != family or chain.get("table") != table:
+            continue
+        name = chain.get("name")
+        if not isinstance(name, str) or not name.startswith(chain_base + "-"):
+            continue
+        hook = chain.get("hook")
+        if not isinstance(hook, str):
+            return False
+        chains.append((name, hook))
+    return sorted(chains) == [(f"{chain_base}-input", "input")]
+
+
+def _live_firewall_input_only(runner: Runner) -> bool:
+    return _nft_table_input_only(
+        runner,
+        family="ip",
+        table="crowdsec",
+        chain_base="crowdsec-chain",
+    ) and _nft_table_input_only(
+        runner,
+        family="ip6",
+        table="crowdsec6",
+        chain_base="crowdsec6-chain",
+    )
+
+
+def _firewall_boundary_healthy(
+    paths: EdgePaths,
+    runner: Runner,
+    *,
+    require_live: bool,
+) -> bool:
+    config = _firewall_config_path(paths)
+    if not runner([FIREWALL_BOUNCER_BINARY, "-c", str(config), "-t"]).ok:
+        return False
+    if _effective_firewall_hooks(paths, runner) != ("input",):
+        return False
+    return not require_live or _live_firewall_input_only(runner)
+
+
 def _create_lapi_bouncer_key(runner: Runner, bouncer_id: str, label: str) -> str:
     runner(["cscli", "bouncers", "delete", bouncer_id, "--ignore-missing"])
     created = runner(["cscli", "-oraw", "bouncers", "add", bouncer_id])
@@ -759,27 +914,48 @@ def setup_crowdsec(
     install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
     if policy_path is None:
         policy_path = POLICY_RC_D if paths == EdgePaths() else paths.acquisition.parent / ".policy-rc.d"
-    with _suppress_package_service_starts(policy_path):
-        _apt_command(
-            runner,
-            [
-                "apt-get",
-                "install",
-                "-y",
-                "crowdsec",
-                "crowdsec-cloudflare-worker-bouncer",
-                "crowdsec-firewall-bouncer-nftables",
-                "logrotate",
-            ],
-            "CrowdSec package installation",
-            env=install_env,
-        )
-    _command(runner, ["systemctl", "disable", "--now", BOUNCER_SERVICE], "Cloudflare bouncer disable/stop")
-    _command(
-        runner,
-        ["systemctl", "disable", "--now", FIREWALL_BOUNCER_SERVICE],
-        "firewall bouncer disable/stop before configuration",
+
+    # The firewall-bouncer package postinst calls systemctl directly, bypassing
+    # policy-rc.d. Establish the INPUT-only merge override before apt can unpack
+    # or configure the package, so even a maintainer-script start cannot claim
+    # FORWARD/DOCKER-USER ownership.
+    _write_root_file(
+        _firewall_local_path(paths),
+        firewall_bouncer_bootstrap_local_text(),
+        0o600,
     )
+
+    install_error: EdgeError | None = None
+    try:
+        with _suppress_package_service_starts(policy_path):
+            _apt_command(
+                runner,
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "crowdsec",
+                    "crowdsec-cloudflare-worker-bouncer",
+                    "crowdsec-firewall-bouncer-nftables",
+                    "logrotate",
+                ],
+                "CrowdSec package installation",
+                env=install_env,
+            )
+    except EdgeError as exc:
+        install_error = exc
+
+    containment_errors = _contain_package_bouncers(runner)
+    if install_error is not None:
+        if containment_errors:
+            raise EdgeError(
+                f"{install_error}; package bouncer containment also failed: "
+                + "; ".join(containment_errors)
+            ) from install_error
+        raise install_error
+    if containment_errors:
+        raise EdgeError("package bouncer containment failed: " + "; ".join(containment_errors))
+
     _command(runner, ["systemctl", "stop", CROWDSEC_SERVICE], "CrowdSec stop before source restriction")
     _command(runner, ["cscli", "collections", "remove", "--all"], "CrowdSec collection reset")
     _remove_cscli_setup_acquisitions(paths)
@@ -811,16 +987,22 @@ def setup_crowdsec(
         firewall_bouncer_local_text(api_key=firewall_key, lapi_url=_local_lapi_url(runner)),
         0o600,
     )
-    _command(
-        runner,
-        [FIREWALL_BOUNCER_BINARY, "-c", str(_firewall_config_path(paths)), "-t"],
-        "CrowdSec firewall bouncer configuration validation",
-    )
+    if not _firewall_boundary_healthy(paths, runner, require_live=False):
+        raise EdgeError(
+            "CrowdSec firewall bouncer effective configuration is not valid INPUT-only nftables policy"
+        )
     _command(
         runner,
         ["systemctl", "enable", "--now", FIREWALL_BOUNCER_SERVICE],
         "CrowdSec firewall bouncer enable/start",
     )
+    if not _firewall_boundary_healthy(paths, runner, require_live=True):
+        containment = _contain_package_bouncers(runner)
+        suffix = f"; disable/stop also failed: {'; '.join(containment)}" if containment else ""
+        raise EdgeError(
+            "CrowdSec firewall bouncer live nftables ownership is not exactly host INPUT"
+            + suffix
+        )
 
 
 def crowdsec_decisions(*, runner: Runner = run_command) -> CommandResult:
@@ -1219,21 +1401,19 @@ def doctor_checks(
         else "required CrowdSec detection collections are incomplete",
     ))
 
-    firewall_config = _firewall_config_path(paths)
-    firewall_test = runner([FIREWALL_BOUNCER_BINARY, "-c", str(firewall_config), "-t"])
     firewall_bouncer = runner(["cscli", "bouncers", "inspect", FIREWALL_BOUNCER_ID, "-o", "json"])
     firewall_ok = (
         _active(FIREWALL_BOUNCER_SERVICE, runner)
         and _enabled(FIREWALL_BOUNCER_SERVICE, runner)
-        and firewall_test.ok
         and firewall_bouncer.ok
+        and _firewall_boundary_healthy(paths, runner, require_live=True)
     )
     checks.append(DoctorCheck(
         "crowdsec.firewall",
         "PASS" if firewall_ok else "FAIL",
-        "CrowdSec firewall bouncer enforces broad decisions on host INPUT only"
+        "CrowdSec firewall bouncer effective config and live nftables ownership are host INPUT only"
         if firewall_ok
-        else "CrowdSec host-input firewall remediation service/config/LAPI state is unhealthy",
+        else "CrowdSec host-input firewall remediation service/LAPI/effective-config/live-nftables state is unhealthy or not INPUT-only",
     ))
 
     active = _active(BOUNCER_SERVICE, runner)
