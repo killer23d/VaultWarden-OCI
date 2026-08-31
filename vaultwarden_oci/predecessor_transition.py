@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import cli, crowdsec_firewall_startup, crowdsec_worker_policy, edge, install, update
+from . import cli, crowdsec_worker_policy, edge, install, update
 from .update_versions import UpdateError
 
 _PREDECESSOR = "0.1.0-dev.16"
@@ -354,14 +354,10 @@ def _provision_candidate_crowdsec(paths: edge.EdgePaths, runner: Runner) -> None
         ["systemctl", "enable", "--now", edge.FIREWALL_BOUNCER_SERVICE],
         "CrowdSec firewall bouncer enable/start",
     )
-    try:
-        crowdsec_firewall_startup.wait_for_input_only(
-            runner,
-            service=edge.FIREWALL_BOUNCER_SERVICE,
-            config_input_only=lambda: edge._firewall_config_input_only(paths, runner),
+    if not edge._firewall_boundary_healthy(paths, runner, require_live=True):
+        raise UpdateError(
+            "CrowdSec firewall bouncer live nftables ownership is not exactly host INPUT"
         )
-    except crowdsec_firewall_startup.FirewallStartupError as exc:
-        raise UpdateError(str(exc)) from exc
 
 
 def _prove_candidate_crowdsec(
