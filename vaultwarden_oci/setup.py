@@ -16,7 +16,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import cli, install, secrets as secret_owner, storage
+from . import cli, install, operator_settings, secrets as secret_owner, storage
 from .update_versions import RESOLVED_STATE, UpdateError, frozen_versions_toml, record_frozen, resolve_latest, resolve_pinned
 
 SOPS_VERSION = "3.13.3"
@@ -112,8 +112,14 @@ def _toml_string(value: str) -> str:
 
 
 def _config_text(host: str, email: str, offline: str) -> str:
+    vaultwarden_block = operator_settings.render_toml()
     return f'''# VaultWarden-OCI operator configuration. Secret values belong only in
 # /etc/vaultwarden-oci/secrets.sops.yaml; do not duplicate them in this TOML.
+#
+# Every appliance-supported day-2 setting is intentionally present below with
+# a safe small-team default. Upstream experimental/internal settings are not a
+# pass-through API: the appliance continues to own storage, proxy trust,
+# database paths, logging paths, and other security-sensitive plumbing.
 #
 # First-run SOPS field map:
 #   REQUIRED: cloudflare_api_token       - Caddy Cloudflare DNS-01 token
@@ -134,13 +140,12 @@ acme_email = {_toml_string(email)}
 [secrets]
 offline_recovery_recipient = {_toml_string(offline)}
 
-[vaultwarden]
-signups_allowed = false
-
+{vaultwarden_block}
 [smtp]
-# REQUIRED before first recovery-kit handoff/start: replace smtp.invalid with
-# your authenticated SMTP server hostname. Credentials are entered separately
-# in secrets.sops.yaml as smtp_username and smtp_password.
+# This one SMTP authority is shared by Vaultwarden application mail and the
+# appliance direct-SMTP test/fallback path. Credentials are stored only in SOPS
+# as smtp_username and smtp_password.
+# REQUIRED before first recovery-kit handoff/start: replace smtp.invalid.
 host = "smtp.invalid"
 # Provider SMTP port, commonly 587 for STARTTLS or 465 for implicit TLS.
 port = 587
@@ -151,11 +156,21 @@ from_email = {_toml_string("vaultwarden@" + host)}
 from_name = "Vaultwarden"
 # Network timeout in seconds (1..120).
 timeout_seconds = 15
+# Keep normal TLS validation enabled; change these only for deliberate lab use.
+embed_images = true
+accept_invalid_certs = false
+accept_invalid_hostnames = false
 
-# Operational HTTPS notifications are optional and are configured after the
-# required first-run SMTP/SOPS credentials are complete. Use `sudo vwctl config
-# edit` for the [notifications] table. Provider-specific secrets remain in SOPS
-# as email_api_token; do not place API tokens in this TOML file.
+[caddy]
+# Interactive /admin pages generate multiple HTTP requests. This outer limit is
+# intentionally generous enough for normal administration while Basic Auth and
+# Vaultwarden's own admin-login limiter remain separate protections.
+admin_rate_limit_events = 60
+admin_rate_limit_window = "1m"
+
+# Operational HTTPS notifications remain optional because setup cannot invent a
+# provider/account. Add [notifications] with `sudo vwctl config edit` only when
+# needed. Provider secrets remain in SOPS as email_api_token.
 '''
 
 
@@ -352,6 +367,7 @@ def main(
             ui.header("Next actions")
             ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")
             ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
+            ui.action("run: sudo vwctl notification test --smtp after entering SMTP credentials")
             ui.action("run: sudo vwctl doctor")
             ui.action("when doctor is ready, run: sudo vwctl start")
         return 0
