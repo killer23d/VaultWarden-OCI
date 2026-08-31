@@ -23,7 +23,7 @@ Answering `y` performs the normal supported `vwctl restart` lifecycle immediatel
 
 ## Vaultwarden settings
 
-Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid minimal V2 configurations remain compatible: omitted catalog keys receive these defaults when rendered.
+Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid minimal configurations remain compatible: omitted catalog keys receive these defaults when rendered.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ admin_rate_limit_events = 60
 admin_rate_limit_window = "1m"
 ```
 
-The old V2 Caddy route limited **all** `/admin*` HTTP requests to only 5 requests per 5 minutes. The Vaultwarden Admin page performs multiple page/API requests, so ordinary navigation or an SMTP test could exhaust that outer budget. Caddy then returned HTTP `429`, and the Vaultwarden Admin JavaScript attempted to parse the non-JSON rate-limit response, producing the secondary `SyntaxError: Unexpected end of JSON input` message.
+The previous Caddy route limited **all** `/admin*` HTTP requests to only 5 requests per 5 minutes. The Vaultwarden Admin page performs multiple page/API requests, so ordinary navigation or an SMTP test could exhaust that outer budget. Caddy then returned HTTP `429`, and the Vaultwarden Admin JavaScript attempted to parse the non-JSON rate-limit response, producing the secondary `SyntaxError: Unexpected end of JSON input` message.
 
 The default is now 60 requests per minute for the outer interactive route. This is still bounded, while two other protections remain independent: Caddy Basic Auth at the outer boundary and Vaultwarden's own admin-login limiter (`admin_ratelimit_seconds = 300`, `admin_ratelimit_max_burst = 3`). This fixes normal interactive use without turning `/admin` into an unthrottled endpoint.
 
