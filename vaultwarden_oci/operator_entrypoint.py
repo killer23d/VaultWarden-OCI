@@ -143,6 +143,37 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
             print(action)
 
 
+def _restart_after_edit(args: Sequence[str], code: int) -> int:
+    """Offer an immediate restart after a successful interactive config/secret edit."""
+    if code != 0 or tuple(args[:2]) not in {("config", "edit"), ("secrets", "edit")}:
+        return code
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return code
+
+    from . import runtime
+
+    try:
+        state, _ = runtime.status(runner=_BASE_RUN_COMMAND)
+    except Exception:
+        state = "unknown"
+    if state == "stopped":
+        print("ACTION: the stack is stopped; the validated changes will apply on the next 'sudo vwctl start'.")
+        return code
+
+    answer = input("Restart VaultWarden-OCI now to apply these changes? [y/N]: ").strip().lower()
+    if answer not in {"y", "yes"}:
+        print("ACTION: restart later with 'sudo vwctl restart' to apply the validated changes.")
+        return code
+    try:
+        runtime.lifecycle("restart", runner=lifecycle_run_command)
+    except (runtime.RuntimeConfigError, runtime.RuntimeOperationError, cli.LockBusyError, OSError) as exc:
+        print(f"FAIL: changes were committed but restart failed: {exc}", file=sys.stderr)
+        print("ACTION: correct the runtime issue and run 'sudo vwctl restart'.", file=sys.stderr)
+        return 1
+    print("PASS: restart completed; validated config/credential changes are active")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     global _COMPOSE_LIFECYCLE_STARTED
     _COMPOSE_LIFECYCLE_STARTED = False
@@ -167,6 +198,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"FAIL: {lifecycle_action or 'vwctl'} interrupted", file=sys.stderr)
                 return 130 if cleanup_ok else 1
             _completion_guidance(args, code)
-            return code
+            return _restart_after_edit(args, code)
     finally:
         cli.run_command = _BASE_RUN_COMMAND
