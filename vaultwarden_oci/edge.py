@@ -1,6 +1,7 @@
 """Cloudflare-only origin ingress and bounded CrowdSec remediation."""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -623,19 +624,33 @@ def _is_cscli_setup_acquisition(path: Path) -> bool:
         return False
     except (OSError, UnicodeError) as exc:
         raise EdgeError(f"cannot inspect CrowdSec generated acquisition {path}: {exc}") from exc
-    header = lines[:16]
-    if CSCLI_SETUP_MARKER not in header:
+
+    header: list[str] = []
+    checksums: list[str] = []
+    content_start: int | None = None
+    for index, line in enumerate(lines):
+        if not line.startswith("#") and line.strip():
+            content_start = index
+            break
+        header.append(line)
+        if line.startswith(CSCLI_CHECKSUM_PREFIX):
+            checksums.append(line[len(CSCLI_CHECKSUM_PREFIX):].strip())
+
+    if CSCLI_SETUP_MARKER not in header or len(checksums) != 1:
         return False
-    checksums = [
-        line[len(CSCLI_CHECKSUM_PREFIX):].strip()
-        for line in header
-        if line.startswith(CSCLI_CHECKSUM_PREFIX)
-    ]
-    return (
-        len(checksums) == 1
-        and len(checksums[0]) == 32
-        and all(char in "0123456789abcdefABCDEF" for char in checksums[0])
-    )
+    checksum = checksums[0]
+    if (
+        len(checksum) != 32
+        or any(char not in "0123456789abcdef" for char in checksum)
+        or content_start is None
+    ):
+        return False
+
+    # Match CrowdSec clisetup.VerifyChecksum: the generated header is excluded,
+    # the remaining lines are normalized to LF, and the declared value must be
+    # a prefix of the SHA-256 digest of that exact remainder.
+    content = ("\n".join(lines[content_start:]) + "\n").encode("utf-8")
+    return hashlib.sha256(content).hexdigest().startswith(checksum)
 
 
 def _remove_cscli_setup_acquisitions(paths: EdgePaths) -> None:
