@@ -23,7 +23,7 @@ On a clean Ubuntu host, terminal-generated custody does not assume `age-keygen` 
 - `--url` is the exact simple HTTPS public URL. Its host must equal `--domain` or `vault.<domain>`. The normalized URL host becomes the single runtime `[site].domain`; the URL is not stored as a second authority.
 - `--email` is the administrator/ACME contact written to `[site].acme_email`. Setup also prepopulates `smtp.from_email` as `vaultwarden@<resolved-site-host>`.
 
-Setup creates the operator config skeleton, operational Age identity, encrypted SOPS document, immutable installed release, storage identity/marker, and systemd storage guard. It does not invent external SMTP, Cloudflare, notification-provider, or rclone credentials.
+Setup creates the operator config, operational Age identity, encrypted SOPS document, immutable installed release, storage identity/marker, and systemd storage guard. The generated config is not a minimal skeleton: every appliance-supported small-team Vaultwarden setting and the supported SMTP/Caddy controls are written with explicit defaults and comments. Common options such as invitations, Sends, organization creation, email 2FA, login/admin limits, and `/admin` rate limiting are visible immediately. Setup still does not invent external SMTP, Cloudflare, notification-provider, or rclone credentials. See [Configuration](CONFIGURATION.md) for the complete supported key list and defaults.
 
 ## Prepare Cloudflare credentials
 
@@ -131,6 +131,14 @@ sudo vwctl secrets validate
 
 For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
 
+On an interactive terminal, a successful `vwctl config edit` or `vwctl secrets edit` now checks the stack state and offers to restart the running stack immediately. Answer `y` to apply the validated changes through the normal lifecycle; answer no to defer and run `sudo vwctl restart` later. If the stack is stopped, the changes apply at the next start. Non-interactive callers are not blocked by a prompt.
+
+The `[smtp]` table and SOPS `smtp_username`/`smtp_password` are one shared SMTP authority. Vaultwarden application mail (including invitations and the Admin SMTP test) and the appliance's direct SMTP test/fallback use those same settings and credentials. Validate the transport before first start with:
+
+```bash
+sudo vwctl notification test --smtp
+```
+
 A fresh encrypted secrets document exposes the complete first-run field map:
 
 ```yaml
@@ -144,6 +152,8 @@ admin_basic_auth_password: <generated>
 ```
 
 The first three normal first-run requirements are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` may remain empty until CrowdSec Cloudflare remediation is enabled. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
+
+Vaultwarden's upstream Admin UI can write `DATA_FOLDER/config.json`, which normally overrides environment variables. The appliance intentionally points that upstream file at container tmpfs, so Admin-panel changes are diagnostic/temporary and cannot become a second durable configuration authority or silently override the shared SMTP configuration after restart. Make persistent settings changes through `vwctl config edit`. Existing `/data/config.json` files are ignored by the managed runtime.
 
 **Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
@@ -172,4 +182,4 @@ Runtime acceptance requires `/var/lib/vaultwarden-oci` to be a real mount distin
 
 Setup is rerunnable after interruption. It proves existing fstab/storage identity, immutable releases, operational Age identity, config, and encrypted secrets before replacement. A customized valid operator config is not silently overwritten. If setup generated an offline identity and reports that it remains in volatile storage after a failed custody handoff, secure that exact identity before reboot; do not rerun in a way that silently creates a different recovery identity for already-written recipients.
 
-Continue with [Operations](OPERATIONS.md), then establish and verify recovery using [Recovery](RECOVERY.md).
+Continue with [Configuration](CONFIGURATION.md) and [Operations](OPERATIONS.md), then establish and verify recovery using [Recovery](RECOVERY.md).
