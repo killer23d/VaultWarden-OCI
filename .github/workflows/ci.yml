@@ -23,59 +23,58 @@ jobs:
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
       - name: Real exact-image admin credential boundary
         run: python3 tests/acceptance_admin_hash.py
-      - name: Supported predecessor transition, controller handoff, forward-only host rollback, and retry
+      - name: Historical compatibility transition and current predecessor update
         run: |
-          success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
-          handoff_host="$(mktemp -d /tmp/vwoci-controller-handoff.XXXXXX)"
-          state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
+          transition_host="$(mktemp -d /tmp/vwoci-transition-host.XXXXXX)"
+          transition_handoff_host="$(mktemp -d /tmp/vwoci-transition-handoff.XXXXXX)"
+          transition_state="$(mktemp /tmp/vwoci-transition-state.XXXXXX)"
           crowdsec_root="$(mktemp -d /tmp/vwoci-crowdsec-transition.XXXXXX)"
           crowdsec_state="$(mktemp /tmp/vwoci-crowdsec-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$handoff_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$handoff_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
+          current_success_host="$(mktemp -d /tmp/vwoci-current-success.XXXXXX)"
+          current_rollback_host="$(mktemp -d /tmp/vwoci-current-rollback.XXXXXX)"
+          current_state="$(mktemp /tmp/vwoci-current-state.XXXXXX)"
+          trap 'git worktree remove --force /tmp/vwoci-transition-predecessor >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-transition-candidate >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$transition_host" "$transition_handoff_host" "$crowdsec_root" "$current_success_host" "$current_rollback_host" >/dev/null 2>&1 || true; rm -rf "$transition_host" "$transition_handoff_host" "$transition_state" "$crowdsec_root" "$crowdsec_state" "$current_success_host" "$current_rollback_host" "$current_state" || true' EXIT
+
+          # Keep the one deliberately supported dev.16 -> dev.17 host/CrowdSec
+          # compatibility transition permanently reproducible. These exact
+          # immutable commits are the transition's source and target; do not
+          # accidentally reinterpret the current PR base as that historical pair.
+          git worktree add --detach /tmp/vwoci-transition-predecessor e466153e0cc97a2dc6c3f6dc8a4bc8df857e6133
+          git worktree add --detach /tmp/vwoci-transition-candidate 7c173c168d4fed7fb3f0398f944f3b256b9a584d
+
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-transition-candidate python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_crowdsec_transition.py rearm-candidate "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_crowdsec_transition.py confirm-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-transition-candidate python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
+
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_update.py install-previous /tmp/vwoci-transition-predecessor "$transition_host"
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_update.py fail-forward-update /tmp/vwoci-transition-candidate "$transition_host" "$transition_state"
+          transition_candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$transition_state")"
+          transition_candidate_python="$transition_host/opt/vaultwarden-oci/releases/$transition_candidate_version"
+          PYTHONPATH="$transition_candidate_python" python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_update.py rollback-with-candidate "$transition_host" "$transition_state"
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_forward_only_host_rollback.py predecessor-health "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-transition-candidate python3 /tmp/vwoci-transition-candidate/tests/acceptance_forward_only_host_rollback.py candidate-retry "$crowdsec_root" "$crowdsec_state"
+
+          PYTHONPATH=/tmp/vwoci-transition-predecessor python3 /tmp/vwoci-transition-candidate/tests/acceptance_previous_update.py install-previous /tmp/vwoci-transition-predecessor "$transition_handoff_host"
+          PYTHONPATH=/tmp/vwoci-transition-candidate python3 /tmp/vwoci-transition-candidate/tests/acceptance_predecessor_controller_handoff.py /tmp/vwoci-transition-candidate "$transition_handoff_host"
+
+          # Separately prove the actual current PR base can update to this
+          # candidate. This pair is intentionally generic: dev.17 already owns
+          # the migrated CrowdSec host state, so dev.17 -> dev.18 must not replay
+          # the historical host transition.
           previous_ref="$(git merge-base HEAD origin/v2)"
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
 
-          # Actual predecessor code creates its real all-origin Worker config.
-          # Candidate first pass re-arms it local-only and must stop for a new
-          # Fail Open confirmation. The actual predecessor confirmation schema
-          # then binds that proof to the new invocation. The real predecessor
-          # doctor must still be green before any host firewall migration or
-          # recovery is allowed; host expansion happens only after recovery.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
-          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py rearm-candidate "$crowdsec_root" "$crowdsec_state"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py confirm-predecessor "$crowdsec_root" "$crowdsec_state"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
-          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_rollback_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$current_rollback_host" "$current_state"
+          current_candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$current_state")"
+          current_candidate_python="$current_rollback_host/opt/vaultwarden-oci/releases/$current_candidate_version"
+          PYTHONPATH="$current_candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$current_rollback_host" "$current_state"
 
-          # Use the same synthetic host for the actual predecessor install,
-          # simulated post-start application failure, candidate-owned rollback,
-          # retained host security state, predecessor doctor, and target retry.
-          # This proves application rollback does not need to undo the bounded
-          # forward-only host dependency transition to remain supported.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$crowdsec_root"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$crowdsec_root" "$state_file"
-          candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
-          candidate_python="$crowdsec_root/opt/vaultwarden-oci/releases/$candidate_version"
-          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$crowdsec_root" "$state_file"
-
-          # The durable compatibility exception requires the rolled-back
-          # predecessor to remain supported with the forward host state in
-          # place, and the same target update to converge safely on retry.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_forward_only_host_rollback.py predecessor-health "$crowdsec_root" "$crowdsec_state"
-          PYTHONPATH="$PWD" python3 tests/acceptance_forward_only_host_rollback.py candidate-retry "$crowdsec_root" "$crowdsec_state"
-
-          # Reproduce the real arm64 failure class using an installation made
-          # by the actual predecessor installer. The exact target controller is
-          # pre-staged without changing current, ordinary commands remain on
-          # the predecessor, and target-owned health settling accepts the
-          # observed all-running unhealthy recovery window before finalization.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$handoff_host"
-          PYTHONPATH="$PWD" python3 tests/acceptance_predecessor_controller_handoff.py "$PWD" "$handoff_host"
-
-          # Retain a separate ordinary successful forward transaction with the
-          # actual supported predecessor updater.
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$success_host"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$success_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_success_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$current_success_host"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
