@@ -23,6 +23,22 @@ class SystemdRuntimeContractTests(unittest.TestCase):
         )
         self.assertNotIn("ReadWritePaths=/root", unit)
 
+    def test_diagnostic_units_limit_crowdsec_database_write_boundary(self) -> None:
+        expected = (
+            "ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci "
+            "/var/lib/crowdsec/data\n"
+        )
+        for name in (
+            "vaultwarden-oci-health.service",
+            "vaultwarden-oci-maintenance.service",
+        ):
+            with self.subTest(unit=name):
+                unit = (ROOT / "systemd" / name).read_text(encoding="utf-8")
+                self.assertIn("ProtectSystem=strict\n", unit)
+                self.assertIn(expected, unit)
+                self.assertNotIn("ReadWritePaths=/etc/crowdsec", unit)
+                self.assertNotIn("ReadWritePaths=/var/lib/crowdsec\n", unit)
+
 
 if __name__ == "__main__":
     unittest.main()
