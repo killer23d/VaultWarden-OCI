@@ -1007,13 +1007,22 @@ def setup_crowdsec(
         ["systemctl", "enable", "--now", FIREWALL_BOUNCER_SERVICE],
         "CrowdSec firewall bouncer enable/start",
     )
-    if not _firewall_boundary_healthy(paths, runner, require_live=True):
+    from . import crowdsec_firewall_startup
+
+    try:
+        crowdsec_firewall_startup.wait_for_input_only(
+            runner,
+            service=FIREWALL_BOUNCER_SERVICE,
+            config_input_only=lambda: _firewall_boundary_healthy(
+                paths,
+                runner,
+                require_live=False,
+            ),
+        )
+    except crowdsec_firewall_startup.FirewallStartupError as exc:
         containment = _contain_package_bouncers(runner)
         suffix = f"; disable/stop also failed: {'; '.join(containment)}" if containment else ""
-        raise EdgeError(
-            "CrowdSec firewall bouncer live nftables ownership is not exactly host INPUT"
-            + suffix
-        )
+        raise EdgeError(f"{exc}{suffix}") from exc
 
 
 def crowdsec_decisions(*, runner: Runner = run_command) -> CommandResult:
