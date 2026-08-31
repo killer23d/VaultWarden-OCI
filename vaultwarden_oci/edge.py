@@ -803,6 +803,11 @@ def _effective_firewall_hooks(paths: EdgePaths, runner: Runner) -> tuple[str, ..
     return _parse_hook_list(result.stdout)
 
 
+def _firewall_config_input_only(paths: EdgePaths, runner: Runner) -> bool:
+    """Check the merged hook policy without initializing the nftables backend."""
+    return _effective_firewall_hooks(paths, runner) == ("input",)
+
+
 def _nft_table_input_only(
     runner: Runner,
     *,
@@ -859,10 +864,14 @@ def _firewall_boundary_healthy(
     *,
     require_live: bool,
 ) -> bool:
-    config = _firewall_config_path(paths)
-    if not runner([FIREWALL_BOUNCER_BINARY, "-c", str(config), "-t"]).ok:
-        return False
-    if _effective_firewall_hooks(paths, runner) != ("input",):
+    # firewall-bouncer v0.0.36 initializes its backend before handling -t and
+    # tears that backend down on exit. Keep -t strictly pre-start; live proof
+    # must be observational so health/doctor checks cannot remove nftables state.
+    if not require_live:
+        config = _firewall_config_path(paths)
+        if not runner([FIREWALL_BOUNCER_BINARY, "-c", str(config), "-t"]).ok:
+            return False
+    if not _firewall_config_input_only(paths, runner):
         return False
     return not require_live or _live_firewall_input_only(runner)
 
@@ -1013,11 +1022,7 @@ def setup_crowdsec(
         crowdsec_firewall_startup.wait_for_input_only(
             runner,
             service=FIREWALL_BOUNCER_SERVICE,
-            config_input_only=lambda: _firewall_boundary_healthy(
-                paths,
-                runner,
-                require_live=False,
-            ),
+            config_input_only=lambda: _firewall_config_input_only(paths, runner),
         )
     except crowdsec_firewall_startup.FirewallStartupError as exc:
         containment = _contain_package_bouncers(runner)
