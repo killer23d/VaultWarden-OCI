@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import durability, edge, secrets
+from . import durability, edge, operator_settings, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
@@ -31,6 +31,7 @@ CADDY_UID = CADDY_GID = 65533
 NAMES = {"vaultwarden": "vaultwarden-oci-vaultwarden", "caddy": "vaultwarden-oci-caddy"}
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _OPTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_CADDY_WINDOW = re.compile(r"^[1-9][0-9]*(?:s|m|h)$")
 
 
 class RuntimeConfigError(ValueError):
@@ -53,6 +54,12 @@ class RuntimeConfig:
     smtp_from_email: str
     smtp_from_name: str
     smtp_timeout_seconds: int
+    vaultwarden_environment: tuple[tuple[str, str], ...] = ()
+    smtp_embed_images: bool = True
+    smtp_accept_invalid_certs: bool = False
+    smtp_accept_invalid_hostnames: bool = False
+    caddy_admin_rate_limit_events: int = 60
+    caddy_admin_rate_limit_window: str = "1m"
     notification_provider: str | None = None
     notification_to_email: str | None = None
     notification_options: tuple[tuple[str, str], ...] = ()
@@ -131,6 +138,13 @@ def _string(data: Mapping[str, object], key: str, label: str) -> str:
     return value
 
 
+def _bool(data: Mapping[str, object], key: str, label: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise RuntimeConfigError(f"{label}.{key} must be true or false")
+    return value
+
+
 def _hostname(value: str, label: str, *, fqdn: bool = False) -> str:
     if "://" in value or "/" in value or ":" in value:
         raise RuntimeConfigError(f"{label} must be a hostname without scheme/path/port")
@@ -150,12 +164,19 @@ def _email(value: str, label: str) -> str:
 
 
 def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
-    _unknown(data, {"schema_version", "site", "secrets", "vaultwarden", "smtp", "notifications"}, "top-level")
+    _unknown(
+        data,
+        {"schema_version", "site", "secrets", "vaultwarden", "smtp", "caddy", "notifications"},
+        "top-level",
+    )
     if data.get("schema_version") != 1:
         raise RuntimeConfigError("config requires schema_version = 1")
     site, secret_cfg, vw, smtp = (
         _mapping(data, key) for key in ("site", "secrets", "vaultwarden", "smtp")
     )
+    caddy_raw = data.get("caddy", {})
+    if not isinstance(caddy_raw, dict):
+        raise RuntimeConfigError("config [caddy] must be a table")
     notifications_raw = data.get("notifications")
     if notifications_raw is None:
         notifications: Mapping[str, object] | None = None
@@ -165,29 +186,44 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         raise RuntimeConfigError("config [notifications] must be a table")
     _unknown(site, {"domain", "acme_email"}, "site")
     _unknown(secret_cfg, {"offline_recovery_recipient"}, "secrets")
-    _unknown(vw, {"signups_allowed"}, "vaultwarden")
+    try:
+        vw_values = operator_settings.parse_vaultwarden_settings(vw)
+    except operator_settings.OperatorSettingError as exc:
+        raise RuntimeConfigError(str(exc)) from exc
     _unknown(
         smtp,
-        {"host", "port", "security", "from_email", "from_name", "timeout_seconds"},
+        {
+            "host", "port", "security", "from_email", "from_name", "timeout_seconds",
+            "embed_images", "accept_invalid_certs", "accept_invalid_hostnames",
+        },
         "smtp",
     )
+    _unknown(caddy_raw, {"admin_rate_limit_events", "admin_rate_limit_window"}, "caddy")
     offline = _string(secret_cfg, "offline_recovery_recipient", "secrets")
     try:
         secrets.validate_recipient(offline)
     except secrets.SecretsError as exc:
         raise RuntimeConfigError(str(exc)) from exc
-    signups = vw.get("signups_allowed")
+    signups = bool(vw_values["signups_allowed"])
     port = smtp.get("port")
     timeout = smtp.get("timeout_seconds")
     security = _string(smtp, "security", "smtp")
-    if not isinstance(signups, bool):
-        raise RuntimeConfigError("vaultwarden.signups_allowed must be true or false")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise RuntimeConfigError("smtp.port must be 1..65535")
     if security not in {"starttls", "force_tls"}:
         raise RuntimeConfigError("smtp.security must be 'starttls' or 'force_tls'")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 120:
         raise RuntimeConfigError("smtp.timeout_seconds must be 1..120")
+    smtp_embed_images = _bool(smtp, "embed_images", "smtp", True)
+    smtp_accept_invalid_certs = _bool(smtp, "accept_invalid_certs", "smtp", False)
+    smtp_accept_invalid_hostnames = _bool(smtp, "accept_invalid_hostnames", "smtp", False)
+
+    admin_events = caddy_raw.get("admin_rate_limit_events", 60)
+    admin_window = caddy_raw.get("admin_rate_limit_window", "1m")
+    if not isinstance(admin_events, int) or isinstance(admin_events, bool) or not 10 <= admin_events <= 1000:
+        raise RuntimeConfigError("caddy.admin_rate_limit_events must be 10..1000")
+    if not isinstance(admin_window, str) or not _CADDY_WINDOW.fullmatch(admin_window):
+        raise RuntimeConfigError("caddy.admin_rate_limit_window must be a duration such as 30s, 1m, or 1h")
 
     notification_provider = notification_to_email = None
     notification_options: tuple[tuple[str, str], ...] = ()
@@ -234,6 +270,12 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
         smtp_from_name=_string(smtp, "from_name", "smtp").strip(),
         smtp_timeout_seconds=timeout,
+        vaultwarden_environment=operator_settings.environment(vw_values),
+        smtp_embed_images=smtp_embed_images,
+        smtp_accept_invalid_certs=smtp_accept_invalid_certs,
+        smtp_accept_invalid_hostnames=smtp_accept_invalid_hostnames,
+        caddy_admin_rate_limit_events=admin_events,
+        caddy_admin_rate_limit_window=admin_window,
         notification_provider=notification_provider,
         notification_to_email=notification_to_email,
         notification_options=notification_options,
@@ -413,7 +455,9 @@ def render(
 ) -> None:
     frozen = _pins(versions_path)
     q = json.dumps
-    signups = "true" if config.signups_allowed else "false"
+    managed_environment = "\n".join(
+        f"      {name}: {q(value)}" for name, value in config.vaultwarden_environment
+    )
     vw_command = (
         'export SMTP_USERNAME="$(cat /run/vw-secrets/smtp_username)"; '
         'export SMTP_PASSWORD="$(cat /run/vw-secrets/smtp_password)"; '
@@ -438,7 +482,7 @@ services:
       DOMAIN: {q("https://" + config.domain)}
       ROCKET_ADDRESS: "0.0.0.0"
       ROCKET_PORT: "8080"
-      SIGNUPS_ALLOWED: "{signups}"
+{managed_environment}
       EXTENDED_LOGGING: "true"
       LOG_LEVEL: "info"
       LOG_FILE: "/var/log/vaultwarden/vaultwarden.log"
@@ -449,6 +493,9 @@ services:
       SMTP_FROM: {q(config.smtp_from_email)}
       SMTP_FROM_NAME: {q(config.smtp_from_name)}
       SMTP_TIMEOUT: {q(str(config.smtp_timeout_seconds))}
+      SMTP_EMBED_IMAGES: {q("true" if config.smtp_embed_images else "false")}
+      SMTP_ACCEPT_INVALID_CERTS: {q("true" if config.smtp_accept_invalid_certs else "false")}
+      SMTP_ACCEPT_INVALID_HOSTNAMES: {q("true" if config.smtp_accept_invalid_hostnames else "false")}
     volumes: [{q(str(paths.data) + ":/data")}, {q(str(paths.vaultwarden_log_path) + ":/var/log/vaultwarden")}, {q(str(paths.secret_root / "vaultwarden") + ":/run/vw-secrets:ro")}]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
@@ -500,8 +547,8 @@ networks:
   rate_limit {{
    zone admin {{
     key {{client_ip}}
-    events 5
-    window 5m
+    events {config.caddy_admin_rate_limit_events}
+    window {config.caddy_admin_rate_limit_window}
    }}
   }}
   request_body {{
