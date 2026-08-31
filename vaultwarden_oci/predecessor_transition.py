@@ -358,11 +358,7 @@ def _provision_candidate_crowdsec(paths: edge.EdgePaths, runner: Runner) -> None
         crowdsec_firewall_startup.wait_for_input_only(
             runner,
             service=edge.FIREWALL_BOUNCER_SERVICE,
-            config_input_only=lambda: edge._firewall_boundary_healthy(
-                paths,
-                runner,
-                require_live=False,
-            ),
+            config_input_only=lambda: edge._firewall_config_input_only(paths, runner),
         )
     except crowdsec_firewall_startup.FirewallStartupError as exc:
         raise UpdateError(str(exc)) from exc
