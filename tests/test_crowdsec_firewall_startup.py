@@ -88,6 +88,37 @@ class CrowdSecFirewallStartupTests(unittest.TestCase):
         self.assertGreaterEqual(inspections["ip6"], 3)
         self.assertEqual(sleeps, [0.25, 0.25])
 
+    def test_pending_tables_timeout_at_the_bounded_deadline(self) -> None:
+        sleeps: list[float] = []
+        clock = {"now": 0.0}
+
+        def runner(argv, **_kwargs):
+            call = tuple(str(value) for value in argv)
+            if call == ("systemctl", "is-active", "--quiet", SERVICE):
+                return result(argv)
+            if call[:4] == ("nft", "--json", "list", "table"):
+                return result(argv, ok=False, stderr="No such file or directory")
+            raise AssertionError(call)
+
+        def sleeper(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        with self.assertRaisesRegex(
+            crowdsec_firewall_startup.FirewallStartupError,
+            "did not materialize exact host INPUT ownership within 0.5s",
+        ):
+            crowdsec_firewall_startup.wait_for_input_only(
+                runner,
+                service=SERVICE,
+                config_input_only=lambda: True,
+                timeout=0.5,
+                poll=0.25,
+                sleeper=sleeper,
+                clock=lambda: clock["now"],
+            )
+        self.assertEqual(sleeps, [0.25, 0.25])
+
     def test_forward_hook_fails_immediately_without_retry(self) -> None:
         sleeps: list[float] = []
 
