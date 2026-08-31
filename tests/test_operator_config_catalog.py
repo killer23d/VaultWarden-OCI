@@ -51,6 +51,7 @@ class OperatorConfigCatalogTests(unittest.TestCase):
         self.assertIn('[caddy]', text)
         self.assertIn('admin_rate_limit_events = 60', text)
         self.assertIn('admin_rate_limit_window = "1m"', text)
+        self.assertEqual(env["CONFIG_FILE"], "/tmp/vaultwarden-admin-config.json")
         self.assertEqual(env["SIGNUPS_ALLOWED"], "false")
         self.assertEqual(env["INVITATIONS_ALLOWED"], "true")
         self.assertEqual(env["SENDS_ALLOWED"], "true")
@@ -80,6 +81,7 @@ timeout_seconds = 15
             )
         )
         env = dict(cfg.vaultwarden_environment)
+        self.assertEqual(env["CONFIG_FILE"], "/tmp/vaultwarden-admin-config.json")
         self.assertEqual(env["INVITATIONS_ALLOWED"], "true")
         self.assertEqual(env["SENDS_ALLOWED"], "true")
         self.assertEqual(cfg.caddy_admin_rate_limit_events, 60)
@@ -107,11 +109,14 @@ timeout_seconds = 15
             compose = paths.compose.read_text(encoding="utf-8")
             caddyfile = paths.caddyfile.read_text(encoding="utf-8")
 
+        self.assertIn('CONFIG_FILE: "/tmp/vaultwarden-admin-config.json"', compose)
         self.assertIn('INVITATIONS_ALLOWED: "true"', compose)
         self.assertIn('SENDS_ALLOWED: "true"', compose)
         self.assertIn('SMTP_HOST: "smtp.invalid"', compose)
         self.assertIn('SMTP_EMBED_IMAGES: "true"', compose)
         self.assertIn('SMTP_ACCEPT_INVALID_CERTS: "false"', compose)
+        self.assertIn('cat /run/vw-secrets/smtp_username', compose)
+        self.assertIn('cat /run/vw-secrets/smtp_password', compose)
         self.assertIn('events 60', caddyfile)
         self.assertIn('window 1m', caddyfile)
         self.assertNotIn('events 5\n    window 5m', caddyfile)
@@ -137,6 +142,23 @@ timeout_seconds = 15
             code = operator_entrypoint._restart_after_edit(["config", "edit"], 0)
         self.assertEqual(code, 0)
         lifecycle.assert_called_once_with("restart", runner=operator_entrypoint.lifecycle_run_command)
+
+    def test_interactive_edit_does_not_prompt_when_stack_state_is_unknown(self) -> None:
+        fake_in = mock.Mock()
+        fake_in.isatty.return_value = True
+        fake_out = mock.Mock()
+        fake_out.isatty.return_value = True
+        with (
+            mock.patch.object(operator_entrypoint.sys, "stdin", fake_in),
+            mock.patch.object(operator_entrypoint.sys, "stdout", fake_out),
+            mock.patch.object(builtins, "input") as prompt,
+            mock.patch.object(runtime, "status", return_value=("unavailable", [])),
+            mock.patch.object(runtime, "lifecycle") as lifecycle,
+        ):
+            code = operator_entrypoint._restart_after_edit(["secrets", "edit"], 0)
+        self.assertEqual(code, 0)
+        prompt.assert_not_called()
+        lifecycle.assert_not_called()
 
 
 if __name__ == "__main__":
