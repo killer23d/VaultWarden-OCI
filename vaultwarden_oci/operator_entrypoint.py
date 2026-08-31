@@ -159,6 +159,11 @@ def _restart_after_edit(args: Sequence[str], code: int) -> int:
     if state == "stopped":
         print("ACTION: the stack is stopped; the validated changes will apply on the next 'sudo vwctl start'.")
         return code
+    if state not in {"running", "degraded"}:
+        print(
+            f"ACTION: stack state is {state}; apply the validated changes later with 'sudo vwctl restart'."
+        )
+        return code
 
     answer = input("Restart VaultWarden-OCI now to apply these changes? [y/N]: ").strip().lower()
     if answer not in {"y", "yes"}:
