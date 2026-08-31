@@ -101,15 +101,46 @@ sudo vwctl doctor --json
 
 ## CrowdSec and Cloudflare remediation
 
+The supported CrowdSec path restores the useful earlier-product detection breadth without restoring its competing Docker-firewall ownership. `vwctl crowdsec setup` installs and manages:
+
+- the CrowdSec Security Engine;
+- `crowdsecurity/caddy`, `crowdsecurity/linux`, `crowdsecurity/iptables`, and `Dominic-Wagner/vaultwarden` Hub collections;
+- acquisition of Caddy access logs, Vaultwarden security logs, Ubuntu `ssh.service`, and kernel/firewall journal events;
+- the Cloudflare Worker bouncer for locally generated proxied web decisions;
+- the nftables firewall bouncer for broad/community/list decisions on **host INPUT only**.
+
+The Cloudflare Worker is intentionally limited to exactly `only_include_decisions_from: ["cscli", "crowdsec"]`. Broad CAPI/community/list decisions stay off the Worker/KV path and are consumed by the host firewall bouncer instead. `crowdsec.cloudflare` can report `PASS` only when the active Worker invocation is bound to a policy attestation containing that exact source set and a digest of the exact base/local config files it started from. Editing the config after start, starting the service outside the supported `vwctl` flow, or carrying an attestation across a new systemd invocation therefore fails the check.
+
+The firewall bouncer is intentionally constrained to the nftables `input` hook. It must not own Docker `forward` or `DOCKER-USER`; the existing Cloudflare-only origin filter remains the single owner of published container ingress.
+
+First setup or a deliberate reconfiguration is:
+
+```bash
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec status
+sudo vwctl crowdsec remediation-start
+```
+
+`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. `remediation-start` starts the Worker only through the supported one-shot token path and records the current invocation/config policy attestation before returning success. After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
+
+```bash
+sudo vwctl crowdsec confirm-fail-open
+sudo vwctl crowdsec status
+```
+
+A healthy final state has four CrowdSec doctor checks: `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, and `crowdsec.cloudflare`, all `PASS`. The firewall bouncer should be active/enabled; the Cloudflare Worker should be active for the current explicit invocation but remain disabled at boot.
+
+Normal day-2 commands remain:
+
 ```bash
 sudo vwctl crowdsec status
 sudo vwctl crowdsec decisions
 sudo vwctl crowdsec unban 203.0.113.7
 ```
 
-CrowdSec consumes Caddy web logs and remediates proxied clients through Cloudflare. It does not need a host firewall bouncer; the `DOCKER-USER` source filter is a separate control. When remediation is enabled, `cloudflare_remediation_token` must carry the Worker/KV/Turnstile and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the local CrowdSec LAPI bouncer credential; those are not operator-supplied secrets.
+`cloudflare_remediation_token` must carry the Worker/KV and read permissions documented in [Cloudflare tokens](CLOUDFLARE-TOKENS.md). The appliance discovers Cloudflare Account ID and Zone ID and generates the Cloudflare Worker's local LAPI credential. For the host firewall bouncer, `vwctl crowdsec setup` creates a separate `vaultwarden-oci-firewall` LAPI credential only after the CrowdSec engine is healthy and writes that key plus the loopback LAPI URL into the root-only `.yaml.local` override. The package-owned base firewall-bouncer config remains unchanged, so package upgrades retain ownership of package defaults while the appliance owns its narrow credential/policy override.
 
-**Expected success:** engine and Cloudflare remediation report healthy state. **On failure:** inspect CrowdSec service state and Cloudflare credentials/config before changing host firewall rules.
+**Expected success:** engine, required Hub collections, host-input firewall remediation, and explicitly armed Cloudflare remediation all report healthy state. **On failure:** inspect the named CrowdSec doctor check, `systemctl status crowdsec.service`, `systemctl status crowdsec-firewall-bouncer.service`, and the Cloudflare Worker service before changing firewall policy. Never add the CrowdSec firewall bouncer to Docker `FORWARD`/`DOCKER-USER` to make a check green.
 
 ## Notifications and email tests
 
@@ -146,7 +177,13 @@ sudo vwctl update check
 sudo vwctl update apply
 ```
 
-The updater discovers/stages exact immutable content before downtime where practical, verifies a pre-update `.vwrec`, activates the immutable release, and health-gates it. If candidate runtime activation may have changed persistent state, it refuses to pretend a binary-only rollback restored data; the verified pre-update recovery point is the downgrade boundary.
+The updater discovers/stages exact immutable content before downtime where practical, verifies a pre-update `.vwrec`, activates the immutable release, and health-gates it. A recovery snapshot briefly pauses/unpauses the running containers for consistency; the updater allows only a bounded Docker-health recovery window afterward. Unrelated failures still fail closed immediately. If candidate runtime activation may have changed persistent state, it refuses to pretend a binary-only rollback restored data; the verified pre-update recovery point is the downgrade boundary.
+
+An update that changes the Cloudflare Worker decision-source contract may deliberately stop **before** creating the recovery point. In that case the candidate re-arms the Worker under the required local-only policy, invalidates the previous invocation's Fail Open confirmation, and prints an `ACTION` telling the operator to set every newly recreated Worker Route to **Fail Open** and run `sudo vwctl crowdsec confirm-fail-open`. After confirming the new invocation, rerun the **same installed `vwctl update apply` command**. Do not substitute a candidate checkout, run `crowdsec setup`, reuse the old Fail Open confirmation, or bypass this stop.
+
+A narrowly supported predecessor transition may print one additional pre-recovery `ACTION` after that prerequisite is healthy: the exact validated target update controller has been staged and the same `sudo vwctl update apply ...` command must be rerun. At this boundary `/opt/vaultwarden-oci/current` and the running appliance still select the predecessor. Only installed `vwctl update ...` is temporarily routed through the exact staged target controller so the retry can use target-owned update safety logic; `vwctl status`, `doctor`, lifecycle, CrowdSec, and every other command continue to execute from the selected predecessor. Do not edit `/usr/local/bin/vwctl`, switch `current`, invoke the candidate checkout, or remove the root-only handoff state manually. Successful target selection restores the normal `/usr/local/bin/vwctl -> /opt/vaultwarden-oci/current/vwctl` launcher automatically. A failed recovery/update leaves the handoff in place so the same supported update can be retried without patching immutable predecessor code.
+
+The broader host CrowdSec package/Hub/acquisition/firewall transition is not allowed to occur until the target-owned retry has created and verified the pre-update recovery point. An explicitly tested supported-predecessor transition may then install a host dependency required by the target appliance security/runtime contract. This is a narrow compatibility exception, not ordinary Ubuntu maintenance: it happens only after candidate prevalidation and verified recovery, does not include a kernel upgrade or reboot, and its host package/security-control changes are **forward-only state outside `.vwrec` rollback**. If later candidate activation fails and the application is coherently rolled back, the rollback restores application data, release selection, application systemd units, and update guard state; it does not uninstall or downgrade that compatibility dependency. Leave the retained host controls in place, require the predecessor to remain healthy with the Worker still local-only and Fail Open confirmed and the firewall still INPUT-only, then retry the same supported target update. Do not manually remove the dependency to make the host look like its pre-update package set.
 
 Explicit current-upstream discovery:
 
@@ -157,18 +194,18 @@ sudo vwctl update apply --use-latest
 
 `--use-latest` resolves supported mutable upstreams once to exact refs/digests and freezes them. It must never leave floating `latest` state. The update-check timer checks/notifies automatically; application **apply** remains operator-driven.
 
-**Expected success:** check reports a coherent candidate/no-update state; apply ends with exact active version plus healthy status/doctor. **On failure:** follow the updater's recovery/rollback message; do not manually point `current` at old code after possible persistent-state mutation.
+**Expected success:** check reports a coherent candidate/no-update state; apply may stop at an explicitly described prerequisite/handoff boundary, and the final apply ends with exact active version plus healthy status/doctor. **On failure:** follow the updater's recovery/rollback message; do not manually repoint either `current` or `/usr/local/bin/vwctl`. If a supported compatibility dependency was already installed, do not manually remove it after application rollback; verify predecessor health and retry the supported target update.
 
 ## Ubuntu package updates and reboot-required state
 
-Host packages are deliberately separate:
+Routine host package maintenance is deliberately separate:
 
 ```bash
 sudo vwctl host-upgrade check
 sudo vwctl host-upgrade apply
 ```
 
-Application recovery does not roll back apt/kernel changes. The appliance never auto-reboots; dashboard/status surface `/var/run/reboot-required` and the administrator chooses when to reboot.
+The narrow supported-predecessor compatibility dependency described above does not turn application update into a general host-upgrade path. Application recovery does not roll back apt/kernel changes. The appliance never auto-reboots; dashboard/status surface `/var/run/reboot-required` and the administrator chooses when to reboot.
 
 **Expected success:** package outcome and reboot requirement are reported truthfully. **On failure:** use normal Ubuntu package diagnostics; do not use `.vwrec` as an apt rollback mechanism.
 
@@ -176,11 +213,12 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 
 - **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
 - **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
+- **CrowdSec FAIL:** inspect the exact `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, or `crowdsec.cloudflare` check. Keep the firewall bouncer host-INPUT-only and the Worker Fail Open confirmation tied to its current explicit invocation.
 - **Secrets FAIL:** use `sudo vwctl secrets validate`/`edit`; do not copy decrypted YAML into files or shell history.
 - **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
 - **Recovery stale/missing:** create and verify a new recovery point before depending on it.
 - **Timer failure:** inspect `vwctl timers` plus the specific service journal.
-- **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary.
+- **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary. If a supported update-controller handoff is active, leave the launcher/handoff state intact and retry the same update command; ordinary commands continue to use the selected release. If a forward-only compatibility dependency was already installed, keep it in place, prove predecessor health, and retry the same supported target rather than attempting package rollback.
 - **Support diagnostics:** use `sudo vwctl support-bundle` and review it before sharing.
 
 ## Where things live
@@ -192,6 +230,14 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 | Operational Age private identity | `/etc/vaultwarden-oci/age-key.txt` (root-only) |
 | Expected storage identity | `/etc/vaultwarden-oci/storage-identity.json` |
 | Dedicated persistent data mount | `/var/lib/vaultwarden-oci` |
+| Vaultwarden CrowdSec security log | `/var/lib/vaultwarden-oci/vaultwarden/log/vaultwarden.log` |
+| Project CrowdSec acquisition | `/etc/crowdsec/acquis.d/vaultwarden-oci.yaml` |
+| CrowdSec firewall policy override | `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local` |
+| Cloudflare Worker runtime config | `/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml` |
+| Cloudflare Worker local policy override | `/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml.local` |
+| Cloudflare Worker invocation/policy attestation | `/var/lib/vaultwarden-oci/state/crowdsec-cloudflare-worker-policy.json` |
+| Cloudflare Worker Fail Open confirmation | `/var/lib/vaultwarden-oci/state/crowdsec-cloudflare-fail-open.json` |
+| Temporary supported update-controller handoff state | `/var/lib/vaultwarden-oci/state/update-controller-handoff.json` |
 | Local `.vwrec` recovery points | `/var/lib/vaultwarden-oci/backups` |
 | Volatile rendered/decrypted state | `/run/vaultwarden-oci` |
 | Immutable installed releases | `/opt/vaultwarden-oci/releases/<version>` |

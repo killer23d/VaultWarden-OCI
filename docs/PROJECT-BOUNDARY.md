@@ -10,7 +10,7 @@ VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of rou
 - Production persistent application state must live on a separate storage filesystem/volume. A host whose production state resides only on the boot/root filesystem is unsupported.
 - Cloudflare-proxied production ingress with Caddy.
 - Docker bridge networking with one small project-owned `DOCKER-USER` origin-filter path that permits published HTTPS only from validated Cloudflare source ranges, uses bounded last-known-good state, and fails closed when no safe policy is available.
-- CrowdSec remediates proxied web-client decisions through Cloudflare. A CrowdSec host firewall bouncer is not required.
+- CrowdSec detects Caddy, Vaultwarden, SSH/Linux, and kernel/firewall abuse. Proxied real-client web decisions are remediated through the Cloudflare Worker. A separate CrowdSec nftables firewall bouncer may enforce broad/community decisions on host `INPUT` only; it must not own Docker `FORWARD` or `DOCKER-USER` policy.
 - Python 3.12 standard-library-first owns structured logic; Bash is limited to bootstrap, supported interactive UI, and host/container glue where materially simpler.
 - `vwctl` is the implementation and mutation authority.
 - `dashboard.sh` is a supported day-2 human interface. One mutation authority does not mean one user interface.
@@ -41,6 +41,8 @@ Caddy remains an xcaddy custom build with all required modules exact-pinned:
 Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. Do not generate a second static Cloudflare trusted-proxy CIDR block in Caddy.
 
 That is distinct from origin protection. The host-level `DOCKER-USER` path still validates Cloudflare IPv4/IPv6 ranges and permits published HTTPS only from those source ranges. The trusted-proxy module does not replace this fail-closed origin firewall.
+
+CrowdSec has two deliberately non-overlapping remediation roles. The Cloudflare Worker receives locally generated proxied web-client decisions and acts at the edge where the real client IP is enforceable. The firewall bouncer may consume broader CrowdSec/community/list decisions for host services, but is constrained to nftables `input`; Docker forwarding and `DOCKER-USER` remain owned only by the Cloudflare origin-filter path above.
 
 Preserve lightweight `/admin` defense in depth: Vaultwarden's admin token plus Caddy-side rate limiting and one simple outer authentication gate. Do not add an enterprise identity stack or redundant authentication layers.
 
@@ -79,7 +81,9 @@ discover stable project release
 
 Automated update checking/notification is desirable. Unattended application update apply is not the default.
 
-Ubuntu host package updates are a separate workflow. Application recovery must not pretend to roll back apt/kernel changes, and the product must never auto-reboot.
+General Ubuntu package maintenance remains a separate workflow. Application recovery must not pretend to roll back apt/kernel changes, and the product must never auto-reboot.
+
+A narrowly bounded exception is permitted for an explicitly tested supported-predecessor compatibility transition: after candidate prevalidation and a verified pre-update `.vwrec`, the application transition may install a host package that is required for the target appliance security/runtime contract. That dependency is **forward-only host state** outside `.vwrec` rollback; it is not a general Ubuntu upgrade and must not include a kernel or reboot. If the application subsequently rolls back, the retained host state must remain safe for the predecessor, predecessor health must be proven, and retrying the same supported target update must converge safely without destructive package cleanup.
 
 ## Explicit non-goals
 

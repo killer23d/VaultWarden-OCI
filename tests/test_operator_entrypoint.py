@@ -6,7 +6,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from vaultwarden_oci import cli, operator_entrypoint, runtime, update_cli
-from vaultwarden_oci.cli import CommandResult
+from vaultwarden_oci.cli import CommandResult, DoctorCheck
+
+
+class TTY(io.StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 class OperatorEntrypointTests(unittest.TestCase):
@@ -46,6 +51,33 @@ class OperatorEntrypointTests(unittest.TestCase):
         with mock.patch.object(runtime, "lifecycle") as lifecycle:
             self.assertTrue(operator_entrypoint._cleanup_interrupted_lifecycle("restart"))
         lifecycle.assert_not_called()
+
+    def test_doctor_failure_guides_crowdsec_without_changing_json(self) -> None:
+        output = TTY()
+        checks = [DoctorCheck("crowdsec.engine", "FAIL", "inactive")]
+        with mock.patch.object(cli, "doctor_checks", return_value=checks) as doctor:
+            with redirect_stdout(output):
+                operator_entrypoint._completion_guidance(["doctor"], 1)
+        self.assertIn("sudo vwctl crowdsec setup", output.getvalue())
+        doctor.assert_called_once()
+
+        output = TTY()
+        with mock.patch.object(cli, "doctor_checks") as doctor:
+            with redirect_stdout(output):
+                operator_entrypoint._completion_guidance(["doctor", "--json"], 1)
+        self.assertEqual(output.getvalue(), "")
+        doctor.assert_not_called()
+
+    def test_first_healthy_start_guides_automation_only_when_needed(self) -> None:
+        output = TTY()
+        with mock.patch.object(
+            operator_entrypoint,
+            "_automation_enable_action",
+            return_value="ACTION: enable persistent appliance automation",
+        ):
+            with redirect_stdout(output):
+                operator_entrypoint._completion_guidance(["start"], 0)
+        self.assertIn("enable persistent appliance automation", output.getvalue())
 
     def test_main_returns_130_and_restores_runner(self) -> None:
         original = cli.run_command

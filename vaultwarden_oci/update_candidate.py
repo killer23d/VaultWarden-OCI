@@ -1,7 +1,7 @@
 """Candidate-owned prepare/activate/stop primitives for appliance updates.
 
 This module is intentionally executed through the candidate release's own
-``vwctl`` entrypoint.  The installed updater orchestrates the transaction, but
+``vwctl`` entrypoint. The installed updater orchestrates the transaction, but
 candidate runtime rendering and activation semantics come from candidate code.
 """
 from __future__ import annotations
@@ -15,12 +15,20 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import cli, edge, runtime, secrets
+from . import admin, cli, edge, predecessor_transition, runtime, secrets
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
 PRESTART_FAILURE = 20
 POSTSTART_FAILURE = 21
 _MANIFEST = "candidate-render.json"
+
+# Non-secret sentinels for local Caddy provisioning validation. Keep these
+# syntactically valid for the exact modules Caddy loads without using operator
+# credentials during candidate pre-stage.
+CADDY_VALIDATION_API_TOKEN = "A" * 40
+CADDY_VALIDATION_BASIC_AUTH_HASH = (
+    "$2a$14$abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUV123456789"
+)
 
 
 class CandidateActivationError(UpdateError):
@@ -122,7 +130,7 @@ def prepare(
     *,
     runner=cli.run_command,
 ) -> dict[str, object]:
-    """Render/build/validate with candidate code while the old stack stays live."""
+    """Render/build/validate while the old application stack stays live."""
     frozen = resolve_pinned_file(versions_path)
     _ensure_compose_features(runner)
     config = runtime.load_config()
@@ -165,9 +173,9 @@ def prepare(
             "--env",
             f"ACME_EMAIL={config.acme_email}",
             "--env",
-            "CLOUDFLARE_API_TOKEN=validation-only",
+            f"CLOUDFLARE_API_TOKEN={CADDY_VALIDATION_API_TOKEN}",
             "--env",
-            "ADMIN_BASIC_AUTH_HASH=$2a$14$validationonlyvalidationonlyvalidationonlyvalidationonly",
+            f"ADMIN_BASIC_AUTH_HASH={CADDY_VALIDATION_BASIC_AUTH_HASH}",
             "--volume",
             f"{paths.caddyfile}:/etc/caddy/Caddyfile:ro",
             frozen.caddy_image,
@@ -182,14 +190,26 @@ def prepare(
     if not caddy.ok:
         raise UpdateError(f"candidate Caddy validation failed: {_detail(caddy)}")
 
+    predecessor_release = predecessor_transition.installed_current_release()
     payload: dict[str, object] = {
         "schema_version": 1,
         "project_version": frozen.project_version,
         "caddy_image": frozen.caddy_image,
         "admin_enabled": admin_enabled,
         "render_sha256": _bundle_digest(paths, admin_enabled=admin_enabled),
+        "predecessor_release": predecessor_release,
     }
     _atomic_json(_manifest_path(render_root), payload)
+
+    # The dev.16 Worker itself must be re-armed with the local-only source
+    # policy before a recovery/update transaction is allowed to begin. This may
+    # intentionally stop the first apply so the operator can set the recreated
+    # route Fail Open and confirm the new invocation with the installed vwctl.
+    predecessor_transition.prepare_worker_prerequisite(
+        frozen.project_version,
+        current_release=predecessor_release,
+        runner=runner,
+    )
     return payload
 
 
@@ -267,18 +287,21 @@ def activate(
             raise UpdateError("prepared candidate project version does not match staged release")
         if manifest.get("caddy_image") != frozen.caddy_image:
             raise UpdateError("prepared candidate Caddy image does not match staged release")
+        predecessor_release = manifest.get("predecessor_release")
+        if predecessor_release is not None and not isinstance(predecessor_release, str):
+            raise UpdateError("prepared candidate predecessor release is invalid")
         _ensure_compose_features(runner)
         runtime.validate_service_identities()
         production = runtime.Paths()
         runtime.ensure_paths(production)
         config = runtime.load_config(production.config)
         edge.refresh_origin_policy(runner=runner)
-        values = secrets.load(
+        source_values = secrets.load(
             config.offline_recovery_recipient,
             paths=production.secret_paths(),
             runner=runner,
         )
-        admin_enabled = secrets.admin_enabled(values)
+        admin_enabled = secrets.admin_enabled(source_values)
         if manifest.get("admin_enabled") is not admin_enabled:
             raise UpdateError("admin enablement changed after candidate pre-validation")
 
@@ -297,12 +320,31 @@ def activate(
         if not compose.ok:
             raise UpdateError("prepared Compose failed validation at activation boundary")
 
+        runtime_values = dict(source_values)
         derived: dict[str, str] = {}
         if admin_enabled:
             derived["admin_basic_auth_hash"] = secrets.derive_admin_basic_auth_hash(
-                values["admin_basic_auth_password"], frozen.caddy_image
+                source_values["admin_basic_auth_password"], frozen.caddy_runtime_image.reference
             )
-        secrets.materialize(values, derived=derived, paths=production.secret_paths())
+            try:
+                runtime_values["vaultwarden_admin_token"] = admin.derive_vaultwarden_admin_phc(
+                    source_values["vaultwarden_admin_token"],
+                    frozen.vaultwarden_image.reference,
+                )
+            except admin.AdminCredentialError as exc:
+                raise UpdateError(str(exc)) from exc
+        secrets.materialize(runtime_values, derived=derived, paths=production.secret_paths())
+
+        # The host-side CrowdSec expansion is the final pre-start operation.
+        # The parent installed updater has already created/verified the recovery
+        # point and owns its global mutation lock before calling activate(). If
+        # this bounded transition fails, it restores its predecessor acquisition
+        # and firewall state; no candidate container start has been attempted.
+        predecessor_transition.apply_if_required(
+            frozen.project_version,
+            current_release=predecessor_release,
+            runner=runner,
+        )
     except Exception as exc:
         if isinstance(exc, KeyboardInterrupt):
             raise

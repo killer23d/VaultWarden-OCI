@@ -65,6 +65,7 @@ class Paths:
     caddy_data: Path = STATE / "caddy/data"
     caddy_config: Path = STATE / "caddy/config"
     caddy_log: Path | None = None
+    vaultwarden_log: Path | None = None
     run: Path = RUN
     transient: Path = TRANSIENT
     lock: Path = LOCK
@@ -85,6 +86,14 @@ class Paths:
     @property
     def caddy_log_path(self) -> Path:
         return self.caddy_log if self.caddy_log is not None else self.caddy_data.parent / "log"
+
+    @property
+    def vaultwarden_log_path(self) -> Path:
+        return self.vaultwarden_log if self.vaultwarden_log is not None else self.data.parent / "vaultwarden/log"
+
+    @property
+    def vaultwarden_log_file(self) -> Path:
+        return self.vaultwarden_log_path / "vaultwarden.log"
 
     def secret_paths(self) -> secrets.SecretPaths:
         return secrets.SecretPaths(
@@ -333,6 +342,22 @@ def _dir(path: Path, uid: int, gid: int, mode: int) -> None:
         raise RuntimeOperationError(f"incompatible ownership/mode at runtime path: {path}")
 
 
+def _file(path: Path, uid: int, gid: int, mode: int) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, mode)
+        os.close(descriptor)
+        os.chown(path, uid, gid)
+        os.chmod(path, mode)
+        info = path.lstat()
+    except OSError as exc:
+        raise RuntimeOperationError(f"cannot prepare runtime file {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeOperationError(f"incompatible runtime file: {path}")
+    if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (uid, gid, mode):
+        raise RuntimeOperationError(f"incompatible ownership/mode at runtime file: {path}")
+
+
 def ensure_paths(
     paths: Paths,
     *,
@@ -346,6 +371,8 @@ def ensure_paths(
     _dir(paths.run, uid, gid, 0o700)
     _dir(paths.transient, uid, gid, 0o700)
     _dir(paths.data, vaultwarden_uid, vaultwarden_gid, 0o700)
+    _dir(paths.vaultwarden_log_path, vaultwarden_uid, vaultwarden_gid, 0o700)
+    _file(paths.vaultwarden_log_file, vaultwarden_uid, vaultwarden_gid, 0o600)
     _dir(paths.caddy_data, caddy_uid, caddy_gid, 0o700)
     _dir(paths.caddy_config, caddy_uid, caddy_gid, 0o700)
     _dir(paths.caddy_log_path, caddy_uid, caddy_gid, 0o700)
@@ -412,13 +439,17 @@ services:
       ROCKET_ADDRESS: "0.0.0.0"
       ROCKET_PORT: "8080"
       SIGNUPS_ALLOWED: "{signups}"
+      EXTENDED_LOGGING: "true"
+      LOG_LEVEL: "info"
+      LOG_FILE: "/var/log/vaultwarden/vaultwarden.log"
+      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"
       SMTP_HOST: {q(config.smtp_host)}
       SMTP_PORT: {q(str(config.smtp_port))}
       SMTP_SECURITY: {q(config.smtp_security)}
       SMTP_FROM: {q(config.smtp_from_email)}
       SMTP_FROM_NAME: {q(config.smtp_from_name)}
       SMTP_TIMEOUT: {q(str(config.smtp_timeout_seconds))}
-    volumes: [{q(str(paths.data) + ":/data")}, {q(str(paths.secret_root / "vaultwarden") + ":/run/vw-secrets:ro")}]
+    volumes: [{q(str(paths.data) + ":/data")}, {q(str(paths.vaultwarden_log_path) + ":/var/log/vaultwarden")}, {q(str(paths.secret_root / "vaultwarden") + ":/run/vw-secrets:ro")}]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
     cap_drop: [ALL]
@@ -461,6 +492,9 @@ networks:
       com.docker.network.bridge.gateway_mode_ipv4: nat
       com.docker.network.bridge.gateway_mode_ipv6: nat
 '''
+    proxy = '''reverse_proxy vaultwarden:8080 {
+   header_up X-Real-IP {client_ip}
+  }'''
     admin_route = f''' @admin path /admin*
  handle @admin {{
   rate_limit {{
@@ -476,7 +510,7 @@ networks:
   basic_auth {{
    admin {{env.ADMIN_BASIC_AUTH_HASH}}
   }}
-  reverse_proxy vaultwarden:8080
+  {proxy}
  }}
 ''' if admin_enabled else ''' @admin path /admin*
  respond @admin 404
@@ -527,10 +561,10 @@ networks:
   request_body {{
    max_size 512KB
   }}
-  reverse_proxy vaultwarden:8080
+  {proxy}
  }}
  handle {{
-  reverse_proxy vaultwarden:8080
+  {proxy}
  }}
 }}
 '''
@@ -642,10 +676,22 @@ def lifecycle(
         admin_enabled = secrets.admin_enabled(values)
         derived: dict[str, str] = {}
         if admin_enabled:
+            from . import admin
+
             frozen = _pins(versions_path)
+            source_admin_token = values["vaultwarden_admin_token"]
             derived["admin_basic_auth_hash"] = secrets.derive_admin_basic_auth_hash(
                 values["admin_basic_auth_password"], frozen.caddy_runtime_image.reference
             )
+            try:
+                vaultwarden_admin_phc = admin.derive_vaultwarden_admin_phc(
+                    source_admin_token,
+                    frozen.vaultwarden_image.reference,
+                )
+            except admin.AdminCredentialError as exc:
+                raise RuntimeOperationError(str(exc)) from exc
+            values = dict(values)
+            values["vaultwarden_admin_token"] = vaultwarden_admin_phc
         render(config, versions_path, paths, admin_enabled=admin_enabled)
         if not _compose(["config", "--quiet"], paths, runner).ok:
             raise RuntimeOperationError("rendered Compose validation failed")
@@ -783,6 +829,7 @@ def runtime_paths_check(
     secret_paths = paths.secret_paths()
     runtime_directories = (
         (paths.data, vaultwarden_uid, vaultwarden_gid, 0o700),
+        (paths.vaultwarden_log_path, vaultwarden_uid, vaultwarden_gid, 0o700),
         (paths.caddy_data, caddy_uid, caddy_gid, 0o700),
         (paths.caddy_config, caddy_uid, caddy_gid, 0o700),
         (paths.caddy_log_path, caddy_uid, caddy_gid, 0o700),
@@ -800,6 +847,9 @@ def runtime_paths_check(
         for path, owner_uid, owner_gid, mode in runtime_directories
         if (problem := _directory_problem(path, owner_uid, owner_gid, mode))
     ]
+    log_problem = _file_problem(paths.vaultwarden_log_file, vaultwarden_uid, vaultwarden_gid, 0o600)
+    if log_problem:
+        problems.append(log_problem)
     rendered = (
         (paths.compose, uid, gid, 0o600),
         (paths.caddyfile, uid, gid, 0o444),
@@ -903,6 +953,7 @@ RuntimePaths = Paths
 parse_runtime_config = parse_config
 load_runtime_config = load_config
 DATA_DIR = STATE / "data"
+VAULTWARDEN_LOG_DIR = STATE / "vaultwarden/log"
 CADDY_DATA_DIR = STATE / "caddy/data"
 CADDY_CONFIG_DIR = STATE / "caddy/config"
 CADDY_LOG_DIR = STATE / "caddy/log"

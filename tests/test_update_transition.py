@@ -9,15 +9,6 @@ from vaultwarden_oci.update_versions import UpdateError
 
 
 class UpdateTransitionTests(unittest.TestCase):
-    def _historical_predecessor(self, root: Path) -> tuple[Path, Path]:
-        previous = root / update_unit_migration.SUPPORTED_PREDECESSOR_RELEASE
-        historical_name = "systemd-" + "v" + "2"
-        historical = previous / historical_name
-        historical.mkdir(parents=True)
-        for unit in install.SYSTEMD_UNITS:
-            (historical / unit).write_text(unit + "\n", encoding="utf-8")
-        return previous, historical
-
     def test_release_manifest_uses_canonical_systemd_source(self) -> None:
         self.assertEqual(install.SYSTEMD_SOURCE_DIR, "systemd")
         self.assertIn(install.SYSTEMD_SOURCE_DIR, install.RELEASE_DIRS)
@@ -45,13 +36,15 @@ class UpdateTransitionTests(unittest.TestCase):
             for unit in install.SYSTEMD_UNITS:
                 self.assertEqual((installed_units / unit).read_bytes(), f"new {unit}\n".encode())
 
-    def test_supported_predecessor_historical_layout_is_read_for_rollback(self) -> None:
+    def test_candidate_owned_rollback_restores_canonical_predecessor_units(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = install.Layout(root / "host")
-            previous, previous_units = self._historical_predecessor(root)
-            candidate = root / "0.1.0-dev.16"
+            previous = root / "previous"
+            candidate = root / "candidate"
+            previous_units = previous / install.SYSTEMD_SOURCE_DIR
             candidate_units = candidate / install.SYSTEMD_SOURCE_DIR
+            previous_units.mkdir(parents=True)
             candidate_units.mkdir(parents=True)
             installed_units = layout.path(install.SYSTEMD_DIR)
             installed_units.mkdir(parents=True)
@@ -65,46 +58,39 @@ class UpdateTransitionTests(unittest.TestCase):
             for unit in install.SYSTEMD_UNITS:
                 self.assertEqual((installed_units / unit).read_bytes(), (previous_units / unit).read_bytes())
 
-    def test_supported_predecessor_refuses_symlinked_canonical_source(self) -> None:
+    def test_noncanonical_historical_layout_is_not_a_supported_predecessor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            previous, historical = self._historical_predecessor(root)
-            canonical = previous / install.SYSTEMD_SOURCE_DIR
-            canonical.symlink_to(historical, target_is_directory=True)
-
-            with self.assertRaisesRegex(UpdateError, "systemd source is unsafe"):
-                update_unit_migration._systemd_source(
-                    previous,
-                    allow_supported_predecessor=True,
-                )
-
-    def test_supported_predecessor_refuses_regular_file_canonical_source(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            previous, _historical = self._historical_predecessor(root)
-            canonical = previous / install.SYSTEMD_SOURCE_DIR
-            canonical.write_text("not a directory\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(UpdateError, "systemd source is unsafe"):
-                update_unit_migration._systemd_source(
-                    previous,
-                    allow_supported_predecessor=True,
-                )
-
-    def test_historical_layout_reader_is_limited_to_supported_predecessor(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            unsupported = root / "0.1.0-dev.14"
-            historical_name = "systemd-" + "v" + "2"
-            historical = unsupported / historical_name
+            release = root / "old-release"
+            historical = release / ("systemd-" + "v" + "2")
             historical.mkdir(parents=True)
             for unit in install.SYSTEMD_UNITS:
                 (historical / unit).write_text(unit + "\n", encoding="utf-8")
             with self.assertRaisesRegex(UpdateError, "systemd source is missing or unsafe"):
-                update_unit_migration._systemd_source(
-                    unsupported,
-                    allow_supported_predecessor=True,
-                )
+                update_unit_migration._systemd_source(release)
+
+    def test_symlinked_canonical_source_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            historical = release / "historical"
+            historical.mkdir(parents=True)
+            canonical = release / install.SYSTEMD_SOURCE_DIR
+            canonical.symlink_to(historical, target_is_directory=True)
+
+            with self.assertRaisesRegex(UpdateError, "systemd source is unsafe"):
+                update_unit_migration._systemd_source(release)
+
+    def test_regular_file_canonical_source_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            release.mkdir()
+            canonical = release / install.SYSTEMD_SOURCE_DIR
+            canonical.write_text("not a directory\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(UpdateError, "systemd source is unsafe"):
+                update_unit_migration._systemd_source(release)
 
     def test_release_content_requires_canonical_systemd_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

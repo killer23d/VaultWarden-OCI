@@ -122,15 +122,22 @@ Caddy-side rate limiting is used for lightweight abuse controls including `/admi
 
 ## 10. Cloudflare origin security and CrowdSec
 
-**Decision:** Real-client-IP trust and origin network filtering are separate controls.
+**Decision:** Real-client-IP trust, origin network filtering, CrowdSec detection, and remediation are separate controls with deliberately non-overlapping ownership.
 
 The project owns one small fail-closed Docker `DOCKER-USER` origin-filter path using strictly validated Cloudflare IPv4/IPv6 source ranges. A bounded last-known-good policy may be used. If neither current nor acceptably fresh last-known-good policy is safe, published HTTPS ingress fails closed.
 
 The Caddy trusted-proxy module does **not** replace this host-level origin protection.
 
-CrowdSec remediates proxied web-client decisions through Cloudflare. A CrowdSec host firewall bouncer is not required. The origin filter and CrowdSec Cloudflare remediation are separate decision planes.
+CrowdSec installs the useful earlier-product detection coverage for Caddy, Vaultwarden, Ubuntu SSH/Linux, and kernel/firewall signals. The appliance owns one acquisition file for those sources. Caddy propagates its already-trusted real client IP to Vaultwarden so application-auth decisions are not attributed to a Cloudflare edge address.
 
-Do not add a second firewall backend or generic firewall/cloud-provider abstraction.
+Remediation is intentionally split:
+
+- the Cloudflare Worker receives locally generated (`cscli`/`crowdsec`) proxied web-client decisions and remains the enforcement point for real client IPs arriving through Cloudflare;
+- the CrowdSec nftables firewall bouncer may consume broader CAPI/community/subscribed-list decisions for direct host services, but it is constrained to the host `input` hook only.
+
+The CrowdSec firewall bouncer must never own Docker `forward` or `DOCKER-USER`. Those remain exclusively owned by the project Cloudflare origin filter, avoiding two independent mutation owners for published container ingress.
+
+Do not add another Docker firewall backend or generic firewall/cloud-provider abstraction.
 
 ## 11. `/admin` defense in depth
 
@@ -229,11 +236,26 @@ Automatic update checking/notification is desirable. Unattended application upda
 
 Rollback must respect persistent-state safety. If candidate runtime activation may have changed persistent state, do not blindly switch binaries backward and pretend that application state was rolled back; the verified pre-update recovery point is the downgrade boundary.
 
+A verified pre-update recovery snapshot may transiently pause/unpause the running containers. The post-snapshot current-runtime gate may wait only for the bounded Docker healthcheck recovery window; persistent unhealthy/stopped services or any unrelated doctor failure still fail closed.
+
+One deliberately narrow supported-predecessor compatibility handoff is allowed when immutable predecessor update code cannot implement a target-required orchestration safety fix. After the exact candidate has passed source/build/config validation and any pre-recovery operator prerequisite, but before recovery or application mutation, the appliance may pre-stage that exact immutable target release and temporarily route only `vwctl update ...` through its update controller. The selected/running predecessor release remains unchanged, and every non-update `vwctl` command must continue to execute from the selected predecessor. The handoff must be durable, idempotent, bound to one explicitly supported release pair and exact target identity, fail closed on launcher/state drift, and restore the canonical `/opt/vaultwarden-oci/current/vwctl` launcher after successful target selection. It must not patch predecessor files in place, alter application data/systemd/runtime state by itself, require a source-checkout command, or become a generic multi-version dispatcher or second mutation authority.
+
 ## 15. Ubuntu host package updates
 
-**Decision:** Host package updates are a separate workflow from application updates.
+**Decision:** General Ubuntu package maintenance is a separate workflow from normal application updates. Application recovery does not claim to roll back apt/kernel changes, and the project must never auto-reboot the host.
 
-Application recovery does not claim to roll back apt/kernel changes. The project may guide safe Ubuntu package maintenance, but it must never auto-reboot the host.
+One deliberately narrow compatibility exception is allowed: an explicitly tested supported-predecessor application transition may install a host package that is required for the target appliance's own security/runtime contract when all of the following are true:
+
+- the dependency is bounded to that named compatibility transition rather than being a general host-upgrade mechanism;
+- candidate source/build/config validation has already succeeded;
+- the pre-update `.vwrec` has been created and verified before the package transaction begins;
+- package maintainer service starts are contained and the resulting appliance-owned host policy is fail-closed and explicitly health-proven;
+- the transition does not install a kernel, perform a general Ubuntu upgrade, or reboot the host;
+- package/host-control changes are treated as **forward-only host state outside `.vwrec` rollback** rather than being silently uninstalled or downgraded during application rollback.
+
+If later candidate activation fails after such a host dependency transition, coherent application rollback restores application data/release selection/systemd application units/guard state only. It must not claim that apt state was restored. The retained forward host state must itself be safe for the predecessor: predecessor health must be proven, security ownership must remain within the approved boundary, and retrying the same supported target update must safely converge without requiring destructive host cleanup.
+
+This exception does not authorize ordinary package drift during application updates. Routine Ubuntu package updates remain owned by the separate host-maintenance workflow.
 
 ## 16. Testing boundary
 
@@ -258,4 +280,3 @@ Keep the durable documentation set small. Update current authorities instead of 
 **Decision:** Normal product/repository surfaces are release-neutral. Do not leave product-generation names, branch-stage names, preview labels, or implementation-stage labels in normal runtime/docs/file names. Genuine technical schema/archive format version numbers remain valid.
 
 The repository follows this release-neutral end state; future changes must not reintroduce stage-era naming into normal product surfaces.
-

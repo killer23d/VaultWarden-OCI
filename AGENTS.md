@@ -32,7 +32,7 @@ For each task, use this order of authority:
 - Caddy remains an exact-pinned xcaddy custom build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare IP ranges, and Caddy rate limiting.
 - Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. Do not also generate a static trusted-proxy CIDR block in Caddy.
 - Host-level Cloudflare-only origin protection is separate: keep one small fail-closed Docker `DOCKER-USER` path allowing published HTTPS only from validated Cloudflare ranges.
-- CrowdSec remediates proxied web-client decisions through Cloudflare; no CrowdSec host firewall bouncer is required.
+- CrowdSec detects Caddy, Vaultwarden, SSH/Linux, and kernel/firewall abuse. Proxied real-client web decisions are remediated through Cloudflare. A separate nftables firewall bouncer may enforce broad/community decisions on host `INPUT` only; it must never claim Docker `FORWARD` or `DOCKER-USER` ownership.
 - Preserve lightweight `/admin` defense in depth: Vaultwarden admin token, Caddy-side rate limiting, and one simple outer authentication gate.
 - Vaultwarden application mail uses direct authenticated SMTP. Operational notification providers remain the closed source-controlled catalog.
 - CyberPersons current catalog behavior is authoritative unless official provider documentation is deliberately re-verified for a focused change: `503` is status-only retry/fallback eligible; `429` account-wide quota/rate-limit and `500 send_failed` are not transient by status alone.
@@ -41,7 +41,7 @@ For each task, use this order of authority:
 - Recovery-kit ZIP: AES-256, passphrase entered/confirmed interactively, independent of stored credentials, never argv/env/file/email, fully verified before email is attempted.
 - Application updates are operator-driven: discover a stable project release, stage/download/build before downtime, verify a pre-update recovery point, activate an immutable release, health-gate it, and roll back coherently when safe. Automatic checking/notification is supported; unattended apply is not the default.
 - Direct source-layout update compatibility is guaranteed only from the explicitly tested supported predecessor release. The public updater does not offer arbitrary intermediate-release selection; do not promise undocumented incremental hops. Older unsupported development snapshots require a fresh supported install/recovery path unless a specific transition is deliberately implemented.
-- Ubuntu package updates are separate from application updates. Application recovery does not claim to roll back apt/kernel changes. Never auto-reboot.
+- General Ubuntu package maintenance is separate from application updates. A deliberately implemented/tested supported-predecessor transition may install only a narrowly required appliance host dependency after candidate prevalidation and verified recovery; that dependency is forward-only host state outside `.vwrec` rollback. Application rollback must leave the predecessor healthy with approved security ownership and the same target retryable without destructive package cleanup. This exception never authorizes a general Ubuntu upgrade, kernel change, or reboot. Never auto-reboot.
 - Normal product surfaces are release-neutral. Do not introduce product-generation, branch-stage, preview, or implementation-stage names into runtime/docs/file names. Genuine technical schema/archive/release version values remain valid compatibility identifiers.
 
 ## Implementation ownership

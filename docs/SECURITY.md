@@ -18,11 +18,13 @@ Caddy is an exact-pinned xcaddy build with Cloudflare DNS, Cloudflare trusted-pr
 
 The host-level `DOCKER-USER` path is separate. It allows published HTTPS only from strictly validated Cloudflare IPv4/IPv6 sources, uses bounded last-known-good data, and fails closed if no safe policy exists. Never disable this filter merely to make an origin test work.
 
-CrowdSec is separate again: it reads proxied web-client activity and remediates decisions through Cloudflare. A CrowdSec host firewall bouncer is not part of the supported architecture.
+CrowdSec is separate again. It ingests the appliance-owned Caddy and Vaultwarden logs plus Ubuntu SSH and kernel/firewall signals. The Cloudflare Worker remediates locally generated proxied web-client decisions where the trusted real client IP is enforceable. Its effective source filter must be exactly `only_include_decisions_from: ["cscli", "crowdsec"]`; broad CAPI/community/list decisions are deliberately kept off the Worker/KV path and consumed by the host-input firewall bouncer instead. A healthy Worker requires an invocation-bound attestation containing that exact source set and a digest of the exact base/local config files. A config edit or new systemd invocation invalidates that proof. The Worker remains boot-disabled and every recreated route requires a fresh explicit Fail Open confirmation for the current invocation.
+
+The CrowdSec nftables firewall bouncer may consume broader CrowdSec/community/list decisions for host services, but it is constrained to the host `input` hook and must not claim Docker `forward` or `DOCKER-USER` ownership.
 
 ## `/admin`
 
-When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The source Basic Auth password is encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
+When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The high-entropy `vaultwarden_admin_token` value in SOPS remains the operator's recoverable `/admin` login secret; at start/restart the appliance uses the exact pinned Vaultwarden image to derive an Argon2id PHC and materializes only that PHC into the Vaultwarden runtime boundary. The source Basic Auth password is likewise encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
 
 ## Notification and SMTP security
 
@@ -34,11 +36,11 @@ Vaultwarden application mail uses authenticated encrypted SMTP. Operational SMTP
 
 A `.vwrec` is encrypted application state and excludes the server operational Age private key. The recovery-kit ZIP is a different credential artifact with AES-256 encryption and an independent interactively entered passphrase. The ZIP must be fully verified before email handoff. Terminal-driven `--auto` can automate installation while still requiring this human recovery-kit passphrase/custody boundary when setup generated the offline identity; `--auto` does not weaken that boundary.
 
-Application updates stage exact immutable content, verify a pre-update recovery point, health-gate activation, and refuse unsafe old-binary rollback after possible persistent-state mutation. Ubuntu package changes are a separate recovery domain and the appliance never auto-reboots.
+Application updates stage exact immutable content, verify a pre-update recovery point, health-gate activation, and refuse unsafe old-binary rollback after possible persistent-state mutation. A compatibility update that must recreate the Cloudflare Worker may stop before recovery so the operator can set the new route Fail Open and confirm that new local-only invocation; the previous Fail Open proof is never carried across the restart. Broader host CrowdSec package/Hub/acquisition/firewall migration is not performed until the rerun has a verified recovery point and enters candidate activation under the update transaction. Ubuntu package changes remain a separate recovery domain and the appliance never auto-reboots.
 
 ## Unsupported security-expanding designs
 
-Do not add a second firewall backend, host CrowdSec bouncer, enterprise identity stack, arbitrary notification scripting, KMS/provider framework, dynamic plugin framework, Postfix/queue, generic repair engine, HA/Kubernetes layer, or compatibility reader for an earlier archive format without an explicit new product decision.
+Do not add another Docker firewall owner, give the CrowdSec firewall bouncer `forward`/`DOCKER-USER` ownership, add an enterprise identity stack, arbitrary notification scripting, KMS/provider framework, dynamic plugin framework, Postfix/queue, generic repair engine, HA/Kubernetes layer, or compatibility reader for an earlier archive format without an explicit new product decision.
 
 After security or credential changes:
 

@@ -43,6 +43,8 @@ DOCTOR_CHECK_IDS = (
     "edge.cloudflare.cidrs",
     "edge.cloudflare.iptables",
     "crowdsec.engine",
+    "crowdsec.hub",
+    "crowdsec.firewall",
     "crowdsec.cloudflare",
     "recovery.local",
     "recovery.offsite",

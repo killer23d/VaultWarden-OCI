@@ -8,11 +8,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import runtime, secrets
+from vaultwarden_oci import admin, runtime, secrets
 from vaultwarden_oci.cli import CommandResult, DoctorCheck
 
 OFFLINE = "age1" + "q" * 58
 OPERATIONAL = "age1" + "p" * 58
+ADMIN_PHC = "$argon2id$v=19$m=65540,t=3,p=4$c2FsdA$YWJjZA"
 VALUES = {
     "cloudflare_api_token": "A" * 40,
     "smtp_username": "mailer@example.net",
@@ -86,9 +87,14 @@ class RuntimeContractTests(unittest.TestCase):
         self._admin_hash = mock.patch.object(
             secrets, "derive_admin_basic_auth_hash", return_value="$2a$14$test-admin-hash"
         )
+        self._vaultwarden_admin_hash = mock.patch.object(
+            admin, "derive_vaultwarden_admin_phc", return_value=ADMIN_PHC
+        )
         self._admin_hash.start()
+        self._vaultwarden_admin_hash.start()
 
     def tearDown(self) -> None:
+        self._vaultwarden_admin_hash.stop()
         self._admin_hash.stop()
 
     def test_config_to_runtime_rendering_validation_and_scope(self) -> None:
@@ -319,6 +325,9 @@ class RuntimeContractTests(unittest.TestCase):
             ) as materialize:
                 runtime.lifecycle("start", paths=paths, versions_path=versions, runner=runner)
                 materialize.assert_called_once()
+            materialized = materialize.call_args.args[0]
+            self.assertEqual(materialized["vaultwarden_admin_token"], ADMIN_PHC)
+            self.assertEqual(VALUES["vaultwarden_admin_token"], "admin-secret")
             self.assertTrue(any("config" in call and "--quiet" in call for call in calls))
             self.assertTrue(any("up" in call and "--wait" in call for call in calls))
 
@@ -490,7 +499,6 @@ class RuntimeContractTests(unittest.TestCase):
             by_id = {check.check_id: check.status for check in checks}
             self.assertEqual(by_id["secrets.custody"], "PASS")
             self.assertEqual(by_id["secrets.decrypt"], "FAIL")
-
 
     def test_doctor_secret_messages_are_release_neutral(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

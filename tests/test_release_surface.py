@@ -35,6 +35,11 @@ class ReleaseSurfaceTests(unittest.TestCase):
         historical_name = "systemd-" + "v" + "2"
         self.assertFalse((ROOT / historical_name).exists())
 
+    def test_systemd_lifecycle_allows_bounded_arm64_cold_build_window(self) -> None:
+        service = (ROOT / "systemd/vaultwarden-oci.service").read_text(encoding="utf-8")
+        self.assertIn("TimeoutStartSec=600", service)
+        self.assertNotIn("TimeoutStartSec=infinity", service)
+
     def test_semantic_stage_placeholder_is_absent_from_runtime_sources(self) -> None:
         forbidden = ("pre-release" + " implementation", "implementation" + " stage")
         for path in (ROOT / "vaultwarden_oci").glob("*.py"):

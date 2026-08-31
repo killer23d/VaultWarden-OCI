@@ -11,8 +11,9 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/vaultwarden-oci/current/vwctl start
 ExecStop=/opt/vaultwarden-oci/current/vwctl stop
-TimeoutStartSec=300
+TimeoutStartSec=600
 TimeoutStopSec=120
+Environment=DOCKER_CONFIG=/run/vaultwarden-oci/docker-client
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes

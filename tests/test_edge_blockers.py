@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vaultwarden_oci import edge, runtime
+from vaultwarden_oci import crowdsec_worker_policy, edge, runtime
 from vaultwarden_oci.cli import CommandResult
 
 V4 = "173.245.48.0/20\n103.21.244.0/22"
@@ -99,6 +99,13 @@ class RemediationRunner:
             "--value",
         ):
             return result(argv, self.invocation + "\n")
+        if call == (
+            edge.BOUNCER_BINARY,
+            "-c",
+            str(self.paths.remediation_config),
+            "-t",
+        ):
+            return result(argv)
         raise AssertionError(call)
 
 
@@ -174,11 +181,17 @@ class EdgeBlockerTests(unittest.TestCase):
                 remediation_start_token=root / "run/start.token",
                 fail_open_confirmation=root / "state/fail-open.json",
             )
+            paths.remediation_config.parent.mkdir(parents=True)
+            paths.remediation_config.write_text(
+                'crowdsec_config:\n  only_include_decisions_from: ["cscli", "crowdsec"]\n',
+                encoding="utf-8",
+            )
             runner = RemediationRunner(paths)
             edge.start_remediation(paths=paths, runner=runner)
             self.assertTrue(runner.active)
             self.assertFalse(paths.remediation_start_token.exists())
             self.assertFalse(paths.fail_open_confirmation.exists())
+            self.assertTrue(crowdsec_worker_policy.runtime_policy_healthy(paths, runner))
 
             edge.confirm_fail_open(paths=paths, runner=runner, now=1234)
             self.assertTrue(edge._fail_open_confirmed(paths.fail_open_confirmation, "a" * 32))

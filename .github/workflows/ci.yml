@@ -21,17 +21,61 @@ jobs:
         run: python3 -m compileall -q vaultwarden_oci tests
       - name: Parse shell glue
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
-      - name: Supported predecessor update and coherent rollback compatibility
+      - name: Real exact-image admin credential boundary
+        run: python3 tests/acceptance_admin_hash.py
+      - name: Supported predecessor transition, controller handoff, forward-only host rollback, and retry
         run: |
-          host_root="$(mktemp -d /tmp/vwoci-update-host.XXXXXX)"
+          success_host="$(mktemp -d /tmp/vwoci-update-success.XXXXXX)"
+          handoff_host="$(mktemp -d /tmp/vwoci-controller-handoff.XXXXXX)"
           state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-two-back >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$host_root" >/dev/null 2>&1 || true; rm -rf "$host_root" "$state_file" || true' EXIT
-          git worktree add --detach /tmp/vwoci-two-back 62c509cc1d711ddc6be815abca4e397e99638c74
-          git worktree add --detach /tmp/vwoci-previous 63d3d2c9ec7b554cb049c47dc981eb32ba64354d
-          PYTHONPATH=/tmp/vwoci-two-back python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$host_root"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$host_root" "$state_file"
-          candidate_python="$host_root/opt/vaultwarden-oci/releases/0.1.0-dev.16"
-          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$host_root" "$state_file"
+          crowdsec_root="$(mktemp -d /tmp/vwoci-crowdsec-transition.XXXXXX)"
+          crowdsec_state="$(mktemp /tmp/vwoci-crowdsec-state.XXXXXX)"
+          trap 'git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$success_host" "$handoff_host" "$crowdsec_root" >/dev/null 2>&1 || true; rm -rf "$success_host" "$handoff_host" "$state_file" "$crowdsec_root" "$crowdsec_state" || true' EXIT
+          previous_ref="$(git merge-base HEAD origin/v2)"
+          if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
+          git worktree add --detach /tmp/vwoci-previous "$previous_ref"
+
+          # Actual predecessor code creates its real all-origin Worker config.
+          # Candidate first pass re-arms it local-only and must stop for a new
+          # Fail Open confirmation. The actual predecessor confirmation schema
+          # then binds that proof to the new invocation. The real predecessor
+          # doctor must still be green before any host firewall migration or
+          # recovery is allowed; host expansion happens only after recovery.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py seed-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py rearm-candidate "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_crowdsec_transition.py confirm-predecessor "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_predecessor_worker_health.py "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_previous_crowdsec_transition.py migrate-candidate "$crowdsec_root" "$crowdsec_state"
+
+          # Use the same synthetic host for the actual predecessor install,
+          # simulated post-start application failure, candidate-owned rollback,
+          # retained host security state, predecessor doctor, and target retry.
+          # This proves application rollback does not need to undo the bounded
+          # forward-only host dependency transition to remain supported.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$crowdsec_root"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$crowdsec_root" "$state_file"
+          candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$state_file")"
+          candidate_python="$crowdsec_root/opt/vaultwarden-oci/releases/$candidate_version"
+          PYTHONPATH="$candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$crowdsec_root" "$state_file"
+
+          # The durable compatibility exception requires the rolled-back
+          # predecessor to remain supported with the forward host state in
+          # place, and the same target update to converge safely on retry.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_forward_only_host_rollback.py predecessor-health "$crowdsec_root" "$crowdsec_state"
+          PYTHONPATH="$PWD" python3 tests/acceptance_forward_only_host_rollback.py candidate-retry "$crowdsec_root" "$crowdsec_state"
+
+          # Reproduce the real arm64 failure class using an installation made
+          # by the actual predecessor installer. The exact target controller is
+          # pre-staged without changing current, ordinary commands remain on
+          # the predecessor, and target-owned health settling accepts the
+          # observed all-running unhealthy recovery window before finalization.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$handoff_host"
+          PYTHONPATH="$PWD" python3 tests/acceptance_predecessor_controller_handoff.py "$PWD" "$handoff_host"
+
+          # Retain a separate ordinary successful forward transaction with the
+          # actual supported predecessor updater.
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$success_host"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$success_host"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
@@ -142,6 +186,14 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Exact custom Caddy build and config validation
         run: python3 tests/acceptance_caddy_config.py
+
+  crowdsec-package-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Real CrowdSec firewall package sequencing
+        run: sudo -E python3 tests/acceptance_crowdsec_firewall_package.py
 
   recovery-crypto-integration:
     runs-on: ubuntu-24.04
