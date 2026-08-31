@@ -33,7 +33,7 @@ VAULTWARDEN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("signups_allowed", "SIGNUPS_ALLOWED", "bool", False, "Allow open self-registration. Keep false for an invite-only small team."),
     SettingSpec("signups_verify", "SIGNUPS_VERIFY", "bool", False, "Require email verification for self-registration."),
     SettingSpec("signups_verify_resend_time", "SIGNUPS_VERIFY_RESEND_TIME", "int", 3600, "Seconds before another verification email may be sent.", 60, 86400),
-    SettingSpec("signups_verify_resend_limit", "SIGNUPS_VERIFY_RESEND_LIMIT", "int", 6, "Maximum verification-email resends triggered by login attempts.", 1, 100),
+    SettingSpec("signups_verify_resend_limit", "SIGNUPS_VERIFY_RESEND_LIMIT", "int", 6, "Maximum verification-email resends triggered by login attempts; 0 means unlimited.", 0, 100),
     SettingSpec("sends_allowed", "SENDS_ALLOWED", "bool", True, "Allow Bitwarden Sends."),
     SettingSpec("invitations_allowed", "INVITATIONS_ALLOWED", "bool", True, "Allow organization admins to invite users even when open signups are disabled."),
     SettingSpec("invitation_org_name", "INVITATION_ORG_NAME", "string", "Vaultwarden", "Name used for invitations that are not sent by a specific organization."),
@@ -85,7 +85,9 @@ def parse_vaultwarden_settings(data: Mapping[str, object]) -> dict[str, object]:
         elif spec.kind == "int":
             if not isinstance(value, int) or isinstance(value, bool):
                 raise OperatorSettingError(f"vaultwarden.{spec.name} must be an integer")
-            if spec.minimum is not None and value < spec.minimum or spec.maximum is not None and value > spec.maximum:
+            below_minimum = spec.minimum is not None and value < spec.minimum
+            above_maximum = spec.maximum is not None and value > spec.maximum
+            if below_minimum or above_maximum:
                 raise OperatorSettingError(
                     f"vaultwarden.{spec.name} must be {spec.minimum}..{spec.maximum}"
                 )
