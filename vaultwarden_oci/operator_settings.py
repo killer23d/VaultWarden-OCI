@@ -107,7 +107,13 @@ def parse_vaultwarden_settings(data: Mapping[str, object]) -> dict[str, object]:
 
 def environment(values: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     normalized = parse_vaultwarden_settings(values)
-    rendered: list[tuple[str, str]] = []
+    # Vaultwarden persists Admin-panel edits to DATA_FOLDER/config.json and that
+    # file overrides environment variables on later starts. Point CONFIG_FILE at
+    # the container tmpfs so the appliance config remains the only durable
+    # non-secret authority while the upstream Admin UI can still make temporary
+    # in-process changes for diagnostics. Existing /data/config.json files are
+    # therefore ignored rather than silently overriding the appliance config.
+    rendered: list[tuple[str, str]] = [("CONFIG_FILE", "/tmp/vaultwarden-admin-config.json")]
     for spec in VAULTWARDEN_SETTINGS:
         value = normalized[spec.name]
         if isinstance(value, bool):
