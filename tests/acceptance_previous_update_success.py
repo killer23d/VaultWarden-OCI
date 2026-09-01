@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the actual supported predecessor can complete a successful forward update."""
+"""Prove the actual direct predecessor can complete a successful forward update."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ from unittest import mock
 
 def main(candidate_source: Path, host: Path) -> int:
     # PYTHONPATH intentionally points at the actual predecessor worktree. Every
-    # updater owner imported here therefore belongs to the supported predecessor.
+    # updater owner imported here therefore belongs to the direct predecessor.
     from vaultwarden_oci import (
         cli,
         install,
@@ -26,10 +26,8 @@ def main(candidate_source: Path, host: Path) -> int:
     predecessor_version = cli.load_versions(predecessor_root / "versions.toml").version
     candidate_source = candidate_source.resolve()
     candidate_version = cli.load_versions(candidate_source / "versions.toml").version
-    if predecessor_version.split(".latest.", 1)[0] != "0.1.0-dev.16":
-        raise SystemExit(f"expected actual supported predecessor dev.16, got {predecessor_version}")
-    if candidate_version.split(".latest.", 1)[0] != "0.1.0-dev.17":
-        raise SystemExit(f"expected candidate dev.17, got {candidate_version}")
+    if candidate_version == predecessor_version:
+        raise SystemExit("successful-forward acceptance requires a distinct candidate release")
 
     layout = install.Layout(host.resolve())
     current_target, current_release, _ = update._current(layout)
@@ -38,6 +36,8 @@ def main(candidate_source: Path, host: Path) -> int:
             f"successful-forward host is {current_release}, expected predecessor {predecessor_version}"
         )
     frozen = update_versions.resolve_pinned(candidate_source, machine="x86_64")
+    if frozen.project_version != candidate_version:
+        raise SystemExit("candidate source and resolved project version disagree")
     plan = update.UpdatePlan(
         source_root=candidate_source,
         root=host.resolve(),
@@ -144,7 +144,9 @@ def main(candidate_source: Path, host: Path) -> int:
         raise SystemExit("successful predecessor update did not run the candidate CrowdSec gate")
 
     print(
-        "PASS: actual supported predecessor updater completed a successful dev.16 -> dev.17 transaction with candidate pre-stage before recovery, candidate health/CrowdSec gates, and no recovery guard left behind"
+        "PASS: actual direct predecessor updater completed a successful "
+        f"{predecessor_version} -> {candidate_version} transaction with candidate pre-stage before recovery, "
+        "candidate health/CrowdSec gates, and no recovery guard left behind"
     )
     return 0
 

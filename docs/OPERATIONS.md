@@ -46,7 +46,7 @@ journalctl -u 'vaultwarden-oci-notify@*'
 
 ## Config and secrets
 
-**Prerequisite:** the installed `/etc/vaultwarden-oci` authorities and valid dedicated storage.
+**Prerequisite:** the installed `/etc/vaultwarden-oci` authorities and valid dedicated storage. See [Configuration](CONFIGURATION.md) for the full pre-populated setting catalog and defaults.
 
 ```bash
 sudo vwctl config edit
@@ -54,12 +54,17 @@ sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets edit
 sudo vwctl secrets validate
 sudo vwctl doctor --json
-sudo vwctl restart
 ```
 
 The config editor parses a protected candidate before atomic replacement. The secret editor lets SOPS operate on a protected encrypted candidate, then validates recipients, operational decryption, and credential pairing before replacement.
 
-**Expected success:** validation passes before restart. **On failure:** the original authority remains installed; correct the candidate through the same command rather than copying plaintext secrets around.
+On a fresh or fully reconciled appliance, a successful interactive `config edit` or `secrets edit` checks the stack state and offers to restart a running stack immediately. Accepting uses the same supported lifecycle as `sudo vwctl restart`; declining prints the command to run later. If the stack is stopped, the validated changes apply on the next start. Non-interactive callers do not receive a blocking prompt.
+
+Vaultwarden's web Admin settings are not a second durable appliance authority in the steady state. A fresh/reconciled runtime points upstream `CONFIG_FILE` at container tmpfs, so Admin-panel changes are temporary diagnostics and do not override `/etc/vaultwarden-oci/config.toml` after restart.
+
+An upgrade that finds a pre-existing `/data/config.json` does **not** silently ignore it. The candidate keeps that historical Admin file effective until the operator reconciles its appliance-supported values through `vwctl config edit`/`secrets edit`. Supported differences are shown without secret values and finalization is refused while they differ. When they match, the interactive flow names legacy-only/incompatible/sensitive keys whose values will stop participating, asks for explicit confirmation, and records a digest-bound finalization marker. Only then does the next start/restart switch `CONFIG_FILE` to tmpfs. If the historical file later changes, its digest no longer matches the marker and reconciliation becomes pending again.
+
+**Expected success:** validation passes before restart or the next start, and an upgraded host with historical Admin policy reaches appliance-only authority only after explicit reconciliation. **On failure:** the original config/SOPS authority remains installed and an unfinalized legacy Admin file remains effective; correct the candidate through the supported editors rather than copying plaintext secrets around.
 
 ## Recovery custody after setup
 
@@ -77,18 +82,19 @@ For creation or rotation of `cloudflare_api_token` and `cloudflare_remediation_t
 
 The host separately owns a fail-closed Docker `DOCKER-USER` origin filter that permits published TCP/443 only from validated Cloudflare IPv4/IPv6 ranges. A bounded last-known-good range set can be used. With neither current nor safe cached ranges, public origin ingress remains blocked.
 
-`/admin` uses only the intended small stack: Vaultwarden admin token, Caddy rate limiting, and one outer Basic Auth gate. A deliberately disabled admin route is a valid closed state.
+`/admin` uses only the intended small stack: Vaultwarden admin token, Caddy rate limiting, and one outer Basic Auth gate. A deliberately disabled admin route is a valid closed state. The outer route defaults to 60 requests per minute, which is intentionally high enough for the Admin page's normal multi-request UI while still bounded. Vaultwarden's own admin-login limiter remains separate at its 300-second/3-burst default. The previous 5-requests-per-5-minutes outer limit was too restrictive for normal Admin navigation and could return HTTP 429 before an SMTP test reached Vaultwarden.
 
 To **enable or rotate** admin access, edit the encrypted secret authority and set both `vaultwarden_admin_token` and `admin_basic_auth_password` together; changing either value is treated as a rotation of that layer:
 
 ```bash
 sudo vwctl secrets edit
 sudo vwctl secrets validate
-sudo vwctl restart
 sudo vwctl doctor --json
 ```
 
-To **disable** `/admin`, run `sudo vwctl secrets edit` and remove both `vaultwarden_admin_token` and `admin_basic_auth_password`, then run the same validate/restart/doctor sequence. Do not place either plaintext value in `config.toml`.
+Accept the restart prompt, or run `sudo vwctl restart` later if you decline it. If a legacy Admin reconciliation is still pending, complete that explicit transition before expecting an appliance config change to replace values from the historical Admin file.
+
+To **disable** `/admin`, run `sudo vwctl secrets edit` and remove both `vaultwarden_admin_token` and `admin_basic_auth_password`, then validate and restart when prompted. Do not place either plaintext value in `config.toml`.
 
 Refresh or diagnose the separate Cloudflare origin policy with:
 
@@ -144,14 +150,18 @@ sudo vwctl crowdsec unban 203.0.113.7
 
 ## Notifications and email tests
 
-Vaultwarden application mail uses direct authenticated SMTP. Operational notifications use one built-in HTTPS provider and fall back to authenticated SMTP only after a failure classified as eligible transient. For CyberPersons, `503 service_unavailable` is status-only transient; `429 rate_limit_exceeded` and `500 send_failed` are not transient by status alone.
+Vaultwarden application mail and the appliance direct SMTP path share the common `[smtp]` host/port/security/sender/timeout values and SOPS `smtp_username`/`smtp_password`. This covers invitations, verification, email 2FA, new-device mail, the Vaultwarden Admin SMTP test, `vwctl notification test --smtp`, and eligible operational-notification fallback. Operational notifications may additionally use one built-in HTTPS provider. For CyberPersons, `503 service_unavailable` is status-only transient; `429 rate_limit_exceeded` and `500 send_failed` are not transient by status alone.
+
+The Vaultwarden-specific `smtp.embed_images`, `smtp.accept_invalid_certs`, and `smtp.accept_invalid_hostnames` controls are not settings for the appliance direct SMTP client. The direct client always performs normal certificate and hostname validation and intentionally does not honor Vaultwarden's TLS exceptions.
 
 ```bash
 sudo vwctl notification test
 sudo vwctl notification test --smtp
 ```
 
-**Expected success:** the first command proves the configured operational route; the second proves direct authenticated SMTP. **On failure:** inspect `notification.*` doctor checks and provider/SMTP settings. Permanent/auth/TLS/ambiguous API failures are intentionally not hidden by SMTP fallback.
+**Expected success:** the first command proves the configured operational route and labels the actual API/fallback transport in the delivered diagnostic; the second proves the common SMTP endpoint/sender/credentials using direct authenticated SMTP with strict TLS validation. It does not prove Vaultwarden-only TLS exception knobs. **On failure:** inspect `notification.*` doctor checks and provider/SMTP settings. Permanent/auth/TLS/ambiguous API failures are intentionally not hidden by SMTP fallback.
+
+If the Vaultwarden Admin SMTP test reports `429` followed by JavaScript such as `SyntaxError: Unexpected end of JSON input`, inspect the Caddy access log before changing SMTP credentials. That symptom can be an HTTP rate-limit response rather than an SMTP rejection. The supported default outer `/admin` limit is now 60 requests/minute specifically to avoid the former 5-per-5-minute false failure. Use `sudo vwctl notification test --smtp` to test the common SMTP transport independently under strict TLS.
 
 ## Timers and automation
 
@@ -194,7 +204,7 @@ sudo vwctl update apply --use-latest
 
 `--use-latest` resolves supported mutable upstreams once to exact refs/digests and freezes them. It must never leave floating `latest` state. The update-check timer checks/notifies automatically; application **apply** remains operator-driven.
 
-**Expected success:** check reports a coherent candidate/no-update state; apply may stop at an explicitly described prerequisite/handoff boundary, and the final apply ends with exact active version plus healthy status/doctor. **On failure:** follow the updater's recovery/rollback message; do not manually repoint either `current` or `/usr/local/bin/vwctl`. If a supported compatibility dependency was already installed, do not manually remove it after application rollback; verify predecessor health and retry the supported target update.
+**Expected success:** check reports a coherent candidate/no-update state; apply may stop at an explicitly described prerequisite/handoff boundary, and the final apply ends with exact active version plus healthy status/doctor. If the candidate reports a pre-existing Vaultwarden Admin config transition, existing Admin policy remains effective until the separate explicit reconciliation described above. **On failure:** follow the updater's recovery/rollback message; do not manually repoint either `current` or `/usr/local/bin/vwctl`. If a supported compatibility dependency was already installed, do not manually remove it after application rollback; verify predecessor health and retry the supported target update.
 
 ## Ubuntu package updates and reboot-required state
 
@@ -213,6 +223,8 @@ The narrow supported-predecessor compatibility dependency described above does n
 
 - **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
 - **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
+- **Legacy Admin reconciliation pending:** run `sudo vwctl config edit`, copy the displayed supported legacy values into `config.toml`, update SOPS through `sudo vwctl secrets edit` where appropriate, and finalize only after the supported differences are gone. Do not delete `/data/config.json` to bypass the transition.
+- **Vaultwarden Admin SMTP test returns HTTP 429 / JSON parse error:** test `sudo vwctl notification test --smtp` and inspect Caddy logs. The supported outer `/admin` limit is 60/minute; a 429 is an HTTP boundary failure, not proof of SMTP rejection.
 - **CrowdSec FAIL:** inspect the exact `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, or `crowdsec.cloudflare` check. Keep the firewall bouncer host-INPUT-only and the Worker Fail Open confirmation tied to its current explicit invocation.
 - **Secrets FAIL:** use `sudo vwctl secrets validate`/`edit`; do not copy decrypted YAML into files or shell history.
 - **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
@@ -230,6 +242,8 @@ The narrow supported-predecessor compatibility dependency described above does n
 | Operational Age private identity | `/etc/vaultwarden-oci/age-key.txt` (root-only) |
 | Expected storage identity | `/etc/vaultwarden-oci/storage-identity.json` |
 | Dedicated persistent data mount | `/var/lib/vaultwarden-oci` |
+| Historical Vaultwarden Admin config during bounded reconciliation | `/var/lib/vaultwarden-oci/data/config.json` |
+| Legacy Admin reconciliation marker | `/var/lib/vaultwarden-oci/state/legacy-admin-config-finalized.json` |
 | Vaultwarden CrowdSec security log | `/var/lib/vaultwarden-oci/vaultwarden/log/vaultwarden.log` |
 | Project CrowdSec acquisition | `/etc/crowdsec/acquis.d/vaultwarden-oci.yaml` |
 | CrowdSec firewall policy override | `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local` |
