@@ -103,6 +103,22 @@ def _human_output(args: Sequence[str]) -> Iterator[None]:
         sys.stdout, sys.stderr = stdout, stderr
 
 
+def _cosmetic_override(args: Sequence[str]) -> int | None:
+    """Keep machine contracts in cli/day2 while restoring the proven V1 human presentation."""
+    from . import operator_cosmetics
+
+    command = tuple(args)
+    if command == ("status",):
+        return operator_cosmetics.status()
+    if command == ("notification", "test"):
+        return operator_cosmetics.notification_test(smtp_only=False)
+    if command == ("notification", "test", "--smtp"):
+        return operator_cosmetics.notification_test(smtp_only=True)
+    if len(command) == 3 and command[:2] == ("notify", "--event"):
+        return operator_cosmetics.notify_failure(command[2])
+    return None
+
+
 def _automation_enable_action() -> str | None:
     """Return the supported first-run automation action only when it is needed."""
     from . import day2
@@ -196,7 +212,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         with _human_output(args):
             try:
-                code = update_cli.main(args)
+                override = _cosmetic_override(args)
+                code = update_cli.main(args) if override is None else override
             except KeyboardInterrupt:
                 print(file=sys.stderr)
                 cleanup_ok = _cleanup_interrupted_lifecycle(lifecycle_action or "")
