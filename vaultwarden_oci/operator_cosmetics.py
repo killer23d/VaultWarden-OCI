@@ -1,4 +1,4 @@
-"""V1-inspired human presentation without changing machine/read-model owners."""
+"""Proven human presentation without changing machine/read-model owners."""
 from __future__ import annotations
 
 import socket
@@ -51,7 +51,7 @@ def _notification_body(
 
 
 def status() -> int:
-    """Render the authoritative day-2 JSON model through the V1-style dashboard view."""
+    """Render the authoritative day-2 JSON model through the proven dashboard view."""
     payload = day2.status_payload()
     dashboard.draw_header(payload)
     dashboard.draw_status(payload)
@@ -70,7 +70,7 @@ def _load_mail() -> tuple[object, Mapping[str, str]]:
 
 
 def notification_test(*, smtp_only: bool) -> int:
-    """Run the existing notification transports with a V1-style diagnostic body."""
+    """Run the existing notification transports with a rich diagnostic body."""
     try:
         config, values = _load_mail()
         recipient = config.notification_to_email or config.acme_email
@@ -120,7 +120,7 @@ def notification_test(*, smtp_only: bool) -> int:
 
 
 def notify_failure(event: str) -> int:
-    """Send the existing systemd failure notification with useful V1-era context."""
+    """Send the existing systemd failure notification with useful operator context."""
     if not cli._EVENT.fullmatch(event):
         print("FAIL: --event must be a bounded systemd event identifier", file=sys.stderr)
         return 2
