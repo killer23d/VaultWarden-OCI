@@ -175,8 +175,7 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
         ui.action("complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit")
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
-    if not credentials_ready:
-        ui.action("run: sudo vwctl notification test --smtp after entering SMTP credentials")
+    ui.action("run: sudo vwctl notification test --smtp to verify the shared SMTP transport")
     ui.action("run: sudo vwctl crowdsec setup")
     ui.action("run: sudo vwctl crowdsec remediation-start")
     ui.action("set every bouncer-created Worker Route to Fail Open in Cloudflare")
@@ -186,6 +185,7 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     ui.action("run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy")
     ui.action("enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
     ui.action("run: sudo vwctl timers")
+    ui.action("run: sudo vwctl update check to seed the initial update-status snapshot")
     ui.info("A post-start doctor WARN for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured; any FAIL still requires action.")
 
 
