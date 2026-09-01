@@ -167,14 +167,26 @@ def _complete_external_credentials_before_handoff() -> None:
     ui.ok("External runtime config and required SOPS credentials validate before recovery-kit publication.")
 
 
-def _print_post_handoff_next_actions() -> None:
+def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
+    """Print the supported first-run path in the order a fresh host can satisfy it."""
     ui = _ui()
     ui.header("Next actions")
+    if not credentials_ready:
+        ui.action("complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit")
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
-    ui.action("run: sudo vwctl crowdsec setup, then follow its displayed remediation and Worker Route Fail Open steps")
-    ui.action("run: sudo vwctl doctor")
-    ui.action("when doctor is ready, run: sudo vwctl start")
+    if not credentials_ready:
+        ui.action("run: sudo vwctl notification test --smtp after entering SMTP credentials")
+    ui.action("run: sudo vwctl crowdsec setup")
+    ui.action("run: sudo vwctl crowdsec remediation-start")
+    ui.action("set every bouncer-created Worker Route to Fail Open in Cloudflare")
+    ui.action("then run: sudo vwctl crowdsec confirm-fail-open")
+    ui.action("run: sudo vwctl start")
+    ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
+    ui.action("run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy")
+    ui.action("enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
+    ui.action("run: sudo vwctl timers")
+    ui.info("A post-start doctor WARN for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured; any FAIL still requires action.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -186,7 +198,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.action("setup cancelled before installation changes", file=sys.stderr)
         return 2
     if not _should_generate(args):
-        return setup.main(args)
+        parsed = _parse_install_args(args)
+        if parsed is None or parsed.dry_run:
+            return setup.main(args)
+        code = setup.main(args, defer_next_actions=True)
+        if code == 0:
+            _print_post_handoff_next_actions(credentials_ready=False)
+        return code
 
     workspace: Path | None = None
     identity: Path | None = None
@@ -218,13 +236,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.header("Initial credential recovery-kit handoff")
         result = recovery_ux.export_recovery_kit(identity)
         ui.ok(f"Verified complete recovery kit: {result.archive}")
+        if result.emailed:
+            ui.ok("Verified recovery-kit email handoff completed successfully.")
         _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():
             raise SetupFrontendError("offline identity remained in volatile server state after successful recovery-kit handoff")
         ui.ok("Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
         ui.action("Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
-        _print_post_handoff_next_actions()
+        _print_post_handoff_next_actions(credentials_ready=True)
         return 0
     except (
         SetupFrontendError,
