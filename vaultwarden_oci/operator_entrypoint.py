@@ -1,6 +1,7 @@
 """Installed vwctl entrypoint behavior for long-running lifecycle commands."""
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -137,6 +138,15 @@ def _automation_enable_action() -> str | None:
     )
 
 
+def _legacy_transition_pending() -> bool:
+    from . import operator_settings
+
+    try:
+        return operator_settings.legacy_admin_active()
+    except (operator_settings.OperatorSettingError, OSError):
+        return False
+
+
 def _completion_guidance(args: Sequence[str], code: int) -> None:
     """Add bounded human next-actions without changing machine/read-model contracts."""
     if not _colorable(args) or not sys.stdout.isatty():
@@ -158,6 +168,122 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
         if action is not None:
             print(action)
 
+    remind = (
+        code == 0
+        and tuple(args[:2]) not in {("config", "edit"), ("secrets", "edit")}
+        and (args[:1] in (["start"], ["status"], ["doctor"]) or args[:2] == ["update", "apply"])
+    )
+    if remind and _legacy_transition_pending():
+        print(
+            "ACTION: a pre-existing Vaultwarden Admin config remains temporarily authoritative "
+            "to preserve its policy. Run 'sudo vwctl config edit' to reconcile the supported "
+            "values and explicitly finalize the one-time transition."
+        )
+
+
+def _display_legacy_report(report: object) -> None:
+    differences = tuple(getattr(report, "differences", ()))
+    discard_keys = tuple(getattr(report, "discard_keys", ()))
+    legacy_path = getattr(report, "legacy_path", "legacy config.json")
+    print(
+        f"NOTICE: {legacy_path} remains temporarily authoritative so an upgrade does not "
+        "silently replace existing Vaultwarden Admin policy."
+    )
+    if differences:
+        print("Supported values that still differ from config.toml:")
+        for difference in differences:
+            print(
+                f"  {difference.target}: legacy={json.dumps(difference.legacy_value, ensure_ascii=False)} "
+                f"config={json.dumps(difference.current_value, ensure_ascii=False)}"
+            )
+    if discard_keys:
+        print(
+            "NOTICE: finalizing will stop honoring these legacy-only, incompatible, or "
+            "sensitive keys (values are intentionally not displayed): "
+            + ", ".join(discard_keys)
+        )
+
+
+def _legacy_transition_after_edit(args: Sequence[str], code: int) -> int:
+    """Reconcile an old Admin config before switching its durable authority off."""
+    if code != 0 or tuple(args[:2]) not in {("config", "edit"), ("secrets", "edit")}:
+        return code
+
+    from . import operator_settings, runtime, secrets, storage
+
+    try:
+        if not operator_settings.legacy_admin_active():
+            return code
+        storage.verify()
+        config = runtime.load_config()
+        values = secrets.load(config.offline_recovery_recipient)
+        report = operator_settings.legacy_admin_report(config, values)
+    except (
+        operator_settings.OperatorSettingError,
+        runtime.RuntimeConfigError,
+        secrets.SecretsError,
+        storage.StorageError,
+        OSError,
+    ) as exc:
+        print(f"FAIL: legacy Vaultwarden Admin reconciliation could not be evaluated: {exc}", file=sys.stderr)
+        return 1
+
+    if not report.active:
+        return code
+    _display_legacy_report(report)
+    if report.differences:
+        print(
+            "ACTION: copy the supported legacy values above into config.toml with "
+            "'sudo vwctl config edit'. The legacy file stays effective until they match."
+        )
+        return code
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print(
+            "ACTION: rerun 'sudo vwctl config edit' interactively to explicitly finalize "
+            "the reconciled legacy Admin configuration before switching to appliance-only authority."
+        )
+        return code
+
+    answer = input(
+        "Finalize the reconciled legacy Vaultwarden Admin config and use config.toml/SOPS after restart? [y/N]: "
+    ).strip().lower()
+    if answer not in {"y", "yes"}:
+        print(
+            "ACTION: the legacy Admin config remains effective. Run 'sudo vwctl config edit' "
+            "again when you are ready to finalize the transition."
+        )
+        return code
+
+    try:
+        with cli.mutation_lock(runtime.LOCK):
+            storage.verify()
+            current_config = runtime.load_config()
+            current_values = secrets.load(current_config.offline_recovery_recipient)
+            current_report = operator_settings.legacy_admin_report(current_config, current_values)
+            if current_report.differences:
+                raise operator_settings.OperatorSettingError(
+                    "supported legacy Admin values changed during reconciliation; review config.toml again"
+                )
+            operator_settings.finalize_legacy_admin(current_report, confirm=True)
+    except (
+        operator_settings.OperatorSettingError,
+        runtime.RuntimeConfigError,
+        secrets.SecretsError,
+        storage.StorageError,
+        cli.LockBusyError,
+        RuntimeError,
+        OSError,
+    ) as exc:
+        print(f"FAIL: legacy Vaultwarden Admin transition was not finalized: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        "PASS: legacy Vaultwarden Admin configuration was explicitly reconciled; "
+        "the next start/restart will use config.toml/SOPS as the sole durable authority"
+    )
+    return code
+
 
 def _restart_after_edit(args: Sequence[str], code: int) -> int:
     """Offer an immediate restart after a successful interactive config/secret edit."""
@@ -167,6 +293,13 @@ def _restart_after_edit(args: Sequence[str], code: int) -> int:
         return code
 
     from . import runtime
+
+    if _legacy_transition_pending():
+        print(
+            "ACTION: restart is deferred while the pre-existing Vaultwarden Admin config "
+            "remains authoritative; reconcile/finalize it first."
+        )
+        return code
 
     try:
         state, _ = runtime.status(runner=_BASE_RUN_COMMAND)
@@ -219,6 +352,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cleanup_ok = _cleanup_interrupted_lifecycle(lifecycle_action or "")
                 print(f"FAIL: {lifecycle_action or 'vwctl'} interrupted", file=sys.stderr)
                 return 130 if cleanup_ok else 1
+            code = _legacy_transition_after_edit(args, code)
             _completion_guidance(args, code)
             return _restart_after_edit(args, code)
     finally:
