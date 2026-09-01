@@ -125,7 +125,7 @@ def _config_text(host: str, email: str, offline: str) -> str:
 #   REQUIRED: cloudflare_api_token       - Caddy Cloudflare DNS-01 token
 #   REQUIRED: smtp_username              - authenticated SMTP login
 #   REQUIRED: smtp_password              - authenticated SMTP password
-#   OPTIONAL: cloudflare_remediation_token - CrowdSec Cloudflare Worker remediation
+#   BASELINE REQUIRED: cloudflare_remediation_token - CrowdSec Cloudflare Worker remediation
 #   OPTIONAL: email_api_token            - HTTPS operational notification provider
 #   GENERATED: vaultwarden_admin_token, admin_basic_auth_password
 #
