@@ -13,7 +13,7 @@ VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. 
 | SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
 | rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
 | systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers. |
-| Notifications | Uses one authenticated SMTP authority for Vaultwarden application mail and appliance direct-SMTP/fallback delivery; an optional built-in HTTPS provider remains available for operational events. |
+| Notifications | Shares the SMTP endpoint/sender/credentials used by Vaultwarden for direct-SMTP/fallback delivery; an optional built-in HTTPS provider remains available for operational events. The appliance direct SMTP path always keeps normal certificate/hostname validation. |
 
 ```text
 Internet
@@ -51,7 +51,7 @@ sudo ./setup.sh install \
 
 Interactive setup can select a suitable non-boot data device and can generate the offline recovery identity only in root-owned volatile storage long enough to hand it off in a verified encrypted recovery kit. Terminal-driven `--auto` uses the same custody flow when no `--offline-recipient` is supplied: install steps remain automatic, while the recovery-kit passphrase and final custody acknowledgement remain interactive. Fully headless `--auto` must supply its storage decisions and an existing public `--offline-recipient`. An explicitly supplied recipient is authoritative and is never replaced by a generated identity. Read [Install](docs/INSTALL.md) before changing a production host.
 
-The setup-generated `config.toml` now contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP safety, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
+The setup-generated `config.toml` contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP controls, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
 
 After setup and external credentials are complete:
 
@@ -77,7 +77,7 @@ From a source checkout, `sudo ./dashboard.sh` is equivalent.
 ## Administrator manual
 
 - [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, terminal-generated versus pre-existing offline recovery custody, explicit `--use-latest`, config/secrets completion, and first start.
-- [Configuration](docs/CONFIGURATION.md) — the pre-populated operator setting catalog, shared SMTP authority, Caddy `/admin` limit, optional notifications, and restart behavior after edits.
+- [Configuration](docs/CONFIGURATION.md) — the pre-populated operator setting catalog, bounded transition from an existing Vaultwarden Admin `config.json`, SMTP ownership/scope, Caddy `/admin` limit, optional notifications, and restart behavior after edits.
 - [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, troubleshooting, and file locations.
 - [Recovery](docs/RECOVERY.md) — backup contents/exclusions, verification, same-host restore, lost-server disaster recovery, rclone, and the separate recovery-kit ZIP.
 - [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
@@ -89,6 +89,6 @@ Maintainer/product authorities are [Project boundary](docs/PROJECT-BOUNDARY.md),
 
 Production state is dedicated-storage-only. There is one operator config, one encrypted SOPS secret authority, and one exact version manifest. Normal application recovery is one encrypted `.vwrec` format; the credential recovery-kit ZIP is a separate artifact. The offline recovery private identity is never persistent server state. Application updates are explicit and recovery-gated. Ubuntu package updates are separate and the appliance never auto-reboots.
 
-Configuration follows the same single-owner rule: `config.toml` exposes the curated small-team controls, SOPS owns secret values, and runtime rendering applies them. Editing settings in Vaultwarden's web admin is not a second appliance configuration authority. After a successful interactive `vwctl config edit` or `vwctl secrets edit`, the operator is offered an immediate stack restart when the stack is running; declining leaves an explicit restart action.
+Configuration follows the same single-owner rule: `config.toml` exposes the curated small-team controls, SOPS owns secret values, and runtime rendering applies them. A fresh/fully reconciled appliance keeps Vaultwarden Admin persistence on container tmpfs so web changes cannot become a competing durable authority. When upgrading an installation that already has `/data/config.json`, the appliance first keeps that exact file effective and requires an explicit bounded reconciliation so existing policy is not silently replaced. After reconciliation and restart, `config.toml`/SOPS become the sole durable authority. Successful interactive `vwctl config edit` or `vwctl secrets edit` operations then offer the normal immediate restart when the stack is running.
 
 There is intentionally no Postfix/local queue, public backup-tier matrix, compatibility reader for an earlier archive format, generic plugin/storage/update framework, broad repair command, HA layer, Kubernetes/Swarm layer, or second dashboard backend.
