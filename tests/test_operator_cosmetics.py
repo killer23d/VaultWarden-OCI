@@ -39,7 +39,7 @@ class OperatorCosmeticsTests(unittest.TestCase):
     def test_json_status_keeps_machine_owner(self) -> None:
         self.assertIsNone(operator_entrypoint._cosmetic_override(["status", "--json"]))
 
-    def test_notification_body_restores_v1_operator_context(self) -> None:
+    def test_notification_body_restores_operator_context(self) -> None:
         with (
             mock.patch.object(operator_cosmetics, "_sent_at", return_value="2026-09-01T10:30:00-07:00"),
             mock.patch.object(operator_cosmetics, "_host", return_value="vault.example.test"),
