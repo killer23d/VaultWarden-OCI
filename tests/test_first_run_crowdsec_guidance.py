@@ -31,10 +31,12 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
             "ACTION run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy",
             "ACTION enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target",
             "ACTION run: sudo vwctl timers",
+            "ACTION run: sudo vwctl update check to seed the initial update-status snapshot",
         )
         positions = [rendered.index(item) for item in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("when doctor is ready", rendered)
+        self.assertIn("sudo vwctl notification test --smtp", rendered)
         self.assertIn("offsite/rclone recovery is expected", rendered)
 
     def test_explicit_recipient_public_setup_uses_same_completion_path(self) -> None:
@@ -144,6 +146,25 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
         self.assertIn("activation=target-managed", rendered)
         self.assertIn("unit-file=disabled", rendered)
         self.assertIn("next=monotonic/systemd-managed", rendered)
+
+    def test_human_status_calls_unconfigured_operational_notifications_what_they_are(self) -> None:
+        payload = {
+            "notification": {"state": "never", "detail": "no delivery recorded"},
+            "doctor": {
+                "checks": [
+                    {
+                        "id": "notification.provider",
+                        "status": "SKIP",
+                        "message": "operational notifications are not configured",
+                    }
+                ]
+            },
+        }
+
+        rendered = operator_cosmetics._human_status_payload(payload)
+
+        self.assertEqual(rendered["notification"]["state"], "not configured")
+        self.assertEqual(payload["notification"]["state"], "never")
 
 
 if __name__ == "__main__":
