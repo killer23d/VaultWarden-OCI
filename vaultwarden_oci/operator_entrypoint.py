@@ -177,7 +177,16 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
                 "then run 'sudo vwctl crowdsec confirm-fail-open'."
             )
 
-    if (args[:1] == ["start"] and code == 0) or (args[:1] == ["timers"] and code != 0):
+    if args[:1] == ["start"] and code == 0:
+        action = _automation_enable_action()
+        if action is not None:
+            print(
+                "ACTION: create and verify the first application recovery point with 'sudo vwctl backup', "
+                "then run the post-start acceptance check with 'sudo vwctl doctor'; after both succeed, "
+                "enable persistent appliance automation with 'sudo systemctl enable --now vaultwarden-oci.target' "
+                "and run 'sudo vwctl timers'."
+            )
+    elif args[:1] == ["timers"] and code != 0:
         action = _automation_enable_action()
         if action is not None:
             print(action)
