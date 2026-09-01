@@ -53,6 +53,8 @@ Interactive setup can select a suitable non-boot data device and can generate th
 
 The setup-generated `config.toml` contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP controls, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
 
+The standard production security baseline uses two separate Cloudflare credentials: `cloudflare_api_token` for Caddy DNS-01 and `cloudflare_remediation_token` for CrowdSec Worker remediation. Setup-generated recovery custody requires both before it publishes the initial credential kit; explicit `--offline-recipient` installs must populate the remediation token before `sudo vwctl crowdsec setup`.
+
 After setup and external credentials are complete, follow the displayed first-run actions in order. Full steady-state doctor acceptance is intentionally **after** `start`, because lifecycle startup materializes the runtime/Caddy state and the Cloudflare origin policy that those doctor checks inspect:
 
 ```bash
