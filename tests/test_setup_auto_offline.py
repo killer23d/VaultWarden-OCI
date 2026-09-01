@@ -264,12 +264,40 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             mock.patch.object(
                 setup_frontend.secrets,
                 "validate_encrypted",
-                side_effect=[setup_frontend.secrets.SecretsError("missing required"), {"ok": "yes"}],
+                side_effect=[
+                    setup_frontend.secrets.SecretsError("missing required"),
+                    {"cloudflare_remediation_token": "remediation-token"},
+                ],
             ) as validate,
             mock.patch.object(setup_frontend.secrets, "edit_encrypted") as edit_secrets,
         ):
             setup_frontend._complete_external_credentials_before_handoff()
         edit_config.assert_called_once_with()
+        edit_secrets.assert_called_once()
+        self.assertEqual(validate.call_count, 2)
+
+    def test_generated_custody_requires_remediation_token_before_handoff(self) -> None:
+        ready = mock.Mock(smtp_host="smtp.example.net", offline_recovery_recipient=OFFLINE)
+        generic_required_only = {
+            "cloudflare_api_token": "dns-token",
+            "smtp_username": "user",
+            "smtp_password": "password",
+        }
+        standard_baseline = {
+            **generic_required_only,
+            "cloudflare_remediation_token": "remediation-token",
+        }
+        with (
+            mock.patch.object(setup_frontend.runtime, "load_config", side_effect=[ready, ready]),
+            mock.patch.object(
+                setup_frontend.secrets,
+                "validate_encrypted",
+                side_effect=[generic_required_only, standard_baseline],
+            ) as validate,
+            mock.patch.object(setup_frontend.secrets, "edit_encrypted") as edit_secrets,
+        ):
+            setup_frontend._complete_external_credentials_before_handoff()
+
         edit_secrets.assert_called_once()
         self.assertEqual(validate.call_count, 2)
 
