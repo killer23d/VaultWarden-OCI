@@ -9,11 +9,17 @@ from vaultwarden_oci import notification, operator_cosmetics, operator_entrypoin
 
 
 class OperatorCosmeticsTests(unittest.TestCase):
-    def test_status_reuses_authoritative_day2_payload_and_dashboard_renderer(self) -> None:
-        payload = {
+    def _healthy_payload(self) -> dict[str, object]:
+        return {
+            "runtime": {"overall": "running", "services": []},
             "doctor": {"overall": "WARN"},
-            "automation": {"overall": "PASS"},
+            "automation": {"overall": "FAIL"},
+            "notification": {"state": "never"},
+            "edge": {"checks": [{"status": "PASS"}]},
         }
+
+    def test_status_reuses_authoritative_day2_payload_and_dashboard_renderer(self) -> None:
+        payload = self._healthy_payload()
         with (
             mock.patch.object(operator_cosmetics.day2, "status_payload", return_value=payload),
             mock.patch.object(operator_cosmetics.dashboard, "draw_header") as header,
@@ -24,20 +30,34 @@ class OperatorCosmeticsTests(unittest.TestCase):
         header.assert_called_once_with(payload)
         status.assert_called_once_with(payload)
 
-    def test_status_failure_exit_is_preserved(self) -> None:
-        payload = {
-            "doctor": {"overall": "FAIL"},
-            "automation": {"overall": "PASS"},
-        }
-        with (
-            mock.patch.object(operator_cosmetics.day2, "status_payload", return_value=payload),
-            mock.patch.object(operator_cosmetics.dashboard, "draw_header"),
-            mock.patch.object(operator_cosmetics.dashboard, "draw_status"),
-        ):
-            self.assertEqual(operator_cosmetics.status(), 1)
+    def test_status_preserves_existing_human_health_boundary(self) -> None:
+        payload = self._healthy_payload()
+        payload["doctor"] = {"overall": "FAIL"}
+        payload["automation"] = {"overall": "FAIL"}
+        self.assertEqual(operator_cosmetics._status_exit_code(payload), 0)
+
+        payload["notification"] = {"state": "failure"}
+        self.assertEqual(operator_cosmetics._status_exit_code(payload), 1)
+
+        payload["notification"] = {"state": "never"}
+        payload["edge"] = {"checks": [{"status": "FAIL"}]}
+        self.assertEqual(operator_cosmetics._status_exit_code(payload), 1)
+
+        payload["edge"] = {"checks": [{"status": "PASS"}]}
+        payload["runtime"] = {"overall": "degraded", "services": []}
+        self.assertEqual(operator_cosmetics._status_exit_code(payload), 1)
 
     def test_json_status_keeps_machine_owner(self) -> None:
         self.assertIsNone(operator_entrypoint._cosmetic_override(["status", "--json"]))
+
+    def test_captured_human_status_keeps_stable_cli_owner(self) -> None:
+        stream = SimpleNamespace(isatty=lambda: False)
+        with (
+            mock.patch.object(operator_entrypoint.sys, "stdout", stream),
+            mock.patch.object(operator_cosmetics, "status", return_value=0) as status,
+        ):
+            self.assertIsNone(operator_entrypoint._cosmetic_override(["status"]))
+        status.assert_not_called()
 
     def test_notification_body_restores_operator_context(self) -> None:
         with (
@@ -82,7 +102,9 @@ class OperatorCosmeticsTests(unittest.TestCase):
         self.assertIn("Host: vault.example.test", context["text"])
 
     def test_cosmetic_override_routes_supported_human_surfaces_only(self) -> None:
+        stream = SimpleNamespace(isatty=lambda: True)
         with (
+            mock.patch.object(operator_entrypoint.sys, "stdout", stream),
             mock.patch.object(operator_cosmetics, "status", return_value=0) as status,
             mock.patch.object(operator_cosmetics, "notification_test", return_value=0) as notification_test,
             mock.patch.object(operator_cosmetics, "notify_failure", return_value=0) as notify_failure,
