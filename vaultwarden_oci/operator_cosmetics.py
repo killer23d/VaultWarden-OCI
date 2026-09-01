@@ -76,9 +76,34 @@ def _status_exit_code(payload: Mapping[str, object]) -> int:
     return 0
 
 
+def _human_status_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Clarify optional unconfigured state without changing the JSON/read-model contract."""
+    notification_state = payload.get("notification")
+    doctor = payload.get("doctor")
+    if not isinstance(notification_state, dict) or notification_state.get("state") != "never":
+        return payload
+    checks = doctor.get("checks", []) if isinstance(doctor, dict) else []
+    provider = next(
+        (
+            check
+            for check in checks
+            if isinstance(check, dict) and check.get("id") == "notification.provider"
+        ),
+        None,
+    )
+    if not isinstance(provider, dict) or provider.get("status") != "SKIP":
+        return payload
+    rendered = dict(payload)
+    rendered_notification = dict(notification_state)
+    rendered_notification["state"] = "not configured"
+    rendered_notification["detail"] = "operational notifications are optional and not configured"
+    rendered["notification"] = rendered_notification
+    return rendered
+
+
 def status() -> int:
     """Render the authoritative day-2 model through the proven dashboard view."""
-    payload = day2.status_payload()
+    payload = _human_status_payload(day2.status_payload())
     dashboard.draw_header(payload)
     dashboard.draw_status(payload)
     return _status_exit_code(payload)
