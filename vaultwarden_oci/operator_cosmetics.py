@@ -91,6 +91,55 @@ def _load_mail() -> tuple[object, Mapping[str, str]]:
     return config, values
 
 
+def _deliver_with_transport_context(
+    *,
+    config: object,
+    values: Mapping[str, str],
+    event_id: str,
+    subject: str,
+    service: str,
+    event: str,
+    summary: str,
+    checks: tuple[str, ...] = (),
+) -> notification.DeliveryResult:
+    """Keep routing in notification.deliver while making the delivered body truthful."""
+    provider_name = getattr(config, "notification_provider", None)
+    if not provider_name:
+        raise notification.NotificationError("operational notifications are not configured")
+    provider = notification.load_catalog().resolve(provider_name)
+
+    def body(transport: str) -> str:
+        return _notification_body(
+            service=service,
+            event=event,
+            transport=transport,
+            summary=summary,
+            checks=checks,
+        )
+
+    api_transport = f"HTTPS API ({provider.display_name})"
+    fallback_transport = f"authenticated SMTP fallback (after {provider.display_name} API transient failure)"
+
+    def smtp_fallback_sender(
+        *,
+        config: object,
+        secrets: Mapping[str, str],
+        context: Mapping[str, str],
+    ) -> notification.AttemptResult:
+        fallback_context = dict(context)
+        fallback_context["text"] = body(fallback_transport)
+        return notification.send_smtp(config=config, secrets=secrets, context=fallback_context)
+
+    return notification.deliver(
+        event_id=event_id,
+        config=config,
+        secrets=values,
+        subject=subject,
+        text=body(api_transport),
+        smtp_sender=smtp_fallback_sender,
+    )
+
+
 def notification_test(*, smtp_only: bool) -> int:
     """Run the existing notification transports with a rich diagnostic body."""
     try:
@@ -115,18 +164,14 @@ def notification_test(*, smtp_only: bool) -> int:
             print(f"{'PASS' if result.ok else 'FAIL'}: direct SMTP category={result.category} reason={result.reason}")
             return 0 if result.ok else 1
 
-        text = _notification_body(
-            service="VaultWarden-OCI notification",
-            event="operator-test",
-            transport="configured operational route",
-            summary="This diagnostic confirms the configured operational notification route accepted a test message.",
-        )
-        result = notification.deliver(
+        result = _deliver_with_transport_context(
             event_id="operator-test",
             config=config,
-            secrets=values,
+            values=values,
             subject=subject,
-            text=text,
+            service="VaultWarden-OCI notification",
+            event="operator-test",
+            summary="This diagnostic confirms the configured operational notification route accepted a test message.",
         )
         print(f"{'PASS' if result.outcome == 'success' else 'FAIL'}: route={result.transport} category={result.category}")
         return 0 if result.outcome == "success" else 1
@@ -149,20 +194,17 @@ def notify_failure(event: str) -> int:
     try:
         config, values = _load_mail()
         host = _host()
-        result = notification.deliver(
+        result = _deliver_with_transport_context(
             event_id=event,
             config=config,
-            secrets=values,
+            values=values,
             subject=f"FAILURE: {event} on {host}",
-            text=_notification_body(
-                service=event,
-                event="systemd OnFailure",
-                transport="configured operational route",
-                summary=f"VaultWarden-OCI systemd unit {event} entered a failed state.",
-                checks=(
-                    f"systemctl status '{event}'",
-                    f"journalctl -xeu '{event}'",
-                ),
+            service=event,
+            event="systemd OnFailure",
+            summary=f"VaultWarden-OCI systemd unit {event} entered a failed state.",
+            checks=(
+                f"systemctl status '{event}'",
+                f"journalctl -xeu '{event}'",
             ),
         )
     except (
