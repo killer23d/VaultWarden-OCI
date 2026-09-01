@@ -14,6 +14,10 @@ _LABEL_COLORS = {
     "SKIP": "36",
 }
 _PREFIX = re.compile(r"(?m)^(PASS|INFO|WARN|FAIL|ACTION)(?=:)|^\[(PASS|WARN|FAIL|SKIP)\]")
+_ROOT_SAFE_GUIDANCE = {
+    "run 'vwctl crowdsec remediation-start'": "run 'sudo vwctl crowdsec remediation-start'",
+    "then run 'vwctl crowdsec confirm-fail-open'": "then run 'sudo vwctl crowdsec confirm-fail-open'",
+}
 
 
 def color_enabled(stream: TextIO) -> bool:
@@ -31,6 +35,14 @@ def colorize(text: str) -> str:
     return _PREFIX.sub(replace, text)
 
 
+def root_safe_guidance(text: str) -> str:
+    """Keep displayed root-only CrowdSec follow-ups directly executable."""
+    rendered = text
+    for unsafe, safe in _ROOT_SAFE_GUIDANCE.items():
+        rendered = rendered.replace(unsafe, safe)
+    return rendered
+
+
 class ColorizingWriter:
     """Minimal transparent TextIO proxy used only on interactive human output."""
 
@@ -39,7 +51,8 @@ class ColorizingWriter:
         self._enabled = color_enabled(stream) if enabled is None else enabled
 
     def write(self, text: str) -> int:
-        rendered = colorize(text) if self._enabled else text
+        safe = root_safe_guidance(text)
+        rendered = colorize(safe) if self._enabled else safe
         self._stream.write(rendered)
         return len(text)
 
