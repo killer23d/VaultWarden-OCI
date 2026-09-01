@@ -55,6 +55,7 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
         setup_main.assert_called_once_with(args, defer_next_actions=True)
         rendered = output.getvalue()
         self.assertIn("sudo vwctl config edit && sudo vwctl secrets edit", rendered)
+        self.assertIn("cloudflare_remediation_token is required before the standard CrowdSec setup", rendered)
         self.assertIn("sudo vwctl notification test --smtp", rendered)
         self.assertLess(rendered.index("sudo vwctl start"), rendered.index("sudo vwctl doctor after start"))
 
@@ -109,6 +110,29 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertIn("sudo vwctl crowdsec setup", rendered)
+
+    def test_start_guidance_preserves_backup_doctor_before_automation(self) -> None:
+        output = _TTYStringIO()
+        with (
+            mock.patch.object(
+                operator_entrypoint,
+                "_automation_enable_action",
+                return_value="ACTION: enable persistent appliance automation",
+            ),
+            redirect_stdout(output),
+        ):
+            operator_entrypoint._completion_guidance(["start"], 0)
+
+        rendered = output.getvalue()
+        ordered = (
+            "sudo vwctl backup",
+            "sudo vwctl doctor",
+            "sudo systemctl enable --now vaultwarden-oci.target",
+            "sudo vwctl timers",
+        )
+        positions = [rendered.index(item) for item in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("after both succeed", rendered)
 
     def test_human_timer_view_explains_target_managed_monotonic_timer(self) -> None:
         output = io.StringIO()
