@@ -32,7 +32,7 @@ Create Cloudflare credentials before starting an interactive first-run so the va
 Use **two separate Cloudflare user API tokens**:
 
 - `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
-- `cloudflare_remediation_token` is used only when CrowdSec Cloudflare remediation is enabled. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions. The standard first-run security sequence enables that remediation after setup, so enter this token during initial credential completion when you intend to complete the full CrowdSec baseline; otherwise `vwctl crowdsec setup` will stop and tell you it is missing.
+- `cloudflare_remediation_token` is the separate CrowdSec Cloudflare remediation token. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions. The standard production first-run security baseline includes that remediation, so setup-generated custody requires this token before the initial recovery kit is published. Explicit `--offline-recipient` installs must populate it before `sudo vwctl crowdsec setup`.
 
 Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
 
@@ -51,7 +51,7 @@ sudo ./setup.sh install \
 
 Interactive setup lists plausible non-boot devices with size/filesystem/mount/model. Adopting an existing ext4/xfs filesystem requires explicit acknowledgement. Formatting a blank device requires an independent confirmation. If no acceptable separate volume exists, setup exits instead of falling back to root storage.
 
-When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. A successful email handoff is reported explicitly. The same custody behavior applies to terminal-driven `--auto`.
+When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so the standard external SMTP/Cloudflare credential set, including `cloudflare_remediation_token`, is complete before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. A successful email handoff is reported explicitly. The same custody behavior applies to terminal-driven `--auto`.
 
 **Expected success:** setup ends in `PASS` with a dedicated mounted/identified volume and an explicit external-config/recovery-custody checkpoint. **On failure:** follow the displayed `ACTION`; if setup says a transient offline identity remains, secure it before reboot, correct the cause, and rerun the same command.
 
@@ -59,7 +59,7 @@ When no `--offline-recipient` is supplied in an interactive TTY, setup generates
 
 `--auto` automates install decisions that were supplied explicitly; it never guesses storage, never implies format/adoption consent, and does not imply `--use-latest`. It does not necessarily mean that no human is present for recovery custody.
 
-When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but external credentials are still human-supplied through the validated editors before recovery-kit publication; the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
+When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but the standard external credentials are still human-supplied through the validated editors before recovery-kit publication; the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries.
 
 Terminal-driven automatic install with setup-generated offline recovery custody:
 
@@ -88,7 +88,7 @@ sudo ./setup.sh install \
   --auto
 ```
 
-Both `--offline-recipient age1...` and `--offline-recipient=age1...` are normal CLI value forms. If a recipient is explicitly supplied, setup preserves that choice and never silently substitutes a generated recipient. Both explicit-recipient and setup-generated-custody installs finish with the same public first-run action ordering; the wrapper suppresses the lower-level setup completion text so two contradictory sequences are never printed.
+Both `--offline-recipient age1...` and `--offline-recipient=age1...` are normal CLI value forms. If a recipient is explicitly supplied, setup preserves that choice and never silently substitutes a generated recipient. Both explicit-recipient and setup-generated-custody installs finish with the same public first-run action ordering; the wrapper suppresses the lower-level setup completion text so two contradictory sequences are never printed. The explicit-recipient path does not open credential editors automatically, so its displayed actions explicitly require `cloudflare_remediation_token` to be populated before the standard CrowdSec setup.
 
 For a blank device that setup is allowed to format, use `--confirm-format` instead of `--accept-existing-filesystem`. An interrupted blank-device setup may accept the same `--confirm-format --auto` rerun only when the independent host identity and volume marker prove that the filesystem is the one initialized by that prior attempt.
 
@@ -129,7 +129,7 @@ sudo vwctl secrets edit
 sudo vwctl secrets validate
 ```
 
-For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
+For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials, including the remediation credential required by the standard production security baseline, are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP and both Cloudflare tokens before the standard CrowdSec/start sequence. Operational HTTPS notifications and rclone access remain optional first-run additions. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
 
 On a fresh or already reconciled appliance, a successful interactive `vwctl config edit` or `vwctl secrets edit` checks the stack state and offers to restart a running stack immediately. Answer `y` to apply the validated changes through the normal lifecycle; answer no to defer and run `sudo vwctl restart` later. If the stack is stopped, the changes apply at the next start. Non-interactive callers are not blocked by a prompt.
 
@@ -153,7 +153,7 @@ vaultwarden_admin_token: <generated>
 admin_basic_auth_password: <generated>
 ```
 
-The first three always-required setup values are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` remains a feature-specific secret in the schema, but the standard first-run CrowdSec Cloudflare remediation path needs it; supplying it before the initial recovery-kit handoff keeps that complete credential set in the first kit. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
+Generic SOPS validation always requires `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` intentionally remains feature-specific/transient-only in the secret model so it is not materialized into unrelated Vaultwarden/Caddy secret mounts. The supported production first-run baseline does use that feature, however, so setup-generated custody separately requires and validates `cloudflare_remediation_token` before publishing the initial recovery kit. Explicit-recipient installs must populate it before `sudo vwctl crowdsec setup`. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
 
 **Expected success:** config/secrets validation and direct SMTP pass before the security/start sequence. Full doctor acceptance is a post-start check because runtime/Caddy paths and the Cloudflare origin policy are materialized by lifecycle startup. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
@@ -183,6 +183,8 @@ sudo vwctl backup
 sudo vwctl doctor --json
 sudo vwctl status
 ```
+
+Successful interactive `vwctl start` repeats this ordering in its own completion guidance: first create the local recovery point, then run post-start doctor, and only after both succeed enable persistent automation. This prevents the backup timer from racing ahead of the deliberate first manual recovery/acceptance checkpoint.
 
 The local `.vwrec` created here is application recovery and is separate from the credential recovery-kit ZIP handed off during setup. A doctor `WARN` for `recovery.offsite`/`recovery.rclone` is expected until an offsite target is configured; any `FAIL` still requires correction.
 
