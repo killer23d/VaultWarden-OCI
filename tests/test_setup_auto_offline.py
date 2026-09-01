@@ -44,7 +44,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             ):
                 self.assertFalse(setup_frontend._should_generate(install_args(*form)))
 
-    def test_explicit_recipient_reaches_setup_main_unchanged(self) -> None:
+    def test_explicit_recipient_defers_setup_actions_to_shared_frontend_guidance(self) -> None:
         forms = (
             ["--offline-recipient", OFFLINE],
             [f"--offline-recipient={OFFLINE}"],
@@ -59,7 +59,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 ):
                     self.assertEqual(setup_frontend.main(args), 0)
                 generate.assert_not_called()
-                setup_main.assert_called_once_with(args)
+                setup_main.assert_called_once_with(args, defer_next_actions=True)
 
     def test_headless_auto_without_recipient_fails_before_storage_mutation(self) -> None:
         host = mock.Mock(architecture="amd64")
