@@ -32,7 +32,7 @@ Create Cloudflare credentials before starting an interactive first-run so the va
 Use **two separate Cloudflare user API tokens**:
 
 - `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
-- `cloudflare_remediation_token` is used only when CrowdSec Cloudflare remediation is enabled. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions.
+- `cloudflare_remediation_token` is used only when CrowdSec Cloudflare remediation is enabled. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions. The standard first-run security sequence enables that remediation after setup, so enter this token during initial credential completion when you intend to complete the full CrowdSec baseline; otherwise `vwctl crowdsec setup` will stop and tell you it is missing.
 
 Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
 
@@ -51,7 +51,7 @@ sudo ./setup.sh install \
 
 Interactive setup lists plausible non-boot devices with size/filesystem/mount/model. Adopting an existing ext4/xfs filesystem requires explicit acknowledgement. Formatting a blank device requires an independent confirmation. If no acceptable separate volume exists, setup exits instead of falling back to root storage.
 
-When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. The same custody behavior applies to terminal-driven `--auto`.
+When no `--offline-recipient` is supplied in an interactive TTY, setup generates that private identity only in root-owned volatile `/run` storage. After the immutable install is present, setup opens the existing validated config/SOPS editors so required external SMTP/Cloudflare credentials are completed before the initial recovery kit is published. It then creates and verifies the complete encrypted recovery-kit ZIP, can offer authenticated SMTP delivery using those just-completed credentials, and removes the transient identity only after email handoff or the exact off-host custody acknowledgement requested by setup. A successful email handoff is reported explicitly. The same custody behavior applies to terminal-driven `--auto`.
 
 **Expected success:** setup ends in `PASS` with a dedicated mounted/identified volume and an explicit external-config/recovery-custody checkpoint. **On failure:** follow the displayed `ACTION`; if setup says a transient offline identity remains, secure it before reboot, correct the cause, and rerun the same command.
 
@@ -88,7 +88,7 @@ sudo ./setup.sh install \
   --auto
 ```
 
-Both `--offline-recipient age1...` and `--offline-recipient=age1...` are normal CLI value forms. If a recipient is explicitly supplied, setup preserves that choice and never silently substitutes a generated recipient.
+Both `--offline-recipient age1...` and `--offline-recipient=age1...` are normal CLI value forms. If a recipient is explicitly supplied, setup preserves that choice and never silently substitutes a generated recipient. Both explicit-recipient and setup-generated-custody installs finish with the same public first-run action ordering; the wrapper suppresses the lower-level setup completion text so two contradictory sequences are never printed.
 
 For a blank device that setup is allowed to format, use `--confirm-format` instead of `--accept-existing-filesystem`. An interrupted blank-device setup may accept the same `--confirm-format --auto` rerun only when the independent host identity and volume marker prove that the filesystem is the one initialized by that prior attempt.
 
@@ -153,28 +153,51 @@ vaultwarden_admin_token: <generated>
 admin_basic_auth_password: <generated>
 ```
 
-The first three normal first-run requirements are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` may remain empty until CrowdSec Cloudflare remediation is enabled. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
+The first three always-required setup values are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` remains a feature-specific secret in the schema, but the standard first-run CrowdSec Cloudflare remediation path needs it; supplying it before the initial recovery-kit handoff keeps that complete credential set in the first kit. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
 
-**Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
+**Expected success:** config/secrets validation and direct SMTP pass before the security/start sequence. Full doctor acceptance is a post-start check because runtime/Caddy paths and the Cloudflare origin policy are materialized by lifecycle startup. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
-## First start and persistent automation
+## First security activation, start, recovery point, and persistent automation
+
+Follow the completion actions printed by setup. CrowdSec security setup precedes application start, while full steady-state doctor acceptance follows start:
 
 ```bash
-sudo vwctl doctor --json
-sudo vwctl start
-sudo vwctl status
-sudo vwctl doctor --json
+sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl secrets validate
+sudo vwctl notification test --smtp
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec remediation-start
 ```
 
-After the first healthy start:
+After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
+
+```bash
+sudo vwctl crowdsec confirm-fail-open
+sudo vwctl start
+```
+
+`vwctl start` materializes the runtime directories, rendered Caddy policy, and validated Cloudflare origin policy. Therefore a full pre-start `vwctl doctor` is useful for diagnostics but is **not** a readiness gate: missing pre-start runtime/edge material can legitimately be `SKIP`/`FAIL` until startup owns it. After the first healthy start, establish the first application recovery point and then perform steady-state acceptance:
+
+```bash
+sudo vwctl backup
+sudo vwctl doctor --json
+sudo vwctl status
+```
+
+The local `.vwrec` created here is application recovery and is separate from the credential recovery-kit ZIP handed off during setup. A doctor `WARN` for `recovery.offsite`/`recovery.rclone` is expected until an offsite target is configured; any `FAIL` still requires correction.
+
+Enable persistent appliance automation and seed the first update-status snapshot:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
 systemctl status vaultwarden-oci.target
 sudo vwctl timers
+sudo vwctl update check
 ```
 
-**Expected success:** Vaultwarden/Caddy are healthy, storage identity passes, and the target/timers are active. **On failure:** use `sudo vwctl logs --tail 200`, `journalctl -u vaultwarden-oci.service`, and the named doctor check before retrying.
+The target owns timer activation. Individual timer unit files can therefore report `disabled` while the active target keeps them wanted/running; human `vwctl timers` labels that relationship as target-managed. Monotonic timers without a realtime wall-clock next value are likewise reported as systemd-managed rather than as apparently unscheduled.
+
+**Expected success:** Vaultwarden/Caddy are healthy, storage identity and runtime paths pass, Cloudflare origin filtering and all four CrowdSec checks pass, the first local recovery point is verified, and the target/timers are active. **On failure:** use `sudo vwctl logs --tail 200`, `journalctl -u vaultwarden-oci.service`, and the named doctor check before retrying. If only `crowdsec.cloudflare` fails after a reboot/recreation while engine/Hub/firewall remain healthy, re-arm the intentionally boot-disabled Worker with `sudo vwctl crowdsec remediation-start`, set the recreated routes Fail Open, and run `sudo vwctl crowdsec confirm-fail-open`; do not reinstall the whole CrowdSec stack merely to re-arm that invocation.
 
 ## Dedicated-storage proof and safe reruns
 
