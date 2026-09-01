@@ -101,6 +101,48 @@ class OperatorCosmeticsTests(unittest.TestCase):
         self.assertIn("Date/Time: 2026-09-01T10:30:00-07:00", context["text"])
         self.assertIn("Host: vault.example.test", context["text"])
 
+    def test_operational_test_labels_actual_api_and_fallback_transport(self) -> None:
+        config = SimpleNamespace(
+            notification_provider="mailgun",
+            notification_to_email="ops@example.test",
+            acme_email="admin@example.test",
+            smtp_from_email="vault@example.test",
+            smtp_from_name="Vaultwarden",
+        )
+        values = {"email_api_token": "secret", "smtp_username": "u", "smtp_password": "p"}
+        delivered = notification.DeliveryResult(
+            "operator-test", "mailgun", "https", "success", "accepted", "ok", "2026-09-01T17:30:00Z"
+        )
+        accepted = notification.AttemptResult(True, False, "accepted", "ok")
+        with (
+            mock.patch.object(operator_cosmetics, "_load_mail", return_value=(config, values)),
+            mock.patch.object(operator_cosmetics, "_sent_at", return_value="2026-09-01T10:30:00-07:00"),
+            mock.patch.object(operator_cosmetics, "_host", return_value="vault.example.test"),
+            mock.patch.object(operator_cosmetics.notification, "deliver", return_value=delivered) as deliver,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = operator_cosmetics.notification_test(smtp_only=False)
+        self.assertEqual(code, 0)
+        kwargs = deliver.call_args.kwargs
+        self.assertIn("Transport: HTTPS API (Mailgun)", kwargs["text"])
+
+        context = notification.message_context(
+            from_email=config.smtp_from_email,
+            from_name=config.smtp_from_name,
+            to_email=config.notification_to_email,
+            subject="fallback test",
+            text=kwargs["text"],
+        )
+        with mock.patch.object(operator_cosmetics.notification, "send_smtp", return_value=accepted) as sender:
+            result = kwargs["smtp_sender"](config=config, secrets=values, context=context)
+        self.assertTrue(result.ok)
+        fallback_context = sender.call_args.kwargs["context"]
+        self.assertIn(
+            "Transport: authenticated SMTP fallback (after Mailgun API transient failure)",
+            fallback_context["text"],
+        )
+        self.assertIn("Transport: HTTPS API (Mailgun)", context["text"])
+
     def test_cosmetic_override_routes_supported_human_surfaces_only(self) -> None:
         stream = SimpleNamespace(isatty=lambda: True)
         with (
