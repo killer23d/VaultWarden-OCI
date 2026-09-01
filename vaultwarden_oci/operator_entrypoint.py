@@ -108,7 +108,7 @@ def _cosmetic_override(args: Sequence[str]) -> int | None:
     from . import operator_cosmetics
 
     command = tuple(args)
-    if command == ("status",):
+    if command == ("status",) and sys.stdout.isatty():
         return operator_cosmetics.status()
     if command == ("notification", "test"):
         return operator_cosmetics.notification_test(smtp_only=False)
