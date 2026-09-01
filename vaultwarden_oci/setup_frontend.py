@@ -12,7 +12,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from . import notification, recovery_ux, runtime, secrets, setup, sevenzip_secure
 
@@ -123,22 +123,31 @@ def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
         raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")
 
 
+def _validate_standard_security_baseline(values: Mapping[str, str]) -> None:
+    """Require the feature-specific credential used by the standard first-run baseline."""
+    if not values.get("cloudflare_remediation_token"):
+        raise SetupFrontendError(
+            "cloudflare_remediation_token is required for the standard CrowdSec Cloudflare remediation baseline"
+        )
+
+
 def _complete_external_credentials_before_handoff() -> None:
     ui = _ui()
     config = runtime.load_config()
     secret_paths = runtime.Paths().secret_paths()
     try:
-        secrets.validate_encrypted(config.offline_recovery_recipient, paths=secret_paths)
+        values = secrets.validate_encrypted(config.offline_recovery_recipient, paths=secret_paths)
+        _validate_standard_security_baseline(values)
         secrets_ready = True
-    except secrets.SecretsError:
+    except (secrets.SecretsError, SetupFrontendError):
         secrets_ready = False
     config_ready = config.smtp_host != "smtp.invalid"
     if config_ready and secrets_ready:
-        ui.ok("External runtime config and required SOPS credentials already validate before recovery-kit publication.")
+        ui.ok("External runtime config and standard production security credentials already validate before recovery-kit publication.")
         return
 
     ui.header("External credentials before recovery handoff")
-    ui.info("Complete the credentials first so the initial recovery kit contains the final required credential set and authenticated SMTP delivery is available.")
+    ui.info("Complete the credentials first so the initial recovery kit contains the final standard production credential set and authenticated SMTP delivery is available.")
     if not config_ready:
         ui.action("The validated config editor will open now. Replace smtp.invalid and complete the [smtp] settings. Operational HTTPS notifications are optional and can be configured after first-run custody.")
         runtime.edit_config()
@@ -148,9 +157,10 @@ def _complete_external_credentials_before_handoff() -> None:
 
     if not secrets_ready:
         ui.action(
-            "The validated SOPS editor will open now. Fill required cloudflare_api_token, smtp_username, and smtp_password. "
-            "Optional cloudflare_remediation_token and email_api_token are pre-populated and may remain empty unless those features are enabled; "
-            "keep the generated admin credentials unchanged unless intentionally rotating them."
+            "The validated SOPS editor will open now. Fill required cloudflare_api_token, cloudflare_remediation_token, "
+            "smtp_username, and smtp_password. cloudflare_remediation_token is required for the standard CrowdSec Cloudflare remediation baseline; "
+            "email_api_token remains optional unless an HTTPS operational notification provider is enabled. "
+            "Keep the generated admin credentials unchanged unless intentionally rotating them."
         )
         secrets.edit_encrypted(
             config.offline_recovery_recipient,
@@ -160,11 +170,12 @@ def _complete_external_credentials_before_handoff() -> None:
     config = runtime.load_config()
     if config.smtp_host == "smtp.invalid":
         raise SetupFrontendError("SMTP configuration still uses smtp.invalid; complete [smtp] before initial recovery-kit handoff")
-    secrets.validate_encrypted(
+    values = secrets.validate_encrypted(
         config.offline_recovery_recipient,
         paths=runtime.Paths().secret_paths(),
     )
-    ui.ok("External runtime config and required SOPS credentials validate before recovery-kit publication.")
+    _validate_standard_security_baseline(values)
+    ui.ok("External runtime config and standard production security credentials validate before recovery-kit publication.")
 
 
 def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
@@ -172,7 +183,10 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     ui = _ui()
     ui.header("Next actions")
     if not credentials_ready:
-        ui.action("complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit")
+        ui.action(
+            "complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit; "
+            "cloudflare_remediation_token is required before the standard CrowdSec setup below"
+        )
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
     ui.action("run: sudo vwctl notification test --smtp to verify the shared SMTP transport")
