@@ -50,16 +50,38 @@ def _notification_body(
     return "\n".join(lines) + "\n"
 
 
+def _status_exit_code(payload: Mapping[str, object]) -> int:
+    """Preserve the established human status health boundary."""
+    runtime_state = payload.get("runtime")
+    if not isinstance(runtime_state, dict):
+        return 1
+    overall = runtime_state.get("overall")
+    if overall not in {"running", "stopped"}:
+        return 1
+
+    notification_state = payload.get("notification")
+    if not isinstance(notification_state, dict):
+        return 1
+    if notification_state.get("state") == "failure":
+        return 1
+
+    edge_state = payload.get("edge")
+    if not isinstance(edge_state, dict):
+        return 1
+    checks = edge_state.get("checks")
+    if not isinstance(checks, list):
+        return 1
+    if any(isinstance(check, dict) and check.get("status") == "FAIL" for check in checks):
+        return 1
+    return 0
+
+
 def status() -> int:
-    """Render the authoritative day-2 JSON model through the proven dashboard view."""
+    """Render the authoritative day-2 model through the proven dashboard view."""
     payload = day2.status_payload()
     dashboard.draw_header(payload)
     dashboard.draw_status(payload)
-    doctor = payload.get("doctor", {})
-    automation = payload.get("automation", {})
-    doctor_failed = isinstance(doctor, dict) and doctor.get("overall") == "FAIL"
-    automation_failed = isinstance(automation, dict) and automation.get("overall") == "FAIL"
-    return 1 if doctor_failed or automation_failed else 0
+    return _status_exit_code(payload)
 
 
 def _load_mail() -> tuple[object, Mapping[str, str]]:
