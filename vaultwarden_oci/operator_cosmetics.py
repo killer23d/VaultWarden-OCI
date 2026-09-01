@@ -84,6 +84,36 @@ def status() -> int:
     return _status_exit_code(payload)
 
 
+def timers() -> int:
+    """Render timer ownership clearly while preserving the authoritative day-2 snapshot."""
+    snapshot = day2.automation_snapshot()
+    target = snapshot["target"]
+    rows = snapshot["timers"]
+    assert isinstance(target, dict)
+    assert isinstance(rows, list)
+
+    target_problems = "; ".join(str(item) for item in target.get("problems", [])) or "healthy"
+    print(
+        f"[{target.get('health')}] {day2.AUTOMATION_TARGET}: "
+        f"{target.get('active_state')} enabled={target.get('enabled')} ({target_problems})"
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        problems = "; ".join(str(item) for item in row.get("problems", [])) or "healthy"
+        next_value = row.get("next")
+        if not next_value and row.get("active_state") == "active" and row.get("sub_state") == "waiting":
+            next_value = "monotonic/systemd-managed"
+        print(
+            f"[{row.get('health')}] {row.get('unit')}: "
+            f"{row.get('active_state')}/{row.get('sub_state')} activation=target-managed "
+            f"unit-file={row.get('enabled')} next={next_value or '-'} "
+            f"last={row.get('last_trigger') or '-'} "
+            f"trigger={row.get('trigger_active_state')}/{row.get('trigger_result')} ({problems})"
+        )
+    return 0 if snapshot["overall"] == "PASS" else 1
+
+
 def _load_mail() -> tuple[object, Mapping[str, str]]:
     storage.verify()
     config = runtime.load_config()
