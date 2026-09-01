@@ -172,6 +172,7 @@ def _print_post_handoff_next_actions() -> None:
     ui.header("Next actions")
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
+    ui.action("run: sudo vwctl crowdsec setup, then follow its displayed remediation and Worker Route Fail Open steps")
     ui.action("run: sudo vwctl doctor")
     ui.action("when doctor is ready, run: sudo vwctl start")
 
