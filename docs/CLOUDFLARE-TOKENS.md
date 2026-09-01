@@ -31,7 +31,9 @@ Reference: [`caddy-dns/cloudflare`](https://github.com/caddy-dns/cloudflare) doc
 
 ## `cloudflare_remediation_token` - CrowdSec Cloudflare remediation
 
-This is a separate, broader token used only when CrowdSec Cloudflare remediation is enabled. It allows the supported Cloudflare Worker bouncer to discover the configured zone/account and manage the Cloudflare Worker/KV resources used for remediation.
+This is a separate, broader token used by the standard production security baseline for CrowdSec Cloudflare remediation. It allows the supported Cloudflare Worker bouncer to discover the configured zone/account and manage the Cloudflare Worker/KV resources used for remediation.
+
+The secret remains feature-specific in the runtime secret model because it is not materialized into Vaultwarden or Caddy. However, the supported fresh-install baseline includes the CrowdSec Cloudflare Worker, so generated-custody setup requires this token before it declares the initial credential recovery kit complete.
 
 Create a second Cloudflare **user API token** with the current permissions required by CrowdSec's Cloudflare Worker bouncer:
 
@@ -81,7 +83,9 @@ vaultwarden_admin_token: <generated>
 admin_basic_auth_password: <generated>
 ```
 
-`cloudflare_api_token`, `smtp_username`, and `smtp_password` are required for the normal first-run path. `cloudflare_remediation_token` is required only when CrowdSec Cloudflare remediation is enabled. `email_api_token` is unrelated to Cloudflare and is required only when an HTTPS operational notification provider is configured; obtain that credential from the selected email provider.
+`cloudflare_api_token`, `cloudflare_remediation_token`, `smtp_username`, and `smtp_password` must be populated for the standard production first-run path. `cloudflare_remediation_token` remains a feature-specific/transient-only secret internally, but the supported production baseline uses that feature and generated-custody setup verifies the token before publishing the initial recovery kit. `email_api_token` is unrelated to Cloudflare and remains optional unless an HTTPS operational notification provider is configured; obtain that credential from the selected email provider.
+
+For an explicit `--offline-recipient` install, complete the same Cloudflare remediation credential with `sudo vwctl secrets edit` before running `sudo vwctl crowdsec setup`.
 
 After entering or rotating Cloudflare credentials:
 
