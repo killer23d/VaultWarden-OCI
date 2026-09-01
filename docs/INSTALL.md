@@ -131,9 +131,11 @@ sudo vwctl secrets validate
 
 For setup-generated offline custody, setup invokes these validated editors before the initial complete recovery-kit handoff so SMTP/Cloudflare credentials are captured in the kit and SMTP delivery can actually be used. For an explicit pre-existing `--offline-recipient`/headless path, complete external settings such as SMTP, Cloudflare, the operational notification provider, and rclone access here before first start. These editors validate protected candidates before replacement; invalid candidates leave the installed authority unchanged.
 
-On an interactive terminal, a successful `vwctl config edit` or `vwctl secrets edit` now checks the stack state and offers to restart the running stack immediately. Answer `y` to apply the validated changes through the normal lifecycle; answer no to defer and run `sudo vwctl restart` later. If the stack is stopped, the changes apply at the next start. Non-interactive callers are not blocked by a prompt.
+On a fresh or already reconciled appliance, a successful interactive `vwctl config edit` or `vwctl secrets edit` checks the stack state and offers to restart a running stack immediately. Answer `y` to apply the validated changes through the normal lifecycle; answer no to defer and run `sudo vwctl restart` later. If the stack is stopped, the changes apply at the next start. Non-interactive callers are not blocked by a prompt.
 
-The `[smtp]` table and SOPS `smtp_username`/`smtp_password` are one shared SMTP authority. Vaultwarden application mail (including invitations and the Admin SMTP test) and the appliance's direct SMTP test/fallback use those same settings and credentials. Validate the transport before first start with:
+When upgrading an installation that already has Vaultwarden `/data/config.json`, the candidate intentionally keeps that historical Admin file effective at first so existing policy is not silently replaced by new appliance defaults. The editors show supported values that still differ from `config.toml`; finalization is refused until those representable values are reconciled. When they match, the interactive flow names any legacy-only/incompatible/sensitive keys whose values will no longer be honored, without printing the values, and asks for explicit finalization. Only after that acknowledgement does the next start/restart move Vaultwarden Admin persistence to container tmpfs. See [Configuration](CONFIGURATION.md) for the exact bounded transition.
+
+The common SMTP authority is `[smtp]` host/port/security/sender/timeout plus SOPS `smtp_username`/`smtp_password`. Vaultwarden application mail (including invitations and the Admin SMTP test) and the appliance direct SMTP test/fallback receive those common values. `smtp.embed_images` and `smtp.accept_invalid_*` are Vaultwarden-specific application-mail modifiers; the appliance direct SMTP implementation always performs normal certificate and hostname validation and does not honor the invalid-certificate/hostname exceptions. Validate the common transport under strict TLS with:
 
 ```bash
 sudo vwctl notification test --smtp
@@ -152,8 +154,6 @@ admin_basic_auth_password: <generated>
 ```
 
 The first three normal first-run requirements are `cloudflare_api_token`, `smtp_username`, and `smtp_password`. `cloudflare_remediation_token` may remain empty until CrowdSec Cloudflare remediation is enabled. `email_api_token` may remain empty unless an HTTPS operational notification provider is configured. Keep the generated admin values unless intentionally rotating them.
-
-Vaultwarden's upstream Admin UI can write `DATA_FOLDER/config.json`, which normally overrides environment variables. The appliance intentionally points that upstream file at container tmpfs, so Admin-panel changes are diagnostic/temporary and cannot become a second durable configuration authority or silently override the shared SMTP configuration after restart. Make persistent settings changes through `vwctl config edit`. Existing `/data/config.json` files are ignored by the managed runtime.
 
 **Expected success:** validation passes and `sudo vwctl doctor --json` has no configuration/custody `FAIL`. **On failure:** correct the reported config or custody issue through the same editors; do not place plaintext secrets in `config.toml`, shell arguments, or release files.
 
