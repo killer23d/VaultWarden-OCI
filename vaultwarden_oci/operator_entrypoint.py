@@ -104,7 +104,7 @@ def _human_output(args: Sequence[str]) -> Iterator[None]:
 
 
 def _cosmetic_override(args: Sequence[str]) -> int | None:
-    """Keep machine contracts in cli/day2 while restoring the proven V1 human presentation."""
+    """Keep machine contracts in cli/day2 while restoring the proven human presentation."""
     from . import operator_cosmetics
 
     command = tuple(args)
