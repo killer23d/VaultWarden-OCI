@@ -18,10 +18,7 @@ class _TTYStringIO(io.StringIO):
 class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
     def test_post_handoff_actions_follow_real_fresh_host_order(self) -> None:
         output = io.StringIO()
-        with (
-            mock.patch.object(setup_frontend.sys.stdout, "isatty", return_value=False),
-            redirect_stdout(output),
-        ):
+        with redirect_stdout(output):
             setup_frontend._print_post_handoff_next_actions()
 
         rendered = output.getvalue()
@@ -48,7 +45,6 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
             mock.patch.object(setup_frontend, "_should_generate", return_value=False),
             mock.patch.object(setup_frontend, "_parse_install_args", return_value=SimpleNamespace(dry_run=False)),
             mock.patch.object(setup_frontend.setup, "main", return_value=0) as setup_main,
-            mock.patch.object(setup_frontend.sys.stdout, "isatty", return_value=False),
             redirect_stdout(output),
         ):
             code = setup_frontend.main(args)
