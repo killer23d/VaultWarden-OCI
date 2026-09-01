@@ -21,6 +21,8 @@ Restart VaultWarden-OCI now to apply these changes? [y/N]:
 
 Answering `y` performs the normal supported `vwctl restart` lifecycle immediately. Answering no leaves an explicit restart action. When the stack is stopped, the changes simply apply on the next `vwctl start`. Non-interactive callers are never blocked by a prompt and retain the explicit restart action.
 
+An upgraded installation can have one additional bounded transition before that normal restart offer. If an existing Vaultwarden Admin `config.json` is present, see [Existing Vaultwarden Admin configuration](#existing-vaultwarden-admin-configuration) below; the appliance keeps that file effective until the operator explicitly reconciles it instead of silently changing existing policy.
+
 ## Vaultwarden settings
 
 Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid minimal configurations remain compatible: omitted catalog keys receive these defaults when rendered.
@@ -43,7 +45,6 @@ Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid 
 | `password_iterations` | `600000` | Server-side hashing iterations for new users. |
 | `password_hints_allowed` | `true` | Allow users to set password hints. |
 | `show_password_hint` | `false` | Keep password hints off public pages. |
-| `client_suppress_onboarding` | `false` | Suppress client onboarding/promotional interstitials when enabled. |
 | `require_device_email` | `false` | Require successful new-device mail for login when enabled. |
 | `email_token_size` | `6` | Email 2FA token digits. |
 | `email_expiration_time` | `600` | Email 2FA token lifetime in seconds. |
@@ -58,26 +59,37 @@ Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid 
 | `unauthenticated_ratelimit_seconds` | `60` | Shared unauthenticated recovery/hint/Send interval. |
 | `unauthenticated_ratelimit_max_burst` | `50` | Shared unauthenticated endpoint burst. |
 
-The runtime renders these settings explicitly into the pinned Vaultwarden container rather than relying on undocumented implicit defaults.
+The runtime renders these settings explicitly into the exact pinned Vaultwarden container rather than relying on undocumented implicit defaults. The curated environment-key set has a regression test tied to the exact pinned Vaultwarden configuration surface so a setting that the binary does not consume is not advertised as supported.
 
-### Vaultwarden Admin settings are not a second durable authority
+## Existing Vaultwarden Admin configuration
 
-Upstream Vaultwarden writes Admin-panel settings to `DATA_FOLDER/config.json`, and that saved file overrides environment variables. That behavior conflicts with the appliance's one-config-owner rule and can make a value edited in the web UI silently override `config.toml` after a restart.
+Upstream Vaultwarden normally writes Admin-panel settings to `DATA_FOLDER/config.json`, and that saved file overrides environment variables. A fresh appliance does not use that file as durable configuration: VaultWarden-OCI points `CONFIG_FILE` at `/tmp/vaultwarden-admin-config.json` on the container tmpfs, so web Admin changes are temporary/diagnostic and persistent changes belong in `config.toml` or SOPS.
 
-VaultWarden-OCI therefore points Vaultwarden's `CONFIG_FILE` at `/tmp/vaultwarden-admin-config.json`, which lives on the container's existing tmpfs. The web Admin interface can still make temporary in-process changes for troubleshooting, but they are not durable appliance configuration. Existing `/data/config.json` files are ignored. Make persistent changes through `sudo vwctl config edit` and restart when prompted.
+An upgrade must not reach that end state by silently discarding policy that was already saved in `/data/config.json`. If a pre-existing non-empty Admin file is present and has not been explicitly reconciled, the candidate deliberately keeps `CONFIG_FILE=/data/config.json`. The old Admin policy therefore remains effective while the operator performs a one-time bounded reconciliation.
 
-This matters especially for SMTP: a historical `config.json` can no longer override the appliance's shared SMTP host, sender, or credentials.
+Run the supported editors. `vwctl` compares the old Admin file with the appliance-supported targets and displays supported differences without displaying secret values:
 
-## Shared SMTP
+```bash
+sudo vwctl config edit
+sudo vwctl secrets edit
+```
 
-`[smtp]` is the single non-secret mail configuration for both:
+If a supported value still differs, finalization is refused and the old Admin file remains effective. Copy the desired supported values into `config.toml` and, for credentials, into SOPS. When all representable supported values agree, the interactive editor reports the names of legacy-only, incompatible, or sensitive keys that will no longer be honored and asks for explicit finalization. It does not print their values.
 
-1. Vaultwarden application mail: invitations, verification, email 2FA, new-device mail, and the Vaultwarden Admin SMTP test.
-2. VaultWarden-OCI's direct authenticated SMTP path, including `vwctl notification test --smtp` and eligible operational-notification fallback.
+Finalization records a root-only marker bound to the SHA-256 of that exact historical `config.json`; the historical file is not deleted. On the next supported start/restart, runtime switches to `/tmp/vaultwarden-admin-config.json`, making `config.toml`/SOPS the sole durable authority. If that historical file is modified later, its digest no longer matches the finalization marker and the transition becomes pending again instead of silently ignoring newly persisted policy.
 
-The corresponding `smtp_username` and `smtp_password` exist only in SOPS and are materialized into the Vaultwarden container at runtime. There is no second Vaultwarden-specific SMTP password.
+This transition is intentionally narrow. It is not a generic migration layer for every upstream Vaultwarden option. Supported settings are reconciled; unsupported or sensitive legacy keys require explicit operator acknowledgement before they stop participating.
 
-Fresh setup writes:
+## SMTP ownership and scope
+
+The common SMTP authority consists of:
+
+- `[smtp]` host, port, security mode, sender address/name, and timeout;
+- SOPS `smtp_username` and `smtp_password`.
+
+Those values are supplied to both Vaultwarden application mail (invitations, verification, email 2FA, new-device mail, and the Vaultwarden Admin SMTP test) and VaultWarden-OCI's direct authenticated SMTP path used by `vwctl notification test --smtp` and eligible operational-notification fallback. There is no second Vaultwarden-specific SMTP username/password.
+
+Fresh setup also exposes three **Vaultwarden application-mail modifiers**:
 
 ```toml
 [smtp]
@@ -92,19 +104,21 @@ accept_invalid_certs = false
 accept_invalid_hostnames = false
 ```
 
-Replace `smtp.invalid` and set the SOPS credentials before first production start. Keep certificate and hostname validation enabled outside deliberate lab testing.
+`embed_images`, `accept_invalid_certs`, and `accept_invalid_hostnames` are rendered to Vaultwarden itself. They are not switches for the appliance's direct SMTP implementation. In particular, the direct operational SMTP path always uses normal certificate and hostname validation and intentionally does **not** inherit Vaultwarden's invalid-certificate or invalid-hostname exceptions. Keep those exception controls false in production.
 
-Test the shared transport directly before diagnosing application-specific behavior:
+Test the common endpoint, security mode, sender and credentials through the strict appliance SMTP path before diagnosing application-specific behavior:
 
 ```bash
 sudo vwctl notification test --smtp
 ```
 
-If that succeeds, the host/port/TLS/username/password/sender path is usable. If the Vaultwarden Admin test still fails, inspect the HTTP status and Caddy/Vaultwarden logs rather than assuming the SMTP server rejected the message.
+A success proves that common SMTP path under normal TLS validation. It does not prove a Vaultwarden-only TLS exception setting. If the Vaultwarden Admin test still fails, inspect its HTTP status and Caddy/Vaultwarden logs rather than assuming the SMTP server rejected the message.
+
+Operational HTTPS notification tests also identify the actual delivery route in the message body: normal provider API delivery is labelled as that HTTPS API, direct SMTP is labelled as direct authenticated SMTP, and an eligible transient API failure that actually falls back is labelled as authenticated SMTP fallback.
 
 ## Caddy `/admin` settings and the 429 SMTP-test symptom
 
-Fresh setup also writes:
+Fresh setup writes:
 
 ```toml
 [caddy]
@@ -120,10 +134,10 @@ Allowed Caddy values are 10-1000 events and a simple positive `s`, `m`, or `h` d
 
 ## Optional operational HTTPS notifications
 
-Setup does not preselect a notification API provider because it cannot truthfully invent an account or provider choice. Add `[notifications]` only when needed, then keep its API token in SOPS as `email_api_token`. The authenticated SMTP path above remains available independently and is always the canonical Vaultwarden mail transport.
+Setup does not preselect a notification API provider because it cannot truthfully invent an account or provider choice. Add `[notifications]` only when needed, then keep its API token in SOPS as `email_api_token`. Authenticated SMTP remains independently testable and is the fallback transport only for failures classified as eligible transient by the existing notification owner.
 
 ## Other stack components
 
-The same discoverability rule applies across the stack, but only where there is a safe operator choice. Caddy's supported `/admin` rate-limit controls are pre-populated. SMTP safety controls are pre-populated. Cloudflare tokens, CrowdSec remediation, rclone destinations, storage identity, systemd timers, Docker runtime limits, and proxy-trust behavior are either credentials, workflow inputs, or appliance-owned safety controls rather than free-form application settings, so they intentionally do not become a generic `[options]` bag.
+The same discoverability rule applies across the stack, but only where there is a safe operator choice. Caddy's supported `/admin` rate-limit controls are pre-populated. SMTP controls are pre-populated with the scope described above. Cloudflare tokens, CrowdSec remediation, rclone destinations, storage identity, systemd timers, Docker runtime limits, and proxy-trust behavior are either credentials, workflow inputs, or appliance-owned safety controls rather than free-form application settings, so they intentionally do not become a generic `[options]` bag.
 
 Use [Operations](OPERATIONS.md) for those supported workflows and [Security](SECURITY.md) for the boundaries that remain intentionally non-configurable.
