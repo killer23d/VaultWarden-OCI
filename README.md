@@ -53,18 +53,28 @@ Interactive setup can select a suitable non-boot data device and can generate th
 
 The setup-generated `config.toml` contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP controls, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
 
-After setup and external credentials are complete:
+The standard production security baseline uses two separate Cloudflare credentials: `cloudflare_api_token` for Caddy DNS-01 and `cloudflare_remediation_token` for CrowdSec Worker remediation. Setup-generated recovery custody requires both before it publishes the initial credential kit; explicit `--offline-recipient` installs must populate the remediation token before `sudo vwctl crowdsec setup`.
+
+After setup and external credentials are complete, follow the displayed first-run actions in order. Full steady-state doctor acceptance is intentionally **after** `start`, because lifecycle startup materializes the runtime/Caddy state and the Cloudflare origin policy that those doctor checks inspect:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
 sudo vwctl notification test --smtp
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec remediation-start
+# Set every bouncer-created Worker Route to Fail Open in Cloudflare.
+sudo vwctl crowdsec confirm-fail-open
 sudo vwctl start
-sudo vwctl status
+sudo vwctl backup
 sudo vwctl doctor --json
+sudo systemctl enable --now vaultwarden-oci.target
+sudo vwctl timers
+sudo vwctl update check
+sudo vwctl status
 ```
 
-A doctor `FAIL` is not a successful installation. CrowdSec setup/remediation is an explicit first-run security step documented in [Operations](docs/OPERATIONS.md); Cloudflare Worker routes must be set to Fail Open before their invocation is confirmed.
+A post-start doctor `FAIL` is not a successful installation. A `WARN` for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured. The first local `vwctl backup` establishes and verifies the initial application `.vwrec`; it is separate from the credential recovery-kit ZIP created during setup. The Cloudflare Worker remains intentionally boot-disabled, so a later Worker recreation/reboot may require a fresh `remediation-start` -> Worker Route Fail Open -> `confirm-fail-open` attestation rather than rerunning all of CrowdSec setup.
 
 For normal day-2 work:
 

@@ -111,6 +111,8 @@ def _cosmetic_override(args: Sequence[str]) -> int | None:
     command = tuple(args)
     if command == ("status",) and sys.stdout.isatty():
         return operator_cosmetics.status()
+    if command == ("timers",) and sys.stdout.isatty():
+        return operator_cosmetics.timers()
     if command == ("notification", "test"):
         return operator_cosmetics.notification_test(smtp_only=False)
     if command == ("notification", "test", "--smtp"):
@@ -157,13 +159,34 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
             checks = cli.doctor_checks()
         except (OSError, RuntimeError, ValueError):
             checks = []
-        if any(check.check_id.startswith("crowdsec.") and check.status == "FAIL" for check in checks):
+        crowdsec_failures = {
+            check.check_id
+            for check in checks
+            if check.check_id.startswith("crowdsec.") and check.status == "FAIL"
+        }
+        foundational = {"crowdsec.engine", "crowdsec.hub", "crowdsec.firewall"}
+        if crowdsec_failures & foundational:
             print(
                 "ACTION: complete CrowdSec protection with 'sudo vwctl crowdsec setup'; "
                 "configure cloudflare_remediation_token first if setup reports it missing, then follow the displayed Worker Route Fail Open steps."
             )
+        elif "crowdsec.cloudflare" in crowdsec_failures:
+            print(
+                "ACTION: re-arm the boot-disabled CrowdSec Cloudflare Worker with "
+                "'sudo vwctl crowdsec remediation-start', set every recreated Worker Route to Fail Open, "
+                "then run 'sudo vwctl crowdsec confirm-fail-open'."
+            )
 
-    if (args[:1] == ["start"] and code == 0) or (args[:1] == ["timers"] and code != 0):
+    if args[:1] == ["start"] and code == 0:
+        action = _automation_enable_action()
+        if action is not None:
+            print(
+                "ACTION: create and verify the first application recovery point with 'sudo vwctl backup', "
+                "then run the post-start acceptance check with 'sudo vwctl doctor'; after both succeed, "
+                "enable persistent appliance automation with 'sudo systemctl enable --now vaultwarden-oci.target' "
+                "and run 'sudo vwctl timers'."
+            )
+    elif args[:1] == ["timers"] and code != 0:
         action = _automation_enable_action()
         if action is not None:
             print(action)

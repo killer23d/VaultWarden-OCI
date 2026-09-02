@@ -76,12 +76,67 @@ def _status_exit_code(payload: Mapping[str, object]) -> int:
     return 0
 
 
+def _human_status_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Clarify optional unconfigured state without changing the JSON/read-model contract."""
+    notification_state = payload.get("notification")
+    doctor = payload.get("doctor")
+    if not isinstance(notification_state, dict) or notification_state.get("state") != "never":
+        return payload
+    checks = doctor.get("checks", []) if isinstance(doctor, dict) else []
+    provider = next(
+        (
+            check
+            for check in checks
+            if isinstance(check, dict) and check.get("id") == "notification.provider"
+        ),
+        None,
+    )
+    if not isinstance(provider, dict) or provider.get("status") != "SKIP":
+        return payload
+    rendered = dict(payload)
+    rendered_notification = dict(notification_state)
+    rendered_notification["state"] = "not configured"
+    rendered_notification["detail"] = "operational notifications are optional and not configured"
+    rendered["notification"] = rendered_notification
+    return rendered
+
+
 def status() -> int:
     """Render the authoritative day-2 model through the proven dashboard view."""
-    payload = day2.status_payload()
+    payload = _human_status_payload(day2.status_payload())
     dashboard.draw_header(payload)
     dashboard.draw_status(payload)
     return _status_exit_code(payload)
+
+
+def timers() -> int:
+    """Render timer ownership clearly while preserving the authoritative day-2 snapshot."""
+    snapshot = day2.automation_snapshot()
+    target = snapshot["target"]
+    rows = snapshot["timers"]
+    assert isinstance(target, dict)
+    assert isinstance(rows, list)
+
+    target_problems = "; ".join(str(item) for item in target.get("problems", [])) or "healthy"
+    print(
+        f"[{target.get('health')}] {day2.AUTOMATION_TARGET}: "
+        f"{target.get('active_state')} enabled={target.get('enabled')} ({target_problems})"
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        problems = "; ".join(str(item) for item in row.get("problems", [])) or "healthy"
+        next_value = row.get("next")
+        if not next_value and row.get("active_state") == "active" and row.get("sub_state") == "waiting":
+            next_value = "monotonic/systemd-managed"
+        print(
+            f"[{row.get('health')}] {row.get('unit')}: "
+            f"{row.get('active_state')}/{row.get('sub_state')} activation=target-managed "
+            f"unit-file={row.get('enabled')} next={next_value or '-'} "
+            f"last={row.get('last_trigger') or '-'} "
+            f"trigger={row.get('trigger_active_state')}/{row.get('trigger_result')} ({problems})"
+        )
+    return 0 if snapshot["overall"] == "PASS" else 1
 
 
 def _load_mail() -> tuple[object, Mapping[str, str]]:
