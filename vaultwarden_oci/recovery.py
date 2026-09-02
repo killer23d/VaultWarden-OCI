@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from . import runtime, secrets, update
+from . import runtime, runtime_health, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 
 FORMAT_VERSION = 2
@@ -298,8 +298,8 @@ def _wait_for_resumed_health(
     required: Sequence[str],
     runner: Runner,
     *,
-    settle_seconds: float = update.CURRENT_HEALTH_SETTLE_SECONDS,
-    poll_seconds: float = update.CURRENT_HEALTH_POLL_SECONDS,
+    settle_seconds: float = runtime_health.SETTLE_SECONDS,
+    poll_seconds: float = runtime_health.POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
@@ -308,8 +308,8 @@ def _wait_for_resumed_health(
         return
     if not required_set <= set(runtime.NAMES):
         raise RecoveryError("post-backup health proof received an unknown runtime service")
-    deadline = monotonic() + settle_seconds
-    while True:
+
+    def probe() -> tuple[bool, bool, str]:
         _, rows = runtime.status(runner=runner)
         by_service = {row["service"]: row for row in rows}
         pending: list[str] = []
@@ -328,17 +328,20 @@ def _wait_for_resumed_health(
             else:
                 unsafe.append(detail)
         if not pending and not unsafe:
-            return
-        if unsafe:
-            raise RecoveryError(
-                "post-backup runtime health did not recover: " + ", ".join(unsafe + pending)
-            )
-        if monotonic() >= deadline:
-            raise RecoveryError(
-                f"post-backup runtime health did not recover within {settle_seconds:g}s: "
-                + ", ".join(pending)
-            )
-        sleep(poll_seconds)
+            return True, False, "post-backup runtime health recovered"
+        detail = ", ".join(unsafe + pending)
+        return False, not unsafe, detail
+
+    try:
+        runtime_health.wait_until_ready(
+            probe,
+            settle_seconds=settle_seconds,
+            poll_seconds=poll_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+    except runtime_health.RuntimeHealthError as exc:
+        raise RecoveryError(f"post-backup runtime health did not recover: {exc}") from exc
 
 
 def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
@@ -586,7 +589,7 @@ def _remote_parts(remote: str) -> tuple[str, str]:
 
 
 def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
-    if not runner(["rclone", "version"] ).ok:
+    if not runner(["rclone", "version"]).ok:
         return False, "rclone is unavailable"
     if not runner(["rclone", "config", "file"]).ok:
         return False, "rclone configuration is unavailable"
