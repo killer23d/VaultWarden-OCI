@@ -9,13 +9,14 @@ import sqlite3
 import stat
 import tarfile
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from . import runtime, secrets
+from . import runtime, secrets, update
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 
 FORMAT_VERSION = 2
@@ -245,12 +246,14 @@ def _resume_paused_services(paused: Sequence[str], runner: Runner) -> None:
         raise RecoveryError("failed to resume quiesced recovery service(s): " + ", ".join(failures))
 
 
-def _pause_live_services(runner: Runner) -> tuple[str, ...]:
+def _pause_live_services(runner: Runner) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if not runner(["docker", "version", "--format", "{{.Server.Version}}"]).ok:
         raise RecoveryError("Docker Engine unavailable; cannot prove a quiescent recovery point")
     paused: list[str] = []
+    previously_healthy: list[str] = []
     try:
-        for container in (runtime.NAMES["caddy"], runtime.NAMES["vaultwarden"]):
+        for service in ("caddy", "vaultwarden"):
+            container = runtime.NAMES[service]
             inspection = runner(
                 ["docker", "container", "inspect", "--format", "{{json .State}}", container]
             )
@@ -266,10 +269,14 @@ def _pause_live_services(runner: Runner) -> tuple[str, ...]:
                 raise RecoveryError("Docker container state was not an object")
             status = state.get("Status")
             is_paused = state.get("Paused") is True
+            health_state = state.get("Health")
+            was_healthy = isinstance(health_state, dict) and health_state.get("Status") == "healthy"
             if status == "running" and not is_paused:
                 if not runner(["docker", "pause", container]).ok:
                     raise RecoveryError(f"failed to quiesce {container} for recovery")
                 paused.append(container)
+                if was_healthy:
+                    previously_healthy.append(service)
             elif status == "running" and is_paused:
                 continue
             elif status in {"created", "exited", "dead"}:
@@ -284,7 +291,54 @@ def _pause_live_services(runner: Runner) -> tuple[str, ...]:
         except RecoveryError as resume_exc:
             raise RecoveryError(f"{exc}; additionally {resume_exc}") from exc
         raise
-    return tuple(paused)
+    return tuple(paused), tuple(previously_healthy)
+
+
+def _wait_for_resumed_health(
+    required: Sequence[str],
+    runner: Runner,
+    *,
+    settle_seconds: float = update.CURRENT_HEALTH_SETTLE_SECONDS,
+    poll_seconds: float = update.CURRENT_HEALTH_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    required_set = set(required)
+    if not required_set:
+        return
+    if not required_set <= set(runtime.NAMES):
+        raise RecoveryError("post-backup health proof received an unknown runtime service")
+    deadline = monotonic() + settle_seconds
+    while True:
+        _, rows = runtime.status(runner=runner)
+        by_service = {row["service"]: row for row in rows}
+        pending: list[str] = []
+        unsafe: list[str] = []
+        for service in sorted(required_set):
+            row = by_service.get(service)
+            if row is None:
+                unsafe.append(f"{service}=missing")
+                continue
+            state, health = row["state"], row["health"]
+            if state == "running" and health == "healthy":
+                continue
+            detail = f"{service}={state}/{health}"
+            if state == "running" and health in {"starting", "unhealthy"}:
+                pending.append(detail)
+            else:
+                unsafe.append(detail)
+        if not pending and not unsafe:
+            return
+        if unsafe:
+            raise RecoveryError(
+                "post-backup runtime health did not recover: " + ", ".join(unsafe + pending)
+            )
+        if monotonic() >= deadline:
+            raise RecoveryError(
+                f"post-backup runtime health did not recover within {settle_seconds:g}s: "
+                + ", ".join(pending)
+            )
+        sleep(poll_seconds)
 
 
 def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
@@ -472,7 +526,7 @@ def create_recovery(
         with tempfile.TemporaryDirectory(prefix="vwrec-build-", dir=str(paths.backups)) as directory:
             staging = Path(directory) / "staging"
             staging.mkdir()
-            paused = _pause_live_services(runner)
+            paused, health_required = _pause_live_services(runner)
             try:
                 manifest = _build_candidate(paths, staging)
             finally:
@@ -509,6 +563,12 @@ def create_recovery(
             size=final.stat().st_size,
             created_at=str(manifest["created_at"]),
         )
+        try:
+            _wait_for_resumed_health(health_required, runner)
+        except RecoveryError as exc:
+            raise RecoveryError(
+                f"verified recovery artifact {verified.artifact} was created, but {exc}"
+            ) from exc
         _record_local(paths, verified)
         if remote:
             remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
@@ -526,7 +586,7 @@ def _remote_parts(remote: str) -> tuple[str, str]:
 
 
 def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
-    if not runner(["rclone", "version"]).ok:
+    if not runner(["rclone", "version"] ).ok:
         return False, "rclone is unavailable"
     if not runner(["rclone", "config", "file"]).ok:
         return False, "rclone configuration is unavailable"
