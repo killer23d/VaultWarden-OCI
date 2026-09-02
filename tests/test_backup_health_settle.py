@@ -57,9 +57,11 @@ class RuntimeStateRunner:
                 return result(argv, stderr="Error: No such object", code=1)
             return result(argv, json.dumps(state))
         if call[:2] == ("docker", "pause"):
+            self.states[call[2]]["Status"] = "paused"
             self.states[call[2]]["Paused"] = True
             return result(argv)
         if call[:2] == ("docker", "unpause"):
+            self.states[call[2]]["Status"] = "running"
             self.states[call[2]]["Paused"] = False
             return result(argv)
         raise AssertionError(call)
@@ -92,7 +94,7 @@ class BackupHealthSettleTests(unittest.TestCase):
         self.assertEqual(update.CURRENT_HEALTH_SETTLE_SECONDS, runtime_health.SETTLE_SECONDS)
         self.assertEqual(update.CURRENT_HEALTH_POLL_SECONDS, runtime_health.POLL_SECONDS)
 
-    def test_runtime_owner_reports_latest_success_not_newer_failed_probe(self) -> None:
+    def test_runtime_owner_requires_latest_completed_probe_to_succeed(self) -> None:
         successful = "2026-09-02T21:00:00.000000000Z"
         failed = "2026-09-02T21:00:30.000000000Z"
         runner = RuntimeStateRunner(
@@ -107,6 +109,24 @@ class BackupHealthSettleTests(unittest.TestCase):
         observation = runtime.health_observation("caddy", runner=runner)
         self.assertEqual(observation.state, "running")
         self.assertFalse(observation.paused)
+        self.assertEqual(observation.health, "healthy")
+        self.assertIsNone(observation.latest_successful_probe)
+
+    def test_runtime_owner_normalizes_real_docker_paused_status(self) -> None:
+        successful = "2026-09-02T21:00:00.000000000Z"
+        runner = RuntimeStateRunner(
+            {
+                runtime.NAMES["caddy"]: service_state(
+                    "healthy",
+                    successful,
+                    paused=True,
+                    state="paused",
+                )
+            }
+        )
+        observation = runtime.health_observation("caddy", runner=runner)
+        self.assertEqual(observation.state, "running")
+        self.assertTrue(observation.paused)
         self.assertEqual(observation.health, "healthy")
         self.assertEqual(observation.latest_successful_probe, successful)
 
@@ -244,6 +264,7 @@ class BackupHealthSettleTests(unittest.TestCase):
                 "healthy",
                 "2026-09-02T21:00:00.000000000Z",
                 paused=True,
+                state="paused",
             ),
             runtime.NAMES["vaultwarden"]: service_state(
                 "unhealthy",
@@ -268,8 +289,11 @@ class BackupHealthSettleTests(unittest.TestCase):
         paused, health_required = recovery._pause_live_services(runner)
         self.assertEqual(set(paused), set(runtime.NAMES.values()))
         self.assertEqual(health_required, {"caddy": caddy_probe})
+        self.assertEqual(states[runtime.NAMES["caddy"]]["Status"], "paused")
+        self.assertEqual(states[runtime.NAMES["vaultwarden"]]["Status"], "paused")
         recovery._resume_paused_services(paused, runner)
         self.assertFalse(any(bool(state["Paused"]) for state in states.values()))
+        self.assertTrue(all(state["Status"] == "running" for state in states.values()))
 
     def test_resume_failure_is_surfaced_and_never_claimed_success(self) -> None:
         def failing_runner(argv, **_):
