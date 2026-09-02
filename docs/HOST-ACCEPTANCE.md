@@ -22,6 +22,7 @@ setup custody mode: interactive | terminal-auto-generated | explicit-recipient |
 pre-existing Vaultwarden Admin config: absent | reconciled | NOT RUN
 Admin browser navigation/SMTP test: PASS | FAIL | NOT RUN
 config/secrets edit restart prompt: PASS | FAIL | NOT RUN
+normal reboot persistence: PASS | FAIL | NOT RUN
 started at:
 completed at:
 result: PASS | FAIL | NOT RUN
@@ -49,6 +50,14 @@ Where practical, also force the pre-custody Age bootstrap to fail on disposable 
 Record `findmnt`, UUID/type, `/etc/vaultwarden-oci/storage-identity.json`, and the volume marker. Start successfully, then on disposable state hide/unmount the intended volume and exercise boot/service restart safeguards.
 
 **PASS:** start/doctor/mutating paths fail safely and Docker/systemd do not recreate persistent appliance paths on root. Restore the intended volume before continuing.
+
+### Normal reboot persistence
+
+After the candidate is installed or reached through the supported current-predecessor update path, record `vwctl versions`, `vwctl status`, `vwctl doctor`, `systemctl is-enabled vaultwarden-oci.target`, `systemctl is-active vaultwarden-oci.target`, `systemctl status vaultwarden-oci.service --no-pager`, and `stat -c '%U:%G %a %n' /run/vaultwarden-oci`. Perform a genuine `sudo reboot`.
+
+After reconnecting, **do not** manually create `/run/vaultwarden-oci`. Re-run the version/status/doctor and target/service checks, inspect both managed containers, and require `root:root 700 /run/vaultwarden-oci`. Inspect `journalctl -b -u vaultwarden-oci.service --no-pager` and require that `226/NAMESPACE`, `Failed to set up mount namespacing`, and `/run/vaultwarden-oci: No such file or directory` are absent. Also inspect `systemctl --failed --no-pager`, `vwctl timers`, and the appliance timers, then run a real `vwctl backup` followed by status and doctor.
+
+**PASS:** dedicated storage remounts; immutable release selection survives; systemd recreates the volatile runtime root before the appliance service executes; `vaultwarden-oci.service` is active with successful `ExecStart`; Vaultwarden and Caddy are running, unpaused, and healthy; status/doctor are truthful; and the post-reboot backup creates and verifies a new `.vwrec` without degrading either container. **FAIL:** manual runtime-directory recovery is required, the namespace failure recurs, release/storage selection changes, service/container health is not restored, or post-reboot backup fails.
 
 ## 3. Config/secrets, existing Admin policy, restart UX, and plaintext leakage
 
