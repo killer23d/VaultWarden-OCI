@@ -1,7 +1,7 @@
 schema_version = 1
 
 [vaultwarden_oci]
-version = "0.1.0-dev.22"
+version = "0.1.0-dev.23"
 
 [components]
 vaultwarden = "1.37.1"
