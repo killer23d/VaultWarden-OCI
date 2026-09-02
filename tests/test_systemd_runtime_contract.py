@@ -21,11 +21,13 @@ def units_requiring_runtime_root(systemd_dir: Path) -> list[Path]:
     required: list[Path] = []
     for unit_path in sorted(systemd_dir.glob("*.service")):
         unit = unit_path.read_text(encoding="utf-8")
-        if any(
-            line.startswith("ReadWritePaths=") and RUNTIME_ROOT in line.split()
-            for line in unit.splitlines()
-        ):
-            required.append(unit_path)
+        for line in unit.splitlines():
+            if not line.startswith("ReadWritePaths="):
+                continue
+            paths = line.partition("=")[2].split()
+            if any(path.lstrip("-+~") == RUNTIME_ROOT for path in paths):
+                required.append(unit_path)
+                break
     return required
 
 
