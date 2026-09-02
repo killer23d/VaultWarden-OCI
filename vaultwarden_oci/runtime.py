@@ -43,6 +43,14 @@ class RuntimeOperationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class HealthObservation:
+    state: str
+    paused: bool | None
+    health: str
+    latest_successful_probe: str | None
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     domain: str
     acme_email: str
@@ -652,6 +660,48 @@ def _inspect_is_absent(result: CommandResult) -> bool:
         return False
     message = (result.stderr or result.stdout).lower()
     return "no such object" in message or "no such container" in message
+
+
+def health_observation(service: str, *, runner: Runner = run_command) -> HealthObservation:
+    """Return runtime-owned Docker health evidence for one managed service."""
+    if service not in NAMES:
+        raise ValueError(service)
+    result = runner(
+        ["docker", "container", "inspect", "--format", "{{json .State}}", NAMES[service]]
+    )
+    if not result.ok:
+        if _inspect_is_absent(result):
+            return HealthObservation("absent", None, "-", None)
+        return HealthObservation("unknown", None, "unknown", None)
+    try:
+        state = json.loads(result.stdout)
+        if not isinstance(state, dict):
+            raise TypeError
+        current = str(state.get("Status", "unknown"))
+        paused_value = state.get("Paused")
+        paused = paused_value if isinstance(paused_value, bool) else None
+        health_state = state.get("Health")
+        health = str(health_state.get("Status", "-")) if isinstance(health_state, dict) else "-"
+        latest_successful_probe = None
+        log = health_state.get("Log") if isinstance(health_state, dict) else None
+        if isinstance(log, list):
+            for entry in reversed(log):
+                if not isinstance(entry, dict):
+                    continue
+                exit_code = entry.get("ExitCode")
+                ended = entry.get("End")
+                if (
+                    isinstance(exit_code, int)
+                    and not isinstance(exit_code, bool)
+                    and exit_code == 0
+                    and isinstance(ended, str)
+                    and ended
+                ):
+                    latest_successful_probe = ended
+                    break
+        return HealthObservation(current, paused, health, latest_successful_probe)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return HealthObservation("unknown", None, "unknown", None)
 
 
 def lifecycle(
