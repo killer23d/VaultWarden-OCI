@@ -14,6 +14,32 @@ def result(argv, stdout="", stderr="", code=0):
     return CommandResult(tuple(argv), "success" if code == 0 else "nonzero", code, stdout, stderr)
 
 
+def service_state(
+    health: str,
+    successful_probe: str | None,
+    *,
+    paused: bool = False,
+    state: str = "running",
+    failed_probes: tuple[str, ...] = (),
+) -> dict[str, object]:
+    log: list[dict[str, object]] = []
+    if successful_probe is not None:
+        log.append({"End": successful_probe, "ExitCode": 0, "Output": "ok"})
+    log.extend(
+        {"End": ended, "ExitCode": 1, "Output": "failed"}
+        for ended in failed_probes
+    )
+    return {
+        "Status": state,
+        "Paused": paused,
+        "Health": {
+            "Status": health,
+            "FailingStreak": len(failed_probes),
+            "Log": log,
+        },
+    }
+
+
 class RuntimeStateRunner:
     def __init__(self, states: dict[str, dict[str, object]]):
         self.states = states
@@ -39,33 +65,25 @@ class RuntimeStateRunner:
         raise AssertionError(call)
 
 
-class SequencedStatusRunner:
-    def __init__(self, snapshots: list[dict[str, str]]):
+class SequencedObservationRunner:
+    def __init__(self, snapshots: list[dict[str, dict[str, object]]]):
         self.snapshots = snapshots
         self.index = 0
+        self.seen: set[str] = set()
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, argv, **_):
         call = tuple(argv)
         self.calls.append(call)
-        if call[:2] == ("docker", "version"):
-            return result(argv, "28.0\n")
         if call[:4] == ("docker", "container", "inspect", "--format"):
             service = "vaultwarden" if call[-1] == runtime.NAMES["vaultwarden"] else "caddy"
             snapshot = self.snapshots[min(self.index, len(self.snapshots) - 1)]
-            health = snapshot[service]
-            if service == "caddy":
+            state = snapshot[service]
+            self.seen.add(service)
+            if self.seen >= set(snapshot):
                 self.index += 1
-            return result(
-                argv,
-                json.dumps(
-                    {
-                        "Status": "running",
-                        "Paused": False,
-                        "Health": {"Status": health},
-                    }
-                ),
-            )
+                self.seen.clear()
+            return result(argv, json.dumps(state))
         raise AssertionError(call)
 
 
@@ -74,17 +92,45 @@ class BackupHealthSettleTests(unittest.TestCase):
         self.assertEqual(update.CURRENT_HEALTH_SETTLE_SECONDS, runtime_health.SETTLE_SECONDS)
         self.assertEqual(update.CURRENT_HEALTH_POLL_SECONDS, runtime_health.POLL_SECONDS)
 
-    def test_transient_post_unpause_health_waits_until_healthy(self) -> None:
-        runner = SequencedStatusRunner(
+    def test_runtime_owner_reports_latest_success_not_newer_failed_probe(self) -> None:
+        successful = "2026-09-02T21:00:00.000000000Z"
+        failed = "2026-09-02T21:00:30.000000000Z"
+        runner = RuntimeStateRunner(
+            {
+                runtime.NAMES["caddy"]: service_state(
+                    "healthy",
+                    successful,
+                    failed_probes=(failed,),
+                )
+            }
+        )
+        observation = runtime.health_observation("caddy", runner=runner)
+        self.assertEqual(observation.state, "running")
+        self.assertFalse(observation.paused)
+        self.assertEqual(observation.health, "healthy")
+        self.assertEqual(observation.latest_successful_probe, successful)
+
+    def test_transient_post_unpause_health_waits_until_fresh_success(self) -> None:
+        baseline = {
+            "vaultwarden": "2026-09-02T21:00:00.000000000Z",
+            "caddy": "2026-09-02T21:00:01.000000000Z",
+        }
+        runner = SequencedObservationRunner(
             [
-                {"vaultwarden": "unhealthy", "caddy": "unhealthy"},
-                {"vaultwarden": "healthy", "caddy": "healthy"},
+                {
+                    "vaultwarden": service_state("unhealthy", baseline["vaultwarden"]),
+                    "caddy": service_state("unhealthy", baseline["caddy"]),
+                },
+                {
+                    "vaultwarden": service_state("healthy", "2026-09-02T21:00:30.000000000Z"),
+                    "caddy": service_state("healthy", "2026-09-02T21:00:31.000000000Z"),
+                },
             ]
         )
         sleeps: list[float] = []
         ticks = iter([0.0, 0.0])
         recovery._wait_for_resumed_health(
-            ("vaultwarden", "caddy"),
+            baseline,
             runner,
             settle_seconds=10,
             poll_seconds=2,
@@ -93,9 +139,63 @@ class BackupHealthSettleTests(unittest.TestCase):
         )
         self.assertEqual(sleeps, [2])
 
-    def test_post_unpause_health_timeout_is_bounded_and_actionable(self) -> None:
-        runner = SequencedStatusRunner(
-            [{"vaultwarden": "unhealthy", "caddy": "unhealthy"}]
+    def test_stale_healthy_after_unpause_waits_for_fresh_success(self) -> None:
+        baseline = {
+            "vaultwarden": "2026-09-02T21:00:00.000000000Z",
+            "caddy": "2026-09-02T21:00:01.000000000Z",
+        }
+        runner = SequencedObservationRunner(
+            [
+                {
+                    "vaultwarden": service_state(
+                        "healthy",
+                        baseline["vaultwarden"],
+                        failed_probes=("2026-09-02T21:00:30.000000000Z",),
+                    ),
+                    "caddy": service_state(
+                        "healthy",
+                        baseline["caddy"],
+                        failed_probes=("2026-09-02T21:00:31.000000000Z",),
+                    ),
+                },
+                {
+                    "vaultwarden": service_state("healthy", "2026-09-02T21:01:00.000000000Z"),
+                    "caddy": service_state("healthy", "2026-09-02T21:01:01.000000000Z"),
+                },
+            ]
+        )
+        sleeps: list[float] = []
+        ticks = iter([0.0, 0.0])
+        recovery._wait_for_resumed_health(
+            baseline,
+            runner,
+            settle_seconds=10,
+            poll_seconds=2,
+            sleep=sleeps.append,
+            monotonic=lambda: next(ticks),
+        )
+        self.assertEqual(sleeps, [2])
+
+    def test_stale_healthy_with_failed_fresh_probe_times_out(self) -> None:
+        baseline = {
+            "vaultwarden": "2026-09-02T21:00:00.000000000Z",
+            "caddy": "2026-09-02T21:00:01.000000000Z",
+        }
+        runner = SequencedObservationRunner(
+            [
+                {
+                    "vaultwarden": service_state(
+                        "healthy",
+                        baseline["vaultwarden"],
+                        failed_probes=("2026-09-02T21:00:30.000000000Z",),
+                    ),
+                    "caddy": service_state(
+                        "healthy",
+                        baseline["caddy"],
+                        failed_probes=("2026-09-02T21:00:31.000000000Z",),
+                    ),
+                }
+            ]
         )
         ticks = iter([0.0, 0.0, 3.0])
         with self.assertRaisesRegex(
@@ -103,7 +203,34 @@ class BackupHealthSettleTests(unittest.TestCase):
             "post-backup runtime health did not recover: timed out after 3s",
         ):
             recovery._wait_for_resumed_health(
-                ("vaultwarden", "caddy"),
+                baseline,
+                runner,
+                settle_seconds=3,
+                poll_seconds=1,
+                sleep=lambda _: None,
+                monotonic=lambda: next(ticks),
+            )
+
+    def test_post_unpause_health_timeout_is_bounded_and_actionable(self) -> None:
+        baseline = {
+            "vaultwarden": "2026-09-02T21:00:00.000000000Z",
+            "caddy": "2026-09-02T21:00:01.000000000Z",
+        }
+        runner = SequencedObservationRunner(
+            [
+                {
+                    "vaultwarden": service_state("unhealthy", baseline["vaultwarden"]),
+                    "caddy": service_state("unhealthy", baseline["caddy"]),
+                }
+            ]
+        )
+        ticks = iter([0.0, 0.0, 3.0])
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "post-backup runtime health did not recover: timed out after 3s",
+        ):
+            recovery._wait_for_resumed_health(
+                baseline,
                 runner,
                 settle_seconds=3,
                 poll_seconds=1,
@@ -113,41 +240,34 @@ class BackupHealthSettleTests(unittest.TestCase):
 
     def test_preexisting_stopped_degraded_and_paused_states_do_not_create_health_obligations(self) -> None:
         states = {
-            runtime.NAMES["caddy"]: {
-                "Status": "running",
-                "Paused": True,
-                "Health": {"Status": "healthy"},
-            },
-            runtime.NAMES["vaultwarden"]: {
-                "Status": "exited",
-                "Paused": False,
-                "Health": {"Status": "unhealthy"},
-            },
+            runtime.NAMES["caddy"]: service_state(
+                "healthy",
+                "2026-09-02T21:00:00.000000000Z",
+                paused=True,
+            ),
+            runtime.NAMES["vaultwarden"]: service_state(
+                "unhealthy",
+                None,
+                state="exited",
+            ),
         }
         runner = RuntimeStateRunner(states)
         paused, health_required = recovery._pause_live_services(runner)
         self.assertEqual(paused, ())
-        self.assertEqual(health_required, ())
+        self.assertEqual(health_required, {})
         self.assertFalse(any(call[:2] == ("docker", "pause") for call in runner.calls))
         self.assertFalse(any(call[:2] == ("docker", "unpause") for call in runner.calls))
 
-    def test_only_services_healthy_before_backup_are_post_resume_obligations(self) -> None:
+    def test_only_services_healthy_before_backup_receive_paused_health_fences(self) -> None:
+        caddy_probe = "2026-09-02T21:00:00.000000000Z"
         states = {
-            runtime.NAMES["caddy"]: {
-                "Status": "running",
-                "Paused": False,
-                "Health": {"Status": "healthy"},
-            },
-            runtime.NAMES["vaultwarden"]: {
-                "Status": "running",
-                "Paused": False,
-                "Health": {"Status": "unhealthy"},
-            },
+            runtime.NAMES["caddy"]: service_state("healthy", caddy_probe),
+            runtime.NAMES["vaultwarden"]: service_state("unhealthy", None),
         }
         runner = RuntimeStateRunner(states)
         paused, health_required = recovery._pause_live_services(runner)
         self.assertEqual(set(paused), set(runtime.NAMES.values()))
-        self.assertEqual(health_required, ("caddy",))
+        self.assertEqual(health_required, {"caddy": caddy_probe})
         recovery._resume_paused_services(paused, runner)
         self.assertFalse(any(bool(state["Paused"]) for state in states.values()))
 
@@ -193,7 +313,10 @@ class BackupHealthSettleTests(unittest.TestCase):
                 mock.patch.object(
                     recovery,
                     "_pause_live_services",
-                    return_value=((runtime.NAMES["caddy"],), ("caddy",)),
+                    return_value=(
+                        (runtime.NAMES["caddy"],),
+                        {"caddy": "2026-09-02T21:00:00.000000000Z"},
+                    ),
                 ),
                 mock.patch.object(recovery, "_resume_paused_services"),
                 mock.patch.object(recovery, "_build_candidate", return_value=manifest),
