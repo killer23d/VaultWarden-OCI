@@ -100,7 +100,7 @@ class BackupHealthSettleTests(unittest.TestCase):
         ticks = iter([0.0, 0.0, 3.0])
         with self.assertRaisesRegex(
             recovery.RecoveryError,
-            "post-backup runtime health did not recover within 3s",
+            "post-backup runtime health did not recover: timed out after 3s",
         ):
             recovery._wait_for_resumed_health(
                 ("vaultwarden", "caddy"),
@@ -150,6 +150,18 @@ class BackupHealthSettleTests(unittest.TestCase):
         self.assertEqual(health_required, ("caddy",))
         recovery._resume_paused_services(paused, runner)
         self.assertFalse(any(bool(state["Paused"]) for state in states.values()))
+
+    def test_resume_failure_is_surfaced_and_never_claimed_success(self) -> None:
+        def failing_runner(argv, **_):
+            if argv[:2] == ["docker", "unpause"]:
+                return result(argv, stderr="forced unpause failure", code=1)
+            raise AssertionError(tuple(argv))
+
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "failed to resume quiesced recovery service",
+        ):
+            recovery._resume_paused_services((runtime.NAMES["caddy"],), failing_runner)
 
     def test_committed_artifact_is_retained_if_post_resume_health_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
