@@ -275,7 +275,7 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         smtp_host=_hostname(_string(smtp, "host", "smtp"), "smtp.host"),
         smtp_port=port,
         smtp_security=security,
-        smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
+        smtp_from_email=_email(_string(smtp, "from_email", "smtp").strip(), "smtp.from_email"),
         smtp_from_name=_string(smtp, "from_name", "smtp").strip(),
         smtp_timeout_seconds=timeout,
         vaultwarden_environment=operator_settings.environment(vw_values),
@@ -663,7 +663,7 @@ def _inspect_is_absent(result: CommandResult) -> bool:
 
 
 def health_observation(service: str, *, runner: Runner = run_command) -> HealthObservation:
-    """Return runtime-owned Docker health evidence for one managed service."""
+    """Return normalized runtime-owned Docker health evidence for one managed service."""
     if service not in NAMES:
         raise ValueError(service)
     result = runner(
@@ -680,11 +680,20 @@ def health_observation(service: str, *, runner: Runner = run_command) -> HealthO
         current = str(state.get("Status", "unknown"))
         paused_value = state.get("Paused")
         paused = paused_value if isinstance(paused_value, bool) else None
+        # Docker reports Status="paused" while the container remains the same
+        # running service. Keep state compatible with the runtime owner while
+        # preserving the pause fact separately for recovery ownership checks.
+        if current == "paused" and paused is True:
+            current = "running"
         health_state = state.get("Health")
         health = str(health_state.get("Status", "-")) if isinstance(health_state, dict) else "-"
         latest_successful_probe = None
         log = health_state.get("Log") if isinstance(health_state, dict) else None
         if isinstance(log, list):
+            # The gate needs the latest completed probe itself to have
+            # succeeded. A prior success followed by a newer failure must not
+            # be accepted merely because aggregate Health.Status is still
+            # "healthy" until Docker's retry threshold is reached.
             for entry in reversed(log):
                 if not isinstance(entry, dict):
                     continue
@@ -693,11 +702,11 @@ def health_observation(service: str, *, runner: Runner = run_command) -> HealthO
                 if (
                     isinstance(exit_code, int)
                     and not isinstance(exit_code, bool)
-                    and exit_code == 0
                     and isinstance(ended, str)
                     and ended
                 ):
-                    latest_successful_probe = ended
+                    if exit_code == 0:
+                        latest_successful_probe = ended
                     break
         return HealthObservation(current, paused, health, latest_successful_probe)
     except (json.JSONDecodeError, TypeError, AttributeError):
