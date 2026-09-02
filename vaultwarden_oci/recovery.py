@@ -246,40 +246,35 @@ def _resume_paused_services(paused: Sequence[str], runner: Runner) -> None:
         raise RecoveryError("failed to resume quiesced recovery service(s): " + ", ".join(failures))
 
 
-def _pause_live_services(runner: Runner) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _pause_live_services(runner: Runner) -> tuple[tuple[str, ...], dict[str, str]]:
     if not runner(["docker", "version", "--format", "{{.Server.Version}}"]).ok:
         raise RecoveryError("Docker Engine unavailable; cannot prove a quiescent recovery point")
     paused: list[str] = []
-    previously_healthy: list[str] = []
+    health_fences: dict[str, str] = {}
     try:
         for service in ("caddy", "vaultwarden"):
             container = runtime.NAMES[service]
-            inspection = runner(
-                ["docker", "container", "inspect", "--format", "{{json .State}}", container]
-            )
-            if not inspection.ok:
-                if _inspect_absent(inspection):
-                    continue
-                raise RecoveryError("Docker container inspection failed; backup consistency is unknown")
-            try:
-                state = json.loads(inspection.stdout)
-            except json.JSONDecodeError as exc:
-                raise RecoveryError("Docker container state was not valid JSON") from exc
-            if not isinstance(state, dict):
-                raise RecoveryError("Docker container state was not an object")
-            status = state.get("Status")
-            is_paused = state.get("Paused") is True
-            health_state = state.get("Health")
-            was_healthy = isinstance(health_state, dict) and health_state.get("Status") == "healthy"
-            if status == "running" and not is_paused:
+            observation = runtime.health_observation(service, runner=runner)
+            status = observation.state
+            was_healthy = observation.health == "healthy"
+            if status == "running" and observation.paused is False:
                 if not runner(["docker", "pause", container]).ok:
                     raise RecoveryError(f"failed to quiesce {container} for recovery")
                 paused.append(container)
                 if was_healthy:
-                    previously_healthy.append(service)
-            elif status == "running" and is_paused:
+                    fence = runtime.health_observation(service, runner=runner)
+                    if fence.state != "running" or fence.paused is not True:
+                        raise RecoveryError(
+                            f"cannot prove {container} remained paused while capturing health evidence"
+                        )
+                    if fence.latest_successful_probe is None:
+                        raise RecoveryError(
+                            f"cannot capture a successful pre-resume health probe for {container}"
+                        )
+                    health_fences[service] = fence.latest_successful_probe
+            elif status == "running" and observation.paused is True:
                 continue
-            elif status in {"created", "exited", "dead"}:
+            elif status in {"created", "exited", "dead", "absent"}:
                 continue
             else:
                 raise RecoveryError(
@@ -291,11 +286,11 @@ def _pause_live_services(runner: Runner) -> tuple[tuple[str, ...], tuple[str, ..
         except RecoveryError as resume_exc:
             raise RecoveryError(f"{exc}; additionally {resume_exc}") from exc
         raise
-    return tuple(paused), tuple(previously_healthy)
+    return tuple(paused), health_fences
 
 
 def _wait_for_resumed_health(
-    required: Sequence[str],
+    required: Mapping[str, str],
     runner: Runner,
     *,
     settle_seconds: float = runtime_health.SETTLE_SECONDS,
@@ -303,32 +298,47 @@ def _wait_for_resumed_health(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    required_set = set(required)
-    if not required_set:
+    required_map = dict(required)
+    if not required_map:
         return
-    if not required_set <= set(runtime.NAMES):
+    if not set(required_map) <= set(runtime.NAMES):
         raise RecoveryError("post-backup health proof received an unknown runtime service")
+    if any(not isinstance(value, str) or not value for value in required_map.values()):
+        raise RecoveryError("post-backup health proof is missing a pre-unpause health observation")
 
     def probe() -> tuple[bool, bool, str]:
-        _, rows = runtime.status(runner=runner)
-        by_service = {row["service"]: row for row in rows}
         pending: list[str] = []
         unsafe: list[str] = []
-        for service in sorted(required_set):
-            row = by_service.get(service)
-            if row is None:
-                unsafe.append(f"{service}=missing")
+        for service in sorted(required_map):
+            baseline = required_map[service]
+            observation = runtime.health_observation(service, runner=runner)
+            if (
+                observation.state == "running"
+                and observation.paused is False
+                and observation.health == "healthy"
+            ):
+                if (
+                    observation.latest_successful_probe is not None
+                    and observation.latest_successful_probe != baseline
+                ):
+                    continue
+                pending.append(
+                    f"{service}=running/healthy awaiting a fresh successful post-unpause health probe"
+                )
                 continue
-            state, health = row["state"], row["health"]
-            if state == "running" and health == "healthy":
-                continue
-            detail = f"{service}={state}/{health}"
-            if state == "running" and health in {"starting", "unhealthy"}:
+            detail = f"{service}={observation.state}/{observation.health}"
+            if observation.state == "running" and observation.paused is True:
+                pending.append(detail + "/paused")
+            elif (
+                observation.state == "running"
+                and observation.paused is False
+                and observation.health in {"starting", "unhealthy"}
+            ):
                 pending.append(detail)
             else:
                 unsafe.append(detail)
         if not pending and not unsafe:
-            return True, False, "post-backup runtime health recovered"
+            return True, False, "post-backup runtime health recovered with fresh successful probes"
         detail = ", ".join(unsafe + pending)
         return False, not unsafe, detail
 
