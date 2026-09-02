@@ -1,13 +1,40 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
+from vaultwarden_oci import install
+
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ROOT = "/run/vaultwarden-oci"
+RUNTIME_CONTRACT = (
+    "RuntimeDirectory=vaultwarden-oci\n",
+    "RuntimeDirectoryMode=0700\n",
+    "RuntimeDirectoryPreserve=yes\n",
+)
+
+
+def units_requiring_runtime_root(systemd_dir: Path) -> list[Path]:
+    required: list[Path] = []
+    for unit_path in sorted(systemd_dir.glob("*.service")):
+        unit = unit_path.read_text(encoding="utf-8")
+        if any(
+            line.startswith("ReadWritePaths=") and RUNTIME_ROOT in line.split()
+            for line in unit.splitlines()
+        ):
+            required.append(unit_path)
+    return required
 
 
 class SystemdRuntimeContractTests(unittest.TestCase):
+    def assert_runtime_directory_contract(self, unit_path: Path) -> None:
+        unit = unit_path.read_text(encoding="utf-8")
+        for directive in RUNTIME_CONTRACT:
+            self.assertIn(directive, unit, unit_path.name)
+
     def test_lifecycle_docker_client_state_stays_in_managed_runtime_root(self) -> None:
         unit = (ROOT / "systemd/vaultwarden-oci.service").read_text(encoding="utf-8")
 
@@ -38,6 +65,29 @@ class SystemdRuntimeContractTests(unittest.TestCase):
                 self.assertIn(expected, unit)
                 self.assertNotIn("ReadWritePaths=/etc/crowdsec", unit)
                 self.assertNotIn("ReadWritePaths=/var/lib/crowdsec\n", unit)
+
+    def test_every_service_with_runtime_readwrite_path_has_boot_safe_owner(self) -> None:
+        applicable = units_requiring_runtime_root(ROOT / "systemd")
+        self.assertTrue(applicable, "expected at least one service using the shared runtime root")
+        for unit_path in applicable:
+            with self.subTest(unit=unit_path.name):
+                self.assert_runtime_directory_contract(unit_path)
+
+    def test_installed_units_do_not_depend_on_installer_runtime_copy_surviving(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install.install_layout(ROOT, root=root, systemd_reload=False)
+            runtime_root = root / "run/vaultwarden-oci"
+            self.assertTrue(runtime_root.is_dir())
+            shutil.rmtree(runtime_root)
+            self.assertFalse(runtime_root.exists())
+
+            installed_systemd = root / "etc/systemd/system"
+            applicable = units_requiring_runtime_root(installed_systemd)
+            self.assertTrue(applicable)
+            for unit_path in applicable:
+                with self.subTest(unit=unit_path.name):
+                    self.assert_runtime_directory_contract(unit_path)
 
 
 if __name__ == "__main__":
