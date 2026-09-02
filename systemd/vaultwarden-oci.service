@@ -8,6 +8,9 @@ OnFailure=vaultwarden-oci-notify@%n.service
 
 [Service]
 Type=oneshot
+RuntimeDirectory=vaultwarden-oci
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 RemainAfterExit=yes
 ExecStart=/opt/vaultwarden-oci/current/vwctl start
 ExecStop=/opt/vaultwarden-oci/current/vwctl stop
