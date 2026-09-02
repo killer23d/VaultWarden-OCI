@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -134,7 +135,11 @@ def _gate_current(layout: install.Layout, runner: Runner) -> None:
         return False, _transient_runtime_health(detail), detail
 
     try:
-        runtime_health.wait_until_ready(probe)
+        runtime_health.wait_until_ready(
+            probe,
+            sleep=time.sleep,
+            monotonic=time.monotonic,
+        )
     except runtime_health.RuntimeHealthError as exc:
         raise UpdateError(f"current runtime status is not safe for update: {exc}") from exc
     doctor = runner([str(vwctl), "doctor", "--json"])
