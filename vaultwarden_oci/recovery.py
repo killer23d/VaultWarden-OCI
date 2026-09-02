@@ -9,13 +9,14 @@ import sqlite3
 import stat
 import tarfile
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from . import runtime, secrets
+from . import runtime, runtime_health, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 
 FORMAT_VERSION = 2
@@ -245,34 +246,35 @@ def _resume_paused_services(paused: Sequence[str], runner: Runner) -> None:
         raise RecoveryError("failed to resume quiesced recovery service(s): " + ", ".join(failures))
 
 
-def _pause_live_services(runner: Runner) -> tuple[str, ...]:
+def _pause_live_services(runner: Runner) -> tuple[tuple[str, ...], dict[str, str]]:
     if not runner(["docker", "version", "--format", "{{.Server.Version}}"]).ok:
         raise RecoveryError("Docker Engine unavailable; cannot prove a quiescent recovery point")
     paused: list[str] = []
+    health_fences: dict[str, str] = {}
     try:
-        for container in (runtime.NAMES["caddy"], runtime.NAMES["vaultwarden"]):
-            inspection = runner(
-                ["docker", "container", "inspect", "--format", "{{json .State}}", container]
-            )
-            if not inspection.ok:
-                if _inspect_absent(inspection):
-                    continue
-                raise RecoveryError("Docker container inspection failed; backup consistency is unknown")
-            try:
-                state = json.loads(inspection.stdout)
-            except json.JSONDecodeError as exc:
-                raise RecoveryError("Docker container state was not valid JSON") from exc
-            if not isinstance(state, dict):
-                raise RecoveryError("Docker container state was not an object")
-            status = state.get("Status")
-            is_paused = state.get("Paused") is True
-            if status == "running" and not is_paused:
+        for service in ("caddy", "vaultwarden"):
+            container = runtime.NAMES[service]
+            observation = runtime.health_observation(service, runner=runner)
+            status = observation.state
+            was_healthy = observation.health == "healthy"
+            if status == "running" and observation.paused is False:
                 if not runner(["docker", "pause", container]).ok:
                     raise RecoveryError(f"failed to quiesce {container} for recovery")
                 paused.append(container)
-            elif status == "running" and is_paused:
+                if was_healthy:
+                    fence = runtime.health_observation(service, runner=runner)
+                    if fence.state != "running" or fence.paused is not True:
+                        raise RecoveryError(
+                            f"cannot prove {container} remained paused while capturing health evidence"
+                        )
+                    if fence.latest_successful_probe is None:
+                        raise RecoveryError(
+                            f"cannot capture a successful pre-resume health probe for {container}"
+                        )
+                    health_fences[service] = fence.latest_successful_probe
+            elif status == "running" and observation.paused is True:
                 continue
-            elif status in {"created", "exited", "dead"}:
+            elif status in {"created", "exited", "dead", "absent"}:
                 continue
             else:
                 raise RecoveryError(
@@ -284,7 +286,72 @@ def _pause_live_services(runner: Runner) -> tuple[str, ...]:
         except RecoveryError as resume_exc:
             raise RecoveryError(f"{exc}; additionally {resume_exc}") from exc
         raise
-    return tuple(paused)
+    return tuple(paused), health_fences
+
+
+def _wait_for_resumed_health(
+    required: Mapping[str, str],
+    runner: Runner,
+    *,
+    settle_seconds: float = runtime_health.SETTLE_SECONDS,
+    poll_seconds: float = runtime_health.POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    required_map = dict(required)
+    if not required_map:
+        return
+    if not set(required_map) <= set(runtime.NAMES):
+        raise RecoveryError("post-backup health proof received an unknown runtime service")
+    if any(not isinstance(value, str) or not value for value in required_map.values()):
+        raise RecoveryError("post-backup health proof is missing a pre-unpause health observation")
+
+    def probe() -> tuple[bool, bool, str]:
+        pending: list[str] = []
+        unsafe: list[str] = []
+        for service in sorted(required_map):
+            baseline = required_map[service]
+            observation = runtime.health_observation(service, runner=runner)
+            if (
+                observation.state == "running"
+                and observation.paused is False
+                and observation.health == "healthy"
+            ):
+                if (
+                    observation.latest_successful_probe is not None
+                    and observation.latest_successful_probe != baseline
+                ):
+                    continue
+                pending.append(
+                    f"{service}=running/healthy awaiting a fresh successful post-unpause health probe"
+                )
+                continue
+            detail = f"{service}={observation.state}/{observation.health}"
+            if observation.state == "running" and observation.paused is True:
+                pending.append(detail + "/paused")
+            elif (
+                observation.state == "running"
+                and observation.paused is False
+                and observation.health in {"starting", "unhealthy"}
+            ):
+                pending.append(detail)
+            else:
+                unsafe.append(detail)
+        if not pending and not unsafe:
+            return True, False, "post-backup runtime health recovered with fresh successful probes"
+        detail = ", ".join(unsafe + pending)
+        return False, not unsafe, detail
+
+    try:
+        runtime_health.wait_until_ready(
+            probe,
+            settle_seconds=settle_seconds,
+            poll_seconds=poll_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+    except runtime_health.RuntimeHealthError as exc:
+        raise RecoveryError(f"post-backup runtime health did not recover: {exc}") from exc
 
 
 def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
@@ -472,7 +539,7 @@ def create_recovery(
         with tempfile.TemporaryDirectory(prefix="vwrec-build-", dir=str(paths.backups)) as directory:
             staging = Path(directory) / "staging"
             staging.mkdir()
-            paused = _pause_live_services(runner)
+            paused, health_required = _pause_live_services(runner)
             try:
                 manifest = _build_candidate(paths, staging)
             finally:
@@ -509,6 +576,12 @@ def create_recovery(
             size=final.stat().st_size,
             created_at=str(manifest["created_at"]),
         )
+        try:
+            _wait_for_resumed_health(health_required, runner)
+        except RecoveryError as exc:
+            raise RecoveryError(
+                f"verified recovery artifact {verified.artifact} was created, but {exc}"
+            ) from exc
         _record_local(paths, verified)
         if remote:
             remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
