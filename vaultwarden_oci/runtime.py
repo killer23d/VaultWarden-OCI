@@ -275,7 +275,7 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         smtp_host=_hostname(_string(smtp, "host", "smtp"), "smtp.host"),
         smtp_port=port,
         smtp_security=security,
-        smtp_from_email=_email(_string(smtp, "from_email", "smtp").strip(), "smtp.from_email"),
+        smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
         smtp_from_name=_string(smtp, "from_name", "smtp").strip(),
         smtp_timeout_seconds=timeout,
         vaultwarden_environment=operator_settings.environment(vw_values),
