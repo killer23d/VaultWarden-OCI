@@ -6,6 +6,9 @@ OnFailure=vaultwarden-oci-notify@%n.service
 
 [Service]
 Type=oneshot
+RuntimeDirectory=vaultwarden-oci
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ExecStart=/opt/vaultwarden-oci/current/vwctl backup
 TimeoutStartSec=1800
 NoNewPrivileges=yes

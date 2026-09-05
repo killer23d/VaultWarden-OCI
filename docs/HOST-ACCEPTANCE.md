@@ -22,6 +22,7 @@ setup custody mode: interactive | terminal-auto-generated | explicit-recipient |
 pre-existing Vaultwarden Admin config: absent | reconciled | NOT RUN
 Admin browser navigation/SMTP test: PASS | FAIL | NOT RUN
 config/secrets edit restart prompt: PASS | FAIL | NOT RUN
+normal reboot persistence: PASS | FAIL | NOT RUN
 started at:
 completed at:
 result: PASS | FAIL | NOT RUN
@@ -49,6 +50,18 @@ Where practical, also force the pre-custody Age bootstrap to fail on disposable 
 Record `findmnt`, UUID/type, `/etc/vaultwarden-oci/storage-identity.json`, and the volume marker. Start successfully, then on disposable state hide/unmount the intended volume and exercise boot/service restart safeguards.
 
 **PASS:** start/doctor/mutating paths fail safely and Docker/systemd do not recreate persistent appliance paths on root. Restore the intended volume before continuing.
+
+### Normal reboot persistence
+
+After the candidate is installed or reached through the supported current-predecessor update path, record `vwctl versions`, `vwctl status`, `vwctl doctor`, `systemctl is-enabled vaultwarden-oci.target`, `systemctl is-active vaultwarden-oci.target`, `systemctl status vaultwarden-oci.service --no-pager`, and `stat -c '%U:%G %a %n' /run/vaultwarden-oci`. Perform a genuine `sudo reboot`.
+
+After reconnecting, **do not** manually create `/run/vaultwarden-oci`, run `vwctl start`, or manually start the lifecycle service. SSH may become available before the normal boot transaction has reached the appliance target. Allow the boot-owned lifecycle path to converge naturally for up to the service's existing `TimeoutStartSec=600`; while waiting, use `systemctl is-active vaultwarden-oci.target`, `systemctl is-active vaultwarden-oci.service`, and `systemctl is-failed vaultwarden-oci.service` to distinguish normal activation from an actual failure. Do not judge a still-activating boot as failed merely because the runtime root or containers are not present yet.
+
+After the target has converged or the lifecycle service has failed, re-run the version/status/doctor and target/service checks, inspect both managed containers, and require `root:root 700 /run/vaultwarden-oci`. Inspect `journalctl -b -u vaultwarden-oci.service --no-pager` and require that `226/NAMESPACE`, `Failed to set up mount namespacing`, and `/run/vaultwarden-oci: No such file or directory` are absent and that the current-boot lifecycle invocation completed successfully.
+
+The supported CrowdSec Cloudflare Worker is intentionally boot-disabled. Immediately after a genuine reboot, `crowdsec.cloudflare` may therefore be the only doctor `FAIL`, and a health-timer invocation during that expected unarmed window may be recorded failed. First prove the lifecycle/runtime-directory reboot boundary above. Then run `sudo vwctl crowdsec remediation-start`, set every recreated bouncer Worker Route to Fail Open in Cloudflare, run `sudo vwctl crowdsec confirm-fail-open`, clear any health/notification failure recorded during the unarmed window, and re-run the health service. Finally inspect `systemctl --failed --no-pager`, `vwctl timers`, and the appliance timers; require no remaining unexpected failure; then run a real `vwctl backup` followed by final status and doctor.
+
+**PASS:** dedicated storage remounts; immutable release selection survives; systemd recreates the volatile runtime root before the appliance service executes; `vaultwarden-oci.service` is active with successful current-boot `ExecStart`; Vaultwarden and Caddy are running, unpaused, and healthy; the original namespace failure is absent; the intentionally boot-disabled Cloudflare Worker can be explicitly re-armed and returns CrowdSec/health automation to the expected state; status/doctor are truthful; and the post-reboot backup creates and verifies a new `.vwrec` without degrading either container. **FAIL:** manual runtime-directory or lifecycle recovery is required, the namespace failure recurs, release/storage selection changes, service/container health is not restored after the bounded boot convergence window, CrowdSec cannot be safely re-armed, an unexpected failed unit/timer remains, or post-reboot backup fails.
 
 ## 3. Config/secrets, existing Admin policy, restart UX, and plaintext leakage
 

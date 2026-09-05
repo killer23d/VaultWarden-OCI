@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+RuntimeDirectory=vaultwarden-oci
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ExecStart=/opt/vaultwarden-oci/current/vwctl notify --event %i
 TimeoutStartSec=90
 NoNewPrivileges=yes
