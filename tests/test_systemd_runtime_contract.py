@@ -10,21 +10,36 @@ from vaultwarden_oci import install
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = "/run/vaultwarden-oci"
-RUNTIME_CONTRACT = (
-    "RuntimeDirectory=vaultwarden-oci\n",
-    "RuntimeDirectoryMode=0700\n",
-    "RuntimeDirectoryPreserve=yes\n",
-)
+RUNTIME_CONTRACT = {
+    "RuntimeDirectory": "vaultwarden-oci",
+    "RuntimeDirectoryMode": "0700",
+    "RuntimeDirectoryPreserve": "yes",
+}
+
+
+def service_directives(unit_path: Path) -> dict[str, list[str]]:
+    directives: dict[str, list[str]] = {}
+    section = ""
+    for raw_line in unit_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "Service" or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        directives.setdefault(key.strip(), []).append(value.strip())
+    return directives
 
 
 def units_requiring_runtime_root(systemd_dir: Path) -> list[Path]:
     required: list[Path] = []
     for unit_path in sorted(systemd_dir.glob("*.service")):
-        unit = unit_path.read_text(encoding="utf-8")
-        for line in unit.splitlines():
-            if not line.startswith("ReadWritePaths="):
-                continue
-            paths = line.partition("=")[2].split()
+        directives = service_directives(unit_path)
+        for value in directives.get("ReadWritePaths", []):
+            paths = value.split()
             if any(path.lstrip("-+~") == RUNTIME_ROOT for path in paths):
                 required.append(unit_path)
                 break
@@ -33,9 +48,19 @@ def units_requiring_runtime_root(systemd_dir: Path) -> list[Path]:
 
 class SystemdRuntimeContractTests(unittest.TestCase):
     def assert_runtime_directory_contract(self, unit_path: Path) -> None:
-        unit = unit_path.read_text(encoding="utf-8")
-        for directive in RUNTIME_CONTRACT:
-            self.assertIn(directive, unit, unit_path.name)
+        directives = service_directives(unit_path)
+        for key, expected in RUNTIME_CONTRACT.items():
+            self.assertEqual(
+                directives.get(key),
+                [expected],
+                f"{unit_path.name}: expected exactly one active {key}={expected}",
+            )
+        for key in ("User", "Group"):
+            values = directives.get(key, [])
+            self.assertTrue(
+                all(value == "root" for value in values),
+                f"{unit_path.name}: shared {RUNTIME_ROOT} owner must remain root; {key}={values}",
+            )
 
     def test_lifecycle_docker_client_state_stays_in_managed_runtime_root(self) -> None:
         unit = (ROOT / "systemd/vaultwarden-oci.service").read_text(encoding="utf-8")
