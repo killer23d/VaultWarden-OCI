@@ -53,6 +53,7 @@ _APPLICATION_SERVICE = "vaultwarden-oci.service"
 _QUARANTINE_TARGET = Path("recovery-required")
 _LATEST_MARKER = ".latest."
 SOURCE_OVERRIDE_ENV = "VWOCI_SOURCE_OVERRIDE"
+NO_STABLE_PROJECT_RELEASE_REASON = "no stable VaultWarden-OCI project release has been published yet"
 _SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
@@ -74,6 +75,10 @@ class PreparedPlan:
     use_latest: bool
     available: bool = True
     availability_reason: str = ""
+
+
+class NoStableProjectRelease(UpdateError):
+    """The release catalog was read successfully but has no stable candidate."""
 
 
 class PersistentStateFailure(UpdateError):
@@ -127,12 +132,14 @@ def _stable_from_page(payload: object) -> ProjectRelease | None:
     if not isinstance(payload, list):
         raise UpdateError("project release lookup returned an invalid release list")
     for item in payload:
-        if not isinstance(item, dict) or item.get("draft") is True or item.get("prerelease") is True:
+        if not isinstance(item, dict):
+            raise UpdateError("project release lookup returned an invalid release entry")
+        if item.get("draft") is True or item.get("prerelease") is True:
             continue
         tag = item.get("tag_name")
         tarball = item.get("tarball_url")
         published = item.get("published_at") or item.get("created_at") or ""
-        if (
+        if not (
             isinstance(tag, str)
             and tag
             and tag.strip() == tag
@@ -143,7 +150,8 @@ def _stable_from_page(payload: object) -> ProjectRelease | None:
             )
             and isinstance(published, str)
         ):
-            return ProjectRelease(tag, tarball, published)
+            raise UpdateError("project release lookup returned invalid stable release metadata")
+        return ProjectRelease(tag, tarball, published)
     return None
 
 
@@ -151,7 +159,7 @@ def select_stable_release(payload: object) -> ProjectRelease:
     """Select the first non-draft/non-prerelease project release in one page."""
     selected = _stable_from_page(payload)
     if selected is None:
-        raise UpdateError("no stable VaultWarden-OCI project release is available")
+        raise NoStableProjectRelease(NO_STABLE_PROJECT_RELEASE_REASON)
     return selected
 
 
@@ -165,9 +173,7 @@ def latest_project_release(*, getter: JsonGetter = _json_get) -> ProjectRelease:
         assert isinstance(payload, list)
         if len(payload) < 100:
             break
-    raise UpdateError(
-        f"no stable VaultWarden-OCI project release was found in the newest {MAX_RELEASE_PAGES * 100} releases"
-    )
+    raise NoStableProjectRelease(NO_STABLE_PROJECT_RELEASE_REASON)
 
 
 def _download(url: str) -> bytes:
@@ -1154,6 +1160,7 @@ def record_check(
     candidate: str | None,
     error: str | None,
     available: bool | None = None,
+    availability_reason: str | None = None,
     path: Path = UPDATE_STATE,
 ) -> None:
     old = _load_state(path)
@@ -1163,12 +1170,14 @@ def record_check(
         else bool(available)
     )
     resolved_available = resolved_available and error is None
+    resolved_reason = availability_reason if error is None and availability_reason else None
     payload = {
         "schema_version": 1,
         "checked_at": int(time.time()),
         "current": current,
         "candidate": candidate,
         "available": resolved_available,
+        "availability_reason": resolved_reason,
         "error": error,
     }
     _atomic_state(payload, path)
