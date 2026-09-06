@@ -180,6 +180,8 @@ def draw_status(payload: dict[str, object]) -> None:
             update_text = STYLE.failure(f"check error: {update.get('error')}")
         elif update.get("available"):
             update_text = STYLE.warning(f"update available -> {update.get('candidate')}")
+        elif update.get("availability_reason"):
+            update_text = STYLE.success(str(update.get("availability_reason")))
         elif update.get("check_stale"):
             update_text = STYLE.warning("update check stale/missing")
         else:
