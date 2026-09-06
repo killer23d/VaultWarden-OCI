@@ -63,7 +63,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 @dataclass(frozen=True)
 class ProjectRelease:
-    tag: str | None
+    tag: str
     tarball_url: str
     published_at: str
 
@@ -239,15 +239,7 @@ def candidate_source(
             raise UpdateError("developer source is missing the candidate-owned update interface")
         yield root, None
         return
-    try:
-        release = latest_project_release(getter=getter)
-    except NoStableProjectRelease:
-        current = install.Layout(Path("/")).path(install.CURRENT_LINK)
-        if not current.is_dir() or current.is_symlink():
-            raise UpdateError("installed current release is unavailable while checking the empty release catalog")
-        update._validate_source(current)
-        yield current, ProjectRelease(None, "", "")
-        return
+    release = latest_project_release(getter=getter)
     raw = downloader(release.tarball_url)
     with tempfile.TemporaryDirectory(prefix="vwoci-project-release-") as directory:
         yield _extract_release(raw, Path(directory)), release
@@ -321,9 +313,6 @@ def prepare_plan(
     runner: Runner = cli.run_command,
 ) -> PreparedPlan:
     """Create a coherent plan with explicit project applicability before downgrade checks."""
-    no_stable_release = project_release is not None and project_release.tag is None
-    if no_stable_release and use_latest:
-        raise UpdateError("--use-latest requires a published stable VaultWarden-OCI project release")
     defer_component_check = use_latest or project_release is not None
     base = update.plan_update(
         source_root,
@@ -334,18 +323,14 @@ def prepare_plan(
     )
     source_frozen = update.resolve_pinned(source_root, machine=machine)
     source_version = source_frozen.project_version
-    if project_release is not None and project_release.tag is not None:
+    if project_release is not None:
         normalized = project_release.tag.removeprefix("v")
         if normalized != source_version:
             raise UpdateError(
                 f"stable project release tag {project_release.tag!r} does not match its versions.toml project version {source_version!r}"
             )
 
-    if no_stable_release:
-        plan = base
-        available = False
-        reason = NO_STABLE_PROJECT_RELEASE_REASON
-    elif use_latest:
+    if use_latest:
         current_base = _base_project_version(base.current_release)
         if compare_project_versions(source_version, current_base) < 0:
             raise UpdateError(
@@ -472,6 +457,9 @@ def _activate_candidate_release(release_dir: Path, render_root: Path, runner: Ru
     )
     if result.ok:
         return
+    # Only the candidate's explicit PRESTART code proves that runtime start was
+    # never attempted. Unknown exits (signal, OOM, crash) are conservatively
+    # treated as potentially state-changing so old code is never auto-launched.
     state_change_possible = result.returncode != PRESTART_FAILURE
     detail = _detail(result)
     try:
@@ -501,6 +489,7 @@ def _stop_candidate_locked(release_dir: Path, runner: Runner) -> bool:
 
 
 def _settle_systemd_stopped(layout: install.Layout, runner: Runner) -> bool:
+    """After the updater lock is released, make systemd's service state truthful."""
     if layout.root != Path("/"):
         return True
     stopped = runner(["systemctl", "stop", _APPLICATION_SERVICE])
@@ -523,6 +512,7 @@ def _start_previous_service(layout: install.Layout, previous: Path, runner: Runn
 
 
 def _switch_current(layout: install.Layout, target: Path) -> None:
+    """Atomically and durably publish the appliance current-code selection."""
     current = layout.path(install.CURRENT_LINK)
     try:
         durability.atomic_symlink(current, target)
@@ -531,6 +521,7 @@ def _switch_current(layout: install.Layout, target: Path) -> None:
 
 
 def _quarantine_current(layout: install.Layout) -> None:
+    """Fail closed: normal vwctl/systemd start paths resolve to no application code."""
     _switch_current(layout, _QUARANTINE_TARGET)
 
 
@@ -557,6 +548,7 @@ def _clear_transaction_guard(
     verified: recovery.VerifiedRecovery,
     path: Path,
 ) -> None:
+    """Clear only this transaction's exact guard metadata."""
     state = update_guard.load(path=path)
     if state is None:
         return
@@ -582,6 +574,7 @@ def _current_target(layout: install.Layout) -> Path:
 
 
 def _rollback_selection(layout: install.Layout, plan: update.UpdatePlan) -> Path:
+    """Accept only the recorded failed candidate, previous release, or quarantine."""
     target = _current_target(layout)
     allowed = {
         Path("releases") / plan.target_release,
@@ -648,6 +641,13 @@ def _activate_previous_while_guarded(
     previous_release: Path,
     runner: Runner,
 ) -> None:
+    """Start/prove the restored previous runtime without weakening normal guard checks.
+
+    The hidden candidate-owned interface is already the lock-aware update
+    controller.  It can activate the previous release's exact pins while the
+    recovery-required guard remains present; normal ``vwctl start`` and systemd
+    entrypoints remain blocked until this runtime has passed HTTPS/status/doctor.
+    """
     with tempfile.TemporaryDirectory(prefix="vwoci-rollback-runtime-") as directory:
         render_root = Path(directory)
         controller = controller_release / "vwctl"
@@ -690,6 +690,7 @@ def apply_prepared(
     record_path: Path | None = None,
     recovery_creator: Callable[..., recovery.VerifiedRecovery] = recovery.create_recovery,
 ) -> Path:
+    """Prepare while healthy, then mutate under one short appliance lock boundary."""
     plan = prepared.plan
     layout = install.Layout(plan.root.resolve())
     guard_path = _guard_path(layout)
@@ -734,6 +735,9 @@ def apply_prepared(
                         release_dir = install.stage_release(exact_source, layout, plan.target_release)
                         _durable_release(release_dir)
                         update._verify_coherent(release_dir, exact_source)
+                        # The .vwrec is durable first, then this exact guard is
+                        # durably published on /var/lib before /etc or /opt
+                        # boot-visible state can change.
                         _engage_transaction_guard(plan, verified, guard_path)
                         snapshot = update_unit_migration.install_units(
                             release_dir,
@@ -749,6 +753,8 @@ def apply_prepared(
                             state_change_possible = exc.state_change_possible
                             raise
                         except (Exception, KeyboardInterrupt):
+                            # An interrupted/abnormal candidate activation is an
+                            # unknown state boundary; fail closed as post-start.
                             state_change_possible = True
                             raise
                         else:
@@ -803,6 +809,8 @@ def apply_prepared(
                         try:
                             current_was_candidate = update._current(layout)[0] == candidate_target
                         except Exception as rollback_exc:
+                            # If the pointer cannot be inspected, restoring the
+                            # recorded previous target is the safe pre-start action.
                             current_was_candidate = True
                             rollback_errors.append(f"current selection inspection: {rollback_exc}")
                         if current_was_candidate:
@@ -819,6 +827,8 @@ def apply_prepared(
                                 rollback_errors.append(f"systemd units: {rollback_exc}")
                         elif release_dir is not None:
                             try:
+                                # Covers an interrupt after install_units returned
+                                # but before its snapshot was assigned to this frame.
                                 update_unit_migration.converge_units(
                                     previous_release,
                                     (release_dir, previous_release),
@@ -873,6 +883,7 @@ def coherent_rollback(
     *,
     runner: Runner = cli.run_command,
 ) -> None:
+    """Restore pre-update data and previous immutable code as one crash-safe lock transaction."""
     storage.verify()
     plan = failure.plan
     layout = install.Layout(plan.root.resolve())
@@ -938,6 +949,8 @@ def coherent_rollback(
                 data_promoted = False
                 switched_old = False
                 try:
+                    # Keep guard-aware candidate code selected until old data is
+                    # durably promoted across every affected filesystem.
                     prepared_restore.promote_locked(runner=runner)
                     data_promoted = True
                     update_unit_migration.converge_units(
@@ -948,6 +961,12 @@ def coherent_rollback(
                     _switch_current(layout, plan.current_target)
                     switched_old = True
                     update._daemon_reload(layout, runner)
+
+                    # The recovery-required guard remains present here.  Start
+                    # the previous release only through the explicit hidden
+                    # update controller, prove HTTPS + status/doctor, then clear
+                    # the exact guard. Normal systemd/vwctl start remains blocked
+                    # until the complete rollback has been health-proven.
                     _activate_previous_while_guarded(candidate_path, expected_previous, runner)
                     _prove_previous(layout, runner)
                     _clear_transaction_guard(plan, failure.verified, guard_path)
@@ -980,6 +999,8 @@ def coherent_rollback(
                         stopped = _stop_candidate_locked(candidate_path, runner)
                         guard_detail = "recovery guard retained"
                         try:
+                            # Covers failures after a clear() unlink reached the
+                            # VFS but its durability barrier failed.
                             _engage_transaction_guard(plan, failure.verified, guard_path)
                         except Exception as guard_exc:
                             guard_detail = f"recovery guard could not be re-engaged ({guard_exc}); current quarantined"
@@ -1003,6 +1024,10 @@ def coherent_rollback(
     if not completed:
         raise UpdateError("coherent rollback did not reach a complete data+code state")
 
+    # The previous runtime has already passed its guarded HTTPS/status/doctor
+    # proof. Reconcile systemd's oneshot/RemainAfterExit state after guard clear.
+    # If this final administrative step fails, restore the exact guard before
+    # returning so a later ordinary start/restart cannot bypass the failure.
     try:
         _start_previous_service(layout, expected_previous, runner)
         _prove_previous(layout, runner)
@@ -1031,6 +1056,7 @@ def reconstruct_failure(
     *,
     root: Path = Path("/"),
 ) -> PersistentStateFailure:
+    """Reconstruct an explicit rollback from candidate/previous/quarantined selection."""
     if not _SHA256.fullmatch(sha256):
         raise UpdateError("--recovery-sha256 must be exactly 64 lowercase hexadecimal characters")
     layout = install.Layout(root.resolve())
@@ -1144,8 +1170,6 @@ def record_check(
         else bool(available)
     )
     resolved_available = resolved_available and error is None
-    if error is None and not resolved_available and not availability_reason:
-        availability_reason = "no project update available"
     resolved_reason = availability_reason if error is None and availability_reason else None
     payload = {
         "schema_version": 1,
