@@ -32,6 +32,7 @@ def snapshot(
         installed = cli.load_versions().version
     except cli.VersionsError:
         installed = "unknown"
+    reason = state.get("availability_reason")
     return {
         "installed": installed,
         "checked_at": checked if isinstance(checked, int) and not isinstance(checked, bool) else None,
@@ -39,5 +40,6 @@ def snapshot(
         "check_stale": age is None or age > MAX_AGE_SECONDS,
         "candidate": state.get("candidate"),
         "available": state.get("available") is True,
+        "availability_reason": reason if isinstance(reason, str) and reason else None,
         "error": state.get("error"),
     }

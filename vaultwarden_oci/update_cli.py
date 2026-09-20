@@ -411,6 +411,37 @@ def _rollback_command(args: argparse.Namespace, ui: UI) -> int:
     return 0
 
 
+def _no_stable_release_result(args: argparse.Namespace, current: str, ui: UI, reason: str) -> int:
+    if args.use_latest:
+        if args.json:
+            print(json.dumps({"schema_version": 1, "error": "--use-latest requires a published stable VaultWarden-OCI project release"}, sort_keys=True), file=sys.stderr)
+        else:
+            print("FAIL: --use-latest requires a published stable VaultWarden-OCI project release", file=sys.stderr)
+        return 1
+    payload = {
+        "schema_version": 1,
+        "current": {"project": current},
+        "candidate": None,
+        "available": False,
+        "availability_reason": reason,
+        "project_release_tag": None,
+        "use_latest": False,
+    }
+    if args.update_command == "check" and getattr(args, "timer", False):
+        update_appliance.record_check(
+            current=current,
+            candidate=None,
+            available=False,
+            availability_reason=reason,
+            error=None,
+        )
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        ui.ok(reason)
+    return 0
+
+
 def _update_command(argv: Sequence[str]) -> int:
     args = _update_parser().parse_args(argv)
     ui = UI(color=False if args.json else None)
@@ -443,6 +474,7 @@ def _update_command(argv: Sequence[str]) -> int:
                         current=prepared.plan.current_release,
                         candidate=prepared.plan.target_release,
                         available=prepared.available,
+                        availability_reason=prepared.availability_reason,
                         error=None,
                     )
                 return 0
@@ -482,6 +514,8 @@ def _update_command(argv: Sequence[str]) -> int:
             else:
                 ui.ok(f"activated and health-gated immutable release {release}")
             return 0
+    except update_appliance.NoStableProjectRelease as exc:
+        return _no_stable_release_result(args, current_for_error, ui, str(exc))
     except (UpdateError, install.InstallError, cli.LockBusyError, storage.StorageError, OSError) as exc:
         if args.update_command == "check" and getattr(args, "timer", False):
             try:
