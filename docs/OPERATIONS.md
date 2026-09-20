@@ -103,6 +103,8 @@ sudo vwctl edge refresh
 sudo vwctl doctor --json
 ```
 
+The managed maintenance timer also runs the same authoritative `vwctl edge refresh` once per day before `vwctl doctor`. This keeps normal long-running hosts inside the 72-hour last-known-good validity window without adding another scheduler or firewall owner. If the current Cloudflare range fetch fails, the existing bounded last-known-good policy may be reused only while it is still valid; when no safe policy remains, the refresh and maintenance unit fail closed rather than silently accepting stale origin rules.
+
 **Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
 ## CrowdSec and Cloudflare remediation

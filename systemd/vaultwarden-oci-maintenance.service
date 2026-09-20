@@ -1,7 +1,8 @@
 [Unit]
-Description=VaultWarden-OCI maintenance diagnostics
+Description=VaultWarden-OCI edge refresh and maintenance diagnostics
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-After=vaultwarden-oci.service
+After=vaultwarden-oci.service network-online.target
+Wants=network-online.target
 OnFailure=vaultwarden-oci-notify@%n.service
 
 [Service]
@@ -9,6 +10,7 @@ Type=oneshot
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+ExecStart=/opt/vaultwarden-oci/current/vwctl edge refresh
 ExecStart=/opt/vaultwarden-oci/current/vwctl doctor
 TimeoutStartSec=180
 NoNewPrivileges=yes

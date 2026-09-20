@@ -1,8 +1,8 @@
 [Unit]
-Description=Run VaultWarden-OCI maintenance diagnostics weekly
+Description=Run VaultWarden-OCI edge refresh and maintenance diagnostics daily
 
 [Timer]
-OnCalendar=Sun *-*-* 04:10:00
+OnCalendar=*-*-* 04:10:00
 Persistent=true
 RandomizedDelaySec=30min
 AccuracySec=5min

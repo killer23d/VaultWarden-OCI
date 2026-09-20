@@ -117,5 +117,25 @@ class SystemdRuntimeContractTests(unittest.TestCase):
                     self.assert_runtime_directory_contract(unit_path)
 
 
+    def test_maintenance_refreshes_edge_daily_before_doctor(self) -> None:
+        unit_path = ROOT / "systemd/vaultwarden-oci-maintenance.service"
+        directives = service_directives(unit_path)
+        self.assertEqual(
+            directives.get("ExecStart"),
+            [
+                "/opt/vaultwarden-oci/current/vwctl edge refresh",
+                "/opt/vaultwarden-oci/current/vwctl doctor",
+            ],
+        )
+        unit = unit_path.read_text(encoding="utf-8")
+        self.assertIn("Wants=network-online.target\n", unit)
+        self.assertIn("After=vaultwarden-oci.service network-online.target\n", unit)
+
+        timer = (ROOT / "systemd/vaultwarden-oci-maintenance.timer").read_text(encoding="utf-8")
+        self.assertIn("OnCalendar=*-*-* 04:10:00\n", timer)
+        self.assertIn("Persistent=true\n", timer)
+        self.assertNotIn("OnCalendar=Sun ", timer)
+
+
 if __name__ == "__main__":
     unittest.main()

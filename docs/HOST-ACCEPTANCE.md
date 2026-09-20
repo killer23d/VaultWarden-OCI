@@ -175,16 +175,21 @@ In addition to exact upstream refs/digests, prove source-aware immutable identit
 
 **PASS:** every supported mutable upstream boundary is resolved once to exact refs/digests; exact release-owned source bytes participate in the frozen identity; cache artifacts do not; no installed image/config/state retains floating `latest` semantics; and supported long-option forms do not bypass setup warning/confirmation semantics.
 
-## 11. Update-check timer, host upgrade, and reboot-required handling
+## 11. Update-check timer, edge maintenance, host upgrade, and reboot-required handling
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
+sudo systemctl start vaultwarden-oci-maintenance.service
+sudo systemctl show vaultwarden-oci-maintenance.service -p Result --value
+sudo vwctl doctor --json
 sudo vwctl timers
 sudo vwctl host-upgrade check
 sudo vwctl host-upgrade apply
 ```
 
-**PASS:** automatic project **check/notification** works without unattended application apply; host package workflow remains separate except for an explicitly documented/tested supported-predecessor compatibility dependency transition from section 9; reboot-required state is surfaced when applicable; no supported path auto-reboots.
+Record the Cloudflare last-known-good age immediately before and after the maintenance invocation. The maintenance unit must refresh the origin policy through `vwctl edge refresh` before running doctor, and the installed maintenance timer must be daily so a continuously running host does not age past the 72-hour last-known-good validity window merely because no operator restarted or manually refreshed it.
+
+**PASS:** the maintenance service reports `success`, the Cloudflare CIDR and iptables checks pass with a newly refreshed policy, all four appliance timers remain healthy, automatic project **check/notification** works without unattended application apply, host package workflow remains separate except for an explicitly documented/tested supported-predecessor compatibility dependency transition from section 9, reboot-required state is surfaced when applicable, and no supported path auto-reboots.
 
 ## 12. CrowdSec split remediation and representative notification path
 
