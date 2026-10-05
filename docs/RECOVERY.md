@@ -59,7 +59,10 @@ sudo vwctl restore
 
 1. Choose local or remote.
 2. Select the recovery point from the newest-first inventory.
-3. Supply the offline Age private identity path.
+3. Supply the matching offline Age private identity through the interactive chooser:
+   - press Enter to paste an `AGE-SECRET-KEY` with input echo disabled;
+   - select an existing identity file from removable media or another secure path; or
+   - select a local encrypted recovery-kit ZIP discovered under `/root/vaultwarden-recovery/`.
 4. Review storage/decryption/manifest/SOPS/free-space/SQLite preflight.
 5. Review the live state that will be replaced.
 6. Type the exact `RESTORE` confirmation.
@@ -83,6 +86,8 @@ sudo vwctl restore \
 ```
 
 A remote object is downloaded once into protected staging; that exact download is verified and restored. All knowable checks run before the mutation boundary/service stop.
+
+Interactive restore and verification display the configured public offline recovery recipient before asking for the matching private identity. The offline private key is **not stored on the appliance by default**. Pasted identities and identities extracted from a recovery-kit ZIP exist only in root-owned protected volatile storage under `/run/vaultwarden-oci`, mode `0600`, and are removed when the command completes, fails, is cancelled, or is interrupted. The operational key at `/etc/vaultwarden-oci/age-key.txt` is a different identity and is not a substitute for offline recovery.
 
 **Expected success:** known restored state is present and `sudo vwctl status` plus `sudo vwctl doctor --json` pass after start. **On failure:** do not manually unpack/promote files. A preflight failure should leave healthy live state untouched; if promotion began, follow the reported recovery boundary.
 
@@ -135,7 +140,13 @@ During first-run setup from an interactive terminal, including terminal-driven `
 
 A fully headless `--auto` run cannot use that generated-key handoff because no operator is present to receive the private identity and passphrase. It must use a pre-existing off-host identity and pass only its public `--offline-recipient`. An explicitly supplied recipient always wins; setup does not silently generate another recovery identity.
 
-Export a later/current kit with an already-custodied offline identity:
+Export a later/current kit interactively:
+
+```bash
+sudo vwctl recovery-kit export
+```
+
+The same secure identity chooser is used here. For automation or headless use, supply the already-custodied identity explicitly:
 
 ```bash
 sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
@@ -143,7 +154,9 @@ sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
 
 The command proves the supplied offline identity matches config, proves both operational/offline identities decrypt the same current SOPS document, prompts twice for an independent passphrase of at least 16 characters, creates AES-256 ZIP encryption, verifies the exact member set/encryption, proves correct-password success and wrong/empty/no-password failure, then atomically publishes the archive. Email, when configured/chosen, happens only after ZIP verification and sends only the encrypted ZIP through the existing authenticated SMTP owner.
 
-**Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP.
+**Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP. Interactive recovery-kit selection also supplies this passphrase with echo disabled and the secure 7-Zip stdin transport; it is never placed in argv or the environment.
+
+For non-TTY restore/verify callers, omission of `--identity` is an immediate error. For non-TTY recovery-kit export, omission of `--offline-identity` is an immediate error. Noninteractive workflows never read `/dev/tty`, choose a local recovery kit automatically, or attempt to recover a private identity on their own.
 
 **Transient-key custody:** after successful first-run handoff, the setup-generated offline private identity must no longer exist on the appliance. If setup reports a failed handoff and says that the transient identity remains in `/run`, secure that exact identity before reboot; losing it can strand recovery material already addressed to its public recipient.
 

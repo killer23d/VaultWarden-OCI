@@ -41,7 +41,26 @@ def main() -> int:
             print(tested.stdout)
             raise RuntimeError(f"correct-password ZIP test failed with exit {tested.returncode}")
         recovery_ux.verify_zip(archive, passphrase)
-    print("PASS: real 7zz stdin AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
+
+        extracted_root = root / "volatile"
+        extracted_root.mkdir(mode=0o700)
+        extracted = recovery_ux._extract_recovery_kit_identity(
+            archive,
+            passphrase,
+            extracted_root,
+        )
+        if extracted.name != recovery_ux.OFFLINE_IDENTITY_MEMBER:
+            raise RuntimeError("recovery-kit extraction selected the wrong member")
+        if extracted.read_text(encoding="utf-8") != (
+            f"acceptance member {recovery_ux.OFFLINE_IDENTITY_MEMBER}\n"
+        ):
+            raise RuntimeError("recovery-kit extracted identity bytes differ")
+        if extracted.stat().st_mode & 0o077:
+            raise RuntimeError("extracted offline identity is not mode 0600")
+    print(
+        "PASS: real 7zz stdin AES-256 ZIP/member/correct-password/wrong-password/"
+        "empty-password/no-password verification and bounded offline-identity extraction"
+    )
     return 0
 
 
