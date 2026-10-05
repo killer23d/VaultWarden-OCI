@@ -103,17 +103,12 @@ class NotificationDay2BoundaryTests(unittest.TestCase):
         with (
             mock.patch("vaultwarden_oci.runtime.load_config", return_value=self.config(notifications=False)),
             mock.patch("vaultwarden_oci.secrets.load", return_value={}) as load_secrets,
-            mock.patch(
-                "vaultwarden_oci.notification.deliver",
-                side_effect=notification.NotificationError("operational notifications are not configured"),
-            ) as deliver,
             redirect_stderr(error),
         ):
             code = cli.main(["notification", "test"])
         self.assertEqual(code, 1)
         self.assertIn("operational notifications are not configured", error.getvalue())
         load_secrets.assert_called_once()
-        deliver.assert_called_once()
 
     def test_notification_doctor_keeps_absent_route_as_skip(self) -> None:
         checks = {
