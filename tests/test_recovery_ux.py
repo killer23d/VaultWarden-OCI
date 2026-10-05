@@ -196,8 +196,7 @@ class OfflineIdentityAcquisitionTests(unittest.TestCase):
             with (
                 mock.patch("builtins.input", return_value=""),
                 mock.patch.object(recovery_ux.getpass, "getpass", return_value=secret) as hidden_prompt,
-                mock.patch("sys.stdin.isatty", return_value=True),
-                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
                 mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
                 contextlib.redirect_stdout(output),
             ):
@@ -218,6 +217,36 @@ class OfflineIdentityAcquisitionTests(unittest.TestCase):
             self.assertNotIn(secret, output.getvalue())
             self.assertFalse(temporary_identity.exists())
             self.assertFalse(temporary_workspace.exists())
+
+    def test_interrupt_after_secure_paste_removes_temporary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sensitive = root / "run"
+            with (
+                mock.patch("builtins.input", return_value=""),
+                mock.patch.object(
+                    recovery_ux.getpass,
+                    "getpass",
+                    return_value="AGE-SECRET-KEY-1INTERRUPT",
+                ),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=sensitive,
+                    ui=recovery_ux.UI(color=False),
+                ) as identity:
+                    self.assertIsNotNone(identity)
+                    assert identity is not None
+                    temporary_identity = identity
+                    temporary_workspace = identity.parent
+                    raise KeyboardInterrupt
+            self.assertFalse(temporary_identity.exists())
+            self.assertFalse(temporary_workspace.exists())
+
 
     def test_mismatched_paste_fails_and_removes_temporary_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -347,8 +376,7 @@ class OfflineIdentityAcquisitionTests(unittest.TestCase):
             with (
                 mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
                 mock.patch.object(recovery_ux.getpass, "getpass", return_value=passphrase),
-                mock.patch("sys.stdin.isatty", return_value=True),
-                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
                 mock.patch.object(recovery_ux, "verify_zip", side_effect=fake_verify),
                 mock.patch.object(recovery_ux, "_seven", side_effect=fake_seven),
                 mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
@@ -381,8 +409,7 @@ class OfflineIdentityAcquisitionTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
-                mock.patch("sys.stdin.isatty", return_value=True),
-                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
                 contextlib.redirect_stdout(output),
             ):
                 with recovery_ux.acquire_offline_identity(
