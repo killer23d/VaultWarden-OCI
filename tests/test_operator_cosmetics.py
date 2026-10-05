@@ -143,6 +143,117 @@ class OperatorCosmeticsTests(unittest.TestCase):
         )
         self.assertIn("Transport: HTTPS API (Mailgun)", context["text"])
 
+    def test_operator_entrypoint_notify_skips_unconfigured_before_secrets_or_delivery(self) -> None:
+        config = SimpleNamespace(
+            notification_provider=None,
+            offline_recovery_recipient="age1" + "a" * 58,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(operator_cosmetics.storage, "verify") as verify_storage,
+            mock.patch.object(operator_cosmetics.runtime, "load_config", return_value=config) as load_config,
+            mock.patch.object(operator_cosmetics.secrets, "load") as load_secrets,
+            mock.patch.object(operator_cosmetics, "_deliver_with_transport_context") as deliver,
+            mock.patch.object(operator_entrypoint.sys, "stdout", output),
+        ):
+            code = operator_entrypoint.main(
+                ["notify", "--event", "vaultwarden-oci-health.service"]
+            )
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "SKIP: operational notifications are not configured",
+            output.getvalue(),
+        )
+        verify_storage.assert_called_once_with()
+        load_config.assert_called_once_with()
+        load_secrets.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_operator_entrypoint_notify_configured_success_preserves_delivery_owner(self) -> None:
+        config = SimpleNamespace(
+            notification_provider="mailgun",
+            offline_recovery_recipient="age1" + "a" * 58,
+        )
+        result = notification.DeliveryResult(
+            "vaultwarden-oci-health.service",
+            "mailgun",
+            "https",
+            "success",
+            "accepted",
+            "ok",
+            "2026-10-05T23:30:00Z",
+        )
+        with (
+            mock.patch.object(operator_cosmetics.storage, "verify"),
+            mock.patch.object(operator_cosmetics.runtime, "load_config", return_value=config),
+            mock.patch.object(operator_cosmetics.secrets, "load", return_value={"email_api_token": "token"}) as load_secrets,
+            mock.patch.object(operator_cosmetics, "_host", return_value="vault.example.test"),
+            mock.patch.object(operator_cosmetics, "_deliver_with_transport_context", return_value=result) as deliver,
+            mock.patch.object(operator_entrypoint.sys, "stdout", io.StringIO()),
+        ):
+            code = operator_entrypoint.main(
+                ["notify", "--event", "vaultwarden-oci-health.service"]
+            )
+        self.assertEqual(code, 0)
+        load_secrets.assert_called_once_with(config.offline_recovery_recipient)
+        deliver.assert_called_once()
+        self.assertEqual(
+            deliver.call_args.kwargs["event_id"],
+            "vaultwarden-oci-health.service",
+        )
+
+    def test_operator_entrypoint_notify_configured_failure_remains_nonzero(self) -> None:
+        config = SimpleNamespace(
+            notification_provider="mailgun",
+            offline_recovery_recipient="age1" + "a" * 58,
+        )
+        error = io.StringIO()
+        with (
+            mock.patch.object(operator_cosmetics.storage, "verify"),
+            mock.patch.object(operator_cosmetics.runtime, "load_config", return_value=config),
+            mock.patch.object(operator_cosmetics.secrets, "load", return_value={"email_api_token": "token"}),
+            mock.patch.object(
+                operator_cosmetics,
+                "_deliver_with_transport_context",
+                side_effect=notification.NotificationError("provider rejected request"),
+            ) as deliver,
+            mock.patch.object(operator_entrypoint.sys, "stderr", error),
+        ):
+            code = operator_entrypoint.main(
+                ["notify", "--event", "vaultwarden-oci-health.service"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("provider rejected request", error.getvalue())
+        deliver.assert_called_once()
+
+    def test_operator_entrypoint_notify_invalid_event_stays_usage_failure(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch.object(operator_cosmetics.runtime, "load_config") as load_config,
+            mock.patch.object(operator_entrypoint.sys, "stderr", error),
+        ):
+            code = operator_entrypoint.main(["notify", "--event", "../bad event"])
+        self.assertEqual(code, 2)
+        self.assertIn("bounded systemd event identifier", error.getvalue())
+        load_config.assert_not_called()
+
+    def test_operator_entrypoint_notification_test_absent_route_stays_failure(self) -> None:
+        config = SimpleNamespace(
+            notification_provider=None,
+            notification_to_email=None,
+            acme_email="admin@example.test",
+            smtp_from_email="vault@example.test",
+            smtp_from_name="Vaultwarden",
+        )
+        error = io.StringIO()
+        with (
+            mock.patch.object(operator_cosmetics, "_load_mail", return_value=(config, {})),
+            mock.patch.object(operator_entrypoint.sys, "stderr", error),
+        ):
+            code = operator_entrypoint.main(["notification", "test"])
+        self.assertEqual(code, 1)
+        self.assertIn("operational notifications are not configured", error.getvalue())
+
     def test_cosmetic_override_routes_supported_human_surfaces_only(self) -> None:
         stream = SimpleNamespace(isatty=lambda: True)
         with (
