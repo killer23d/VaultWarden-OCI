@@ -122,11 +122,13 @@ sudo vwctl recovery list --remote 'REMOTE:vwoci-acceptance'
 
 Record the local `.vwrec` SHA-256 and independently confirm/verify the remote object. Exercise a wrong offline identity first and prove it fails before live mutation. Then exercise guided local restore and guided remote restore on disposable dedicated storage; retain one explicit noninteractive restore case.
 
-**PASS:** offsite success only after remote verification; bad preflight does not stop/corrupt healthy state; valid restore returns known state; operational Age private key is absent from `.vwrec`; status/doctor pass afterward.
+During the human paths, exercise the shared offline-identity chooser: secure paste as the Enter/default choice, a matching identity file, and selection of a local recovery-kit ZIP from `/root/vaultwarden-recovery/`. Confirm the configured public recipient is displayed, pasted/extracted plaintext identity material exists only under protected `/run/vaultwarden-oci` state while needed, and cancellation before final restore confirmation leaves containers untouched. Also capture non-TTY omission failures for `restore` and `recovery verify`; they must name the explicit `--identity` requirement rather than prompting or selecting a kit.
+
+**PASS:** offsite success only after remote verification; bad preflight does not stop/corrupt healthy state; valid restore returns known state; the chooser does not persist the offline identity or leak private material/passphrases; non-TTY behavior remains deterministic; operational Age private key is absent from `.vwrec` and cannot substitute for the offline identity; status/doctor pass afterward.
 
 ## 8. Complete recovery-kit AES-256 ZIP and SMTP email path
 
-Run complete export with the matching offline identity. Also exercise the first-run terminal-generated recovery-kit path from section 1. Inspect process/log/filesystem behavior and exercise SMTP email handoff where a real test account is available.
+Run complete export both through the interactive shared identity chooser and with an explicit `--offline-identity`. Also exercise the first-run terminal-generated recovery-kit path from section 1. Inspect process/log/filesystem behavior and exercise SMTP email handoff where a real test account is available. A non-TTY export with the identity option omitted must fail immediately with actionable `--offline-identity` guidance; it must not auto-select or extract a local kit.
 
 **PASS:** exact documented member set, AES-256 encryption, correct-password test succeeds, wrong/empty/no-password tests fail, passphrase never appears in argv/env/file/email/logs, ZIP verification completes before SMTP, email failure is reported as email failure rather than archive-verification failure, the first-run generated kit contains the generated credential values plus both Age private identities, and the setup-generated offline private identity is removed from host-side volatile storage only after successful custody handoff. If handoff is deliberately declined/fails, the transient identity remains protected and setup reports truthful recovery guidance instead of claiming success.
 

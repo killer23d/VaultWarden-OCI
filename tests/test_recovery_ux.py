@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -183,6 +186,313 @@ class RecoveryInventoryTests(unittest.TestCase):
             self.assertIn(str(artifact), state["verified_objects"])
 
 
+class OfflineIdentityAcquisitionTests(unittest.TestCase):
+    def test_default_secure_paste_is_hidden_validated_0600_and_removed(self) -> None:
+        secret = "AGE-SECRET-KEY-1TEST-PASTE"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sensitive = root / "run"
+            output = io.StringIO()
+            with (
+                mock.patch("builtins.input", return_value=""),
+                mock.patch.object(recovery_ux.getpass, "getpass", return_value=secret) as hidden_prompt,
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
+                contextlib.redirect_stdout(output),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=sensitive,
+                    ui=recovery_ux.UI(color=False),
+                ) as identity:
+                    self.assertIsNotNone(identity)
+                    assert identity is not None
+                    temporary_identity = identity
+                    temporary_workspace = identity.parent
+                    self.assertEqual(stat.S_IMODE(identity.stat().st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(identity.parent.stat().st_mode), 0o700)
+                    self.assertEqual(identity.read_text(encoding="utf-8"), secret + "\n")
+            hidden_prompt.assert_called_once()
+            self.assertNotIn(secret, output.getvalue())
+            self.assertFalse(temporary_identity.exists())
+            self.assertFalse(temporary_workspace.exists())
+
+    def test_interrupt_after_secure_paste_removes_temporary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sensitive = root / "run"
+            with (
+                mock.patch("builtins.input", return_value=""),
+                mock.patch.object(
+                    recovery_ux.getpass,
+                    "getpass",
+                    return_value="AGE-SECRET-KEY-1INTERRUPT",
+                ),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=sensitive,
+                    ui=recovery_ux.UI(color=False),
+                ) as identity:
+                    self.assertIsNotNone(identity)
+                    assert identity is not None
+                    temporary_identity = identity
+                    temporary_workspace = identity.parent
+                    raise KeyboardInterrupt
+            self.assertFalse(temporary_identity.exists())
+            self.assertFalse(temporary_workspace.exists())
+
+
+    def test_mismatched_paste_fails_and_removes_temporary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sensitive = root / "run"
+            with (
+                mock.patch("builtins.input", return_value=""),
+                mock.patch.object(recovery_ux.getpass, "getpass", return_value="AGE-SECRET-KEY-1WRONG"),
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value="age1" + "z" * 58),
+                self.assertRaisesRegex(recovery_ux.RecoveryUXError, "does not match"),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=sensitive,
+                    ui=recovery_ux.UI(color=False),
+                ):
+                    self.fail("mismatched identity must not be yielded")
+            self.assertFalse(any(sensitive.glob("offline-identity-*")))
+
+    def test_identity_file_is_validated_and_external_file_is_not_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = root / "offline.age"
+            identity.write_text("identity\n", encoding="utf-8")
+            answers = iter(["2", str(identity)])
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=root / "run",
+                    ui=recovery_ux.UI(color=False),
+                ) as selected:
+                    self.assertEqual(selected, identity)
+            self.assertTrue(identity.exists())
+
+    def test_identity_file_rejects_missing_symlink_and_wrong_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing.age"
+            target = root / "target.age"
+            target.write_text("identity\n", encoding="utf-8")
+            symlink = root / "link.age"
+            symlink.symlink_to(target)
+
+            for supplied in (missing, symlink):
+                answers = iter(["2", str(supplied)])
+                with (
+                    mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                    mock.patch("sys.stdin.isatty", return_value=True),
+                    mock.patch("sys.stdout.isatty", return_value=True),
+                    self.assertRaises(recovery.RecoveryError),
+                ):
+                    with recovery_ux.acquire_offline_identity(
+                        OFFLINE,
+                        publication_dir=root / "published",
+                        sensitive_root=root / "run",
+                        ui=recovery_ux.UI(color=False),
+                    ):
+                        self.fail("unsafe identity path must not be yielded")
+
+            answers = iter(["2", str(target)])
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value="age1" + "z" * 58),
+                self.assertRaisesRegex(recovery_ux.RecoveryUXError, "does not match"),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=root / "published",
+                    sensitive_root=root / "run",
+                    ui=recovery_ux.UI(color=False),
+                ):
+                    self.fail("wrong identity must not be yielded")
+
+    def test_local_recovery_kit_is_newest_first_extracted_temporarily_and_passphrase_not_in_argv(self) -> None:
+        passphrase = "kit-passphrase-hidden"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            publication = root / "published"
+            publication.mkdir()
+            old = publication / "vaultwarden-recovery-kit-20260820T010000Z.zip"
+            new = publication / "vaultwarden-recovery-kit-20260820T030000Z.zip"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            os.utime(old, (1, 1))
+            os.utime(new, (2, 2))
+            ignored = publication / "not-a-recovery-kit.zip"
+            ignored.write_bytes(b"ignore")
+            symlink = publication / "vaultwarden-recovery-kit-20260820T040000Z.zip"
+            symlink.symlink_to(new)
+            self.assertEqual(recovery_ux._local_recovery_kits(publication), [new, old])
+
+            events: list[str] = []
+            seen_argv: list[tuple[str, ...]] = []
+
+            def fake_verify(archive, supplied_passphrase, *, expected_members):
+                self.assertEqual(archive, new)
+                self.assertEqual(supplied_passphrase, passphrase)
+                self.assertEqual(tuple(expected_members), recovery_ux.KIT_MEMBERS)
+                events.append("verified")
+
+            def fake_seven(argv, *, password_input, cwd=None):
+                del cwd
+                seen_argv.append(tuple(argv))
+                self.assertEqual(password_input, passphrase)
+                self.assertEqual(events, ["verified"])
+                output_dir = Path(next(arg[2:] for arg in argv if arg.startswith("-o")))
+                (output_dir / recovery_ux.OFFLINE_IDENTITY_MEMBER).write_text(
+                    "AGE-SECRET-KEY-1FROMKIT\n",
+                    encoding="utf-8",
+                )
+                events.append("extracted")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            answers = iter(["3", "1"])
+            output = io.StringIO()
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch.object(recovery_ux.getpass, "getpass", return_value=passphrase),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
+                mock.patch.object(recovery_ux, "verify_zip", side_effect=fake_verify),
+                mock.patch.object(recovery_ux, "_seven", side_effect=fake_seven),
+                mock.patch.object(recovery_ux.secrets, "derive_recipient", return_value=OFFLINE),
+                contextlib.redirect_stdout(output),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=publication,
+                    sensitive_root=root / "run",
+                    ui=recovery_ux.UI(color=False),
+                ) as identity:
+                    self.assertIsNotNone(identity)
+                    assert identity is not None
+                    extracted = identity
+                    workspace = identity.parent
+                    self.assertEqual(stat.S_IMODE(identity.stat().st_mode), 0o600)
+                    self.assertEqual(events, ["verified", "extracted"])
+            self.assertFalse(extracted.exists())
+            self.assertFalse(workspace.exists())
+            self.assertTrue(seen_argv)
+            self.assertFalse(any(passphrase in arg for argv in seen_argv for arg in argv))
+            self.assertNotIn(passphrase, output.getvalue())
+
+    def test_no_local_recovery_kit_reports_directory_and_allows_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            publication = root / "published"
+            publication.mkdir()
+            answers = iter(["3", "q"])
+            output = io.StringIO()
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch.object(recovery_ux, "_interactive_tty", return_value=True),
+                contextlib.redirect_stdout(output),
+            ):
+                with recovery_ux.acquire_offline_identity(
+                    OFFLINE,
+                    publication_dir=publication,
+                    sensitive_root=root / "run",
+                    ui=recovery_ux.UI(color=False),
+                ) as identity:
+                    self.assertIsNone(identity)
+            self.assertIn(f"no local recovery-kit ZIPs found under {publication}", output.getvalue())
+
+
+class IdentityCommandRoutingTests(unittest.TestCase):
+    def test_non_tty_omission_fails_with_explicit_identity_guidance(self) -> None:
+        cases = (
+            (["restore", "--file", "/tmp/a.vwrec"], "--identity"),
+            (["recovery", "verify", "--file", "/tmp/a.vwrec"], "--identity"),
+            (["recovery-kit", "export", "--no-email"], "--offline-identity"),
+        )
+        for argv, option in cases:
+            stderr = io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                mock.patch("sys.stdin.isatty", return_value=False),
+                mock.patch("sys.stdout.isatty", return_value=False),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(recovery_ux.main(argv), 1)
+                self.assertIn(option, stderr.getvalue())
+
+    def test_explicit_restore_identity_remains_noninteractive_and_skips_chooser(self) -> None:
+        identity = Path("/tmp/offline.age")
+        artifact = Path("/tmp/a.vwrec")
+        verified = recovery.VerifiedRecovery(artifact, "a" * 64, 1, "2026-08-20T03:00:00Z")
+        with (
+            mock.patch("sys.stdin.isatty", return_value=False),
+            mock.patch("sys.stdout.isatty", return_value=False),
+            mock.patch.object(recovery_ux, "acquire_offline_identity") as chooser,
+            mock.patch.object(recovery_ux.storage, "verify"),
+            mock.patch.object(recovery_ux, "verify_local", return_value=verified),
+            mock.patch.object(
+                recovery_ux.recovery,
+                "restore_recovery",
+                return_value={"created_at": "2026-08-20T03:00:00Z"},
+            ),
+        ):
+            self.assertEqual(
+                recovery_ux.main(
+                    ["restore", "--file", str(artifact), "--identity", str(identity)]
+                ),
+                0,
+            )
+        chooser.assert_not_called()
+
+    def test_interactive_omission_routes_restore_verify_and_kit_export_through_identity_owner(self) -> None:
+        identity = Path("/tmp/offline.age")
+        artifact = Path("/tmp/a.vwrec")
+        verified = recovery.VerifiedRecovery(artifact, "a" * 64, 1, "2026-08-20T03:00:00Z")
+        kit_result = recovery_ux.KitResult(Path("/tmp/kit.zip"), recovery_ux.KIT_MEMBERS, False)
+
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("sys.stdout.isatty", return_value=True),
+            mock.patch.object(
+                recovery_ux,
+                "_offline_identity_for_command",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(identity),
+            ) as owner,
+            mock.patch.object(recovery_ux.storage, "verify"),
+            mock.patch.object(recovery_ux, "verify_local", return_value=verified),
+            mock.patch.object(
+                recovery_ux.recovery,
+                "restore_recovery",
+                return_value={"created_at": verified.created_at},
+            ),
+            mock.patch.object(recovery_ux, "export_recovery_kit", return_value=kit_result),
+        ):
+            self.assertEqual(recovery_ux.main(["restore", "--file", str(artifact)]), 0)
+            self.assertEqual(recovery_ux.main(["recovery", "verify", "--file", str(artifact)]), 0)
+            self.assertEqual(recovery_ux.main(["recovery-kit", "export", "--no-email"]), 0)
+        self.assertEqual(owner.call_count, 3)
+
+
 class GuidedRestoreTests(unittest.TestCase):
     def test_guided_selection_restores_selected_point_only_after_confirmation(self) -> None:
         points = [
@@ -190,12 +500,17 @@ class GuidedRestoreTests(unittest.TestCase):
             recovery_ux.RecoveryPoint("local", "old.vwrec", "/backups/old.vwrec", 1, "2026-08-20T01:00:00Z", "previously-verified"),
         ]
         verified = recovery.VerifiedRecovery(Path(points[1].location), "a" * 64, 1, points[1].created_at)
-        answers = iter(["1", "2", "/tmp/offline.age", "RESTORE"])
+        answers = iter(["1", "2", "RESTORE"])
         with (
             mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
             mock.patch("sys.stdin.isatty", return_value=True),
             mock.patch("sys.stdout.isatty", return_value=True),
             mock.patch.object(recovery_ux, "list_local", return_value=points),
+            mock.patch.object(
+                recovery_ux,
+                "_offline_identity_for_command",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(Path("/tmp/offline.age")),
+            ),
             mock.patch.object(recovery_ux.storage, "verify"),
             mock.patch.object(recovery_ux, "verify_local", return_value=verified),
             mock.patch.object(recovery, "restore_recovery", return_value={"created_at": points[1].created_at}) as restore,
@@ -207,12 +522,17 @@ class GuidedRestoreTests(unittest.TestCase):
     def test_guided_cancellation_after_preflight_never_mutates(self) -> None:
         point = recovery_ux.RecoveryPoint("local", "one.vwrec", "/backups/one.vwrec", 1, "2026-08-20T01:00:00Z", "previously-verified")
         verified = recovery.VerifiedRecovery(Path(point.location), "a" * 64, 1, point.created_at)
-        answers = iter(["1", "1", "/tmp/offline.age", "NO"])
+        answers = iter(["1", "1", "NO"])
         with (
             mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
             mock.patch("sys.stdin.isatty", return_value=True),
             mock.patch("sys.stdout.isatty", return_value=True),
             mock.patch.object(recovery_ux, "list_local", return_value=[point]),
+            mock.patch.object(
+                recovery_ux,
+                "_offline_identity_for_command",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(Path("/tmp/offline.age")),
+            ),
             mock.patch.object(recovery_ux.storage, "verify"),
             mock.patch.object(recovery_ux, "verify_local", return_value=verified),
             mock.patch.object(recovery, "restore_recovery") as restore,

@@ -15,23 +15,26 @@ import stat
 import sys
 import tempfile
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from . import notification, recovery, runtime, secrets, sevenzip_secure, storage
 
 PUBLICATION_DIR = Path("/root/vaultwarden-recovery")
 SENSITIVE_RUN = Path("/run/vaultwarden-oci")
+OFFLINE_IDENTITY_MEMBER = "offline-recovery-identity.txt"
 KIT_MEMBERS = (
     "README.txt",
     "config.toml",
     "credentials.txt",
     "operational-age-identity.txt",
-    "offline-recovery-identity.txt",
+    OFFLINE_IDENTITY_MEMBER,
 )
 _RECOVERY_NAME = re.compile(r"recovery-(\d{8}T\d{6}Z)-[A-Za-z0-9]+\.vwrec$")
+_KIT_NAME = re.compile(r"vaultwarden-recovery-kit-\d{8}T\d{6}Z\.zip$")
 _LABELS = {
     "vaultwarden_admin_token": "Vaultwarden admin token",
     "admin_basic_auth_password": "Caddy admin Basic Auth password",
@@ -329,6 +332,222 @@ def _choice(prompt: str, count: int) -> int | None:
     return value - 1
 
 
+def _interactive_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _validate_offline_identity(
+    identity: Path,
+    configured_recipient: str,
+    *,
+    runner: recovery.Runner = recovery.run_command,
+) -> Path:
+    recovery._ensure_regular(identity, "offline recovery identity", nonempty=True)
+    try:
+        derived = secrets.derive_recipient(identity, runner=runner)
+    except secrets.SecretsError as exc:
+        raise RecoveryUXError("supplied offline recovery identity is not a valid Age private identity") from exc
+    if derived != configured_recipient:
+        raise RecoveryUXError(
+            "supplied identity does not match the configured offline recovery recipient"
+        )
+    return identity
+
+
+def _local_recovery_kits(publication_dir: Path = PUBLICATION_DIR) -> list[Path]:
+    try:
+        root_info = publication_dir.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RecoveryUXError(f"cannot inspect recovery-kit directory {publication_dir}: {exc}") from exc
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise RecoveryUXError(f"recovery-kit publication path must be a directory: {publication_dir}")
+
+    candidates: list[tuple[int, str, Path]] = []
+    try:
+        entries = list(publication_dir.iterdir())
+    except OSError as exc:
+        raise RecoveryUXError(f"cannot list recovery-kit directory {publication_dir}: {exc}") from exc
+    for entry in entries:
+        if not _KIT_NAME.fullmatch(entry.name):
+            continue
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            continue
+        candidates.append((info.st_mtime_ns, entry.name, entry))
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in candidates]
+
+
+def _print_local_recovery_kits(candidates: Sequence[Path]) -> None:
+    for index, archive in enumerate(candidates, 1):
+        stamp = datetime.fromtimestamp(archive.lstat().st_mtime, timezone.utc).replace(microsecond=0)
+        print(f"  {index}) {stamp.isoformat().replace('+00:00', 'Z')}  {archive}")
+
+
+def _write_private_identity(path: Path, secret: str) -> None:
+    value = secret.strip()
+    if not value:
+        raise RecoveryUXError("offline recovery private identity is required")
+    if not value.startswith("AGE-SECRET-KEY-"):
+        raise RecoveryUXError("pasted value is not an AGE-SECRET-KEY private identity")
+    if any(character in value for character in "\0\r\n"):
+        raise RecoveryUXError("pasted offline recovery private identity contains unsupported control characters")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value)
+            handle.write("\n")
+        os.chmod(path, 0o600)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    if stat.S_IMODE(path.lstat().st_mode) != 0o600:
+        path.unlink(missing_ok=True)
+        raise RecoveryUXError("cannot establish mode 0600 on temporary offline recovery identity")
+
+
+def _new_identity_workspace(sensitive_root: Path) -> Path:
+    _safe_private_dir(sensitive_root, require_root_owner=sensitive_root == SENSITIVE_RUN)
+    workspace = Path(tempfile.mkdtemp(prefix="offline-identity-", dir=str(sensitive_root)))
+    os.chmod(workspace, 0o700)
+    info = workspace.lstat()
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RecoveryUXError("cannot establish mode 0700 on temporary recovery identity workspace")
+    if sensitive_root == SENSITIVE_RUN and info.st_uid != 0:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise RecoveryUXError("temporary recovery identity workspace must be root-owned")
+    return workspace
+
+
+def _cleanup_identity_workspace(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise RecoveryUXError(f"failed to remove temporary offline recovery identity workspace: {path}") from exc
+    if path.exists() or path.is_symlink():
+        raise RecoveryUXError(f"temporary offline recovery identity workspace still exists after cleanup: {path}")
+
+
+def _extract_recovery_kit_identity(archive: Path, passphrase: str, workspace: Path) -> Path:
+    recovery._ensure_regular(archive, "recovery-kit ZIP", nonempty=True)
+    verify_zip(archive, passphrase, expected_members=KIT_MEMBERS)
+    result = _seven(
+        ["7zz", "e", "-p", str(archive), OFFLINE_IDENTITY_MEMBER, f"-o{workspace}", "-y"],
+        password_input=passphrase,
+    )
+    if result.returncode != 0:
+        raise RecoveryUXError(f"recovery-kit identity extraction failed (7zz exit {result.returncode})")
+    identity = workspace / OFFLINE_IDENTITY_MEMBER
+    recovery._ensure_regular(identity, "recovery-kit offline recovery identity", nonempty=True)
+    os.chmod(identity, 0o600)
+    if stat.S_IMODE(identity.lstat().st_mode) != 0o600:
+        raise RecoveryUXError("cannot establish mode 0600 on extracted offline recovery identity")
+    return identity
+
+
+@contextmanager
+def acquire_offline_identity(
+    configured_recipient: str,
+    *,
+    publication_dir: Path = PUBLICATION_DIR,
+    sensitive_root: Path = SENSITIVE_RUN,
+    runner: recovery.Runner = recovery.run_command,
+    ui: UI | None = None,
+) -> Iterator[Path | None]:
+    if not _interactive_tty():
+        raise RecoveryUXError("interactive offline recovery identity selection requires a TTY")
+    ui = ui or UI()
+    ui.header("Offline recovery identity")
+    print("The offline private key is not stored on this appliance by default.")
+    print("\nConfigured recovery recipient:")
+    print(f"  {configured_recipient}")
+    workspace: Path | None = None
+    try:
+        while True:
+            print("\nChoose how to provide the matching private identity:")
+            print("  1) Paste AGE-SECRET-KEY securely")
+            print("  2) Use an identity file")
+            print("  3) Use a local recovery-kit ZIP")
+            print("  q) Cancel")
+            answer = input("Choice [1]: ").strip().lower()
+            if answer in {"q", "quit", "cancel"}:
+                yield None
+                return
+            if answer in {"", "1"}:
+                secret = getpass.getpass("Paste AGE-SECRET-KEY (input hidden): ")
+                workspace = _new_identity_workspace(sensitive_root)
+                identity = workspace / OFFLINE_IDENTITY_MEMBER
+                _write_private_identity(identity, secret)
+                yield _validate_offline_identity(identity, configured_recipient, runner=runner)
+                return
+            if answer == "2":
+                raw = input("Offline Age private identity file (or q to cancel): ").strip()
+                if raw.lower() in {"q", "quit", "cancel"}:
+                    yield None
+                    return
+                if not raw:
+                    raise RecoveryUXError("offline Age identity file path is required")
+                identity = Path(raw).expanduser()
+                yield _validate_offline_identity(identity, configured_recipient, runner=runner)
+                return
+            if answer == "3":
+                candidates = _local_recovery_kits(publication_dir)
+                if not candidates:
+                    ui.warn(f"no local recovery-kit ZIPs found under {publication_dir}")
+                    continue
+                ui.header("Local recovery-kit ZIPs (newest first)")
+                _print_local_recovery_kits(candidates)
+                selected = _choice("Choose recovery-kit number (or q to cancel): ", len(candidates))
+                if selected is None:
+                    yield None
+                    return
+                passphrase = getpass.getpass("Recovery-kit ZIP passphrase (input hidden): ")
+                if not passphrase:
+                    raise RecoveryUXError("recovery-kit ZIP passphrase is required")
+                workspace = _new_identity_workspace(sensitive_root)
+                identity = _extract_recovery_kit_identity(candidates[selected], passphrase, workspace)
+                yield _validate_offline_identity(identity, configured_recipient, runner=runner)
+                return
+            ui.warn("choose 1, 2, 3, or q")
+    finally:
+        if workspace is not None:
+            _cleanup_identity_workspace(workspace)
+
+
+@contextmanager
+def _offline_identity_for_command(
+    explicit_identity: Path | None,
+    *,
+    option_name: str,
+    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
+    runner: recovery.Runner = recovery.run_command,
+    ui: UI | None = None,
+) -> Iterator[Path | None]:
+    if explicit_identity is not None:
+        yield explicit_identity
+        return
+    if not _interactive_tty():
+        raise RecoveryUXError(
+            f"offline recovery identity is required for non-TTY use; pass {option_name} /path/to/key"
+        )
+    config = runtime.load_config(paths.config)
+    with acquire_offline_identity(
+        config.offline_recovery_recipient,
+        runner=runner,
+        ui=ui,
+    ) as identity:
+        yield identity
+
+
 def _restore_summary(point: RecoveryPoint, verified: recovery.VerifiedRecovery, ui: UI) -> None:
     ui.header("Restore preflight complete")
     ui.ok(f"recovery point cryptography, manifest, checksums, and SOPS custody verified ({verified.created_at})")
@@ -382,48 +601,54 @@ def guided_restore(
         ui.info("restore cancelled; no live state was changed")
         return 0
     point = points[selected_index]
-    identity_text = input("Offline Age private identity file: ").strip()
-    if not identity_text:
-        raise RecoveryUXError("offline Age identity file is required")
-    identity = Path(identity_text)
-
-    # The wrapper verifies storage before dispatch, and guided restore proves it
-    # again immediately before any restore transaction for a fail-closed human path.
-    storage.verify()
-
-    if point.source == "local":
-        artifact = Path(point.location)
-        verified = verify_local(artifact, identity, paths=paths, runner=runner)
-        _restore_summary(point, verified, ui)
-        if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
-            ui.info("restore cancelled after preflight; no live state was changed")
+    with _offline_identity_for_command(
+        None,
+        option_name="--identity",
+        paths=paths,
+        runner=runner,
+        ui=ui,
+    ) as identity:
+        if identity is None:
+            ui.info("restore cancelled; no live state was changed")
             return 0
-        manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
-    else:
-        paths.backups.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="vwrec-guided-remote-", dir=str(paths.backups)) as directory:
-            artifact = recovery.download_remote(point.location, Path(directory) / point.name, runner=runner)
-            verified = verify_local(
-                artifact,
-                identity,
-                paths=paths,
-                runner=runner,
-                state_location=point.location,
-                record=True,
-            )
+
+        # The wrapper verifies storage before dispatch, and guided restore proves it
+        # again immediately before any restore transaction for a fail-closed human path.
+        storage.verify()
+
+        if point.source == "local":
+            artifact = Path(point.location)
+            verified = verify_local(artifact, identity, paths=paths, runner=runner)
             _restore_summary(point, verified, ui)
             if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
                 ui.info("restore cancelled after preflight; no live state was changed")
                 return 0
             manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
+        else:
+            paths.backups.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="vwrec-guided-remote-", dir=str(paths.backups)) as directory:
+                artifact = recovery.download_remote(point.location, Path(directory) / point.name, runner=runner)
+                verified = verify_local(
+                    artifact,
+                    identity,
+                    paths=paths,
+                    runner=runner,
+                    state_location=point.location,
+                    record=True,
+                )
+                _restore_summary(point, verified, ui)
+                if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
+                    ui.info("restore cancelled after preflight; no live state was changed")
+                    return 0
+                manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
 
-    ui.ok(f"restored recovery point created {manifest['created_at']}")
-    if not start:
-        ui.action("services remain stopped; run 'vwctl start' when ready")
-    return 0
+        ui.ok(f"restored recovery point created {manifest['created_at']}")
+        if not start:
+            ui.action("services remain stopped; run 'vwctl start' when ready")
+        return 0
 
 
-def _safe_private_dir(path: Path) -> None:
+def _safe_private_dir(path: Path, *, require_root_owner: bool = False) -> None:
     if path.exists() or path.is_symlink():
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -434,6 +659,8 @@ def _safe_private_dir(path: Path) -> None:
     info = path.lstat()
     if stat.S_IMODE(info.st_mode) != 0o700:
         raise RecoveryUXError(f"cannot establish mode 0700 on protected recovery path: {path}")
+    if require_root_owner and info.st_uid != 0:
+        raise RecoveryUXError(f"protected recovery path must be root-owned: {path}")
 
 
 def _private_copy(source: Path, destination: Path) -> None:
@@ -749,7 +976,11 @@ def _parser() -> argparse.ArgumentParser:
     source = restore.add_mutually_exclusive_group()
     source.add_argument("--file", type=Path)
     source.add_argument("--from-remote")
-    restore.add_argument("--identity", type=Path)
+    restore.add_argument(
+        "--identity",
+        type=Path,
+        help="offline Age private identity file; interactive omission opens the secure source chooser",
+    )
     restore.add_argument("--start", action="store_true")
 
     recovery_cmd = commands.add_parser("recovery", help="recovery inventory, verification, and retention")
@@ -760,7 +991,11 @@ def _parser() -> argparse.ArgumentParser:
     verify_source = verify.add_mutually_exclusive_group(required=True)
     verify_source.add_argument("--file", type=Path)
     verify_source.add_argument("--from-remote")
-    verify.add_argument("--identity", required=True, type=Path)
+    verify.add_argument(
+        "--identity",
+        type=Path,
+        help="offline Age private identity file; interactive omission opens the secure source chooser",
+    )
     prune = recovery_commands.add_parser("prune", help="plan or execute explicit remote recovery pruning")
     prune.add_argument("--remote", required=True)
     prune.add_argument("--keep-last", required=True, type=int)
@@ -771,9 +1006,8 @@ def _parser() -> argparse.ArgumentParser:
     export = kit_commands.add_parser("export", help="export a complete verified AES-256 recovery-kit ZIP")
     export.add_argument(
         "--offline-identity",
-        required=True,
         type=Path,
-        help="matching off-host Age private identity; required because it cannot be recreated later",
+        help="matching off-host Age private identity file; interactive omission opens the secure source chooser",
     )
     export.add_argument("--no-email", action="store_true", help="do not offer authenticated SMTP delivery")
     return parser
@@ -788,18 +1022,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.identity is not None:
                     raise RecoveryUXError("--identity requires an explicit --file/--from-remote source, or omit it for guided restore")
                 return guided_restore(start=args.start, ui=ui)
-            if args.identity is None:
-                raise RecoveryUXError("explicit restore requires --identity")
-            storage.verify()
-            if args.file is not None:
-                verify_local(args.file, args.identity)
-                manifest = recovery.restore_recovery(args.file, args.identity, start=args.start)
-            else:
-                manifest = restore_remote_once(args.from_remote, args.identity, start=args.start)
-            ui.ok(f"restored recovery point created {manifest['created_at']}")
-            if not args.start:
-                ui.action("services remain stopped; run 'vwctl start' when ready")
-            return 0
+            with _offline_identity_for_command(
+                args.identity,
+                option_name="--identity",
+                ui=ui,
+            ) as identity:
+                if identity is None:
+                    ui.info("restore cancelled; no live state was changed")
+                    return 0
+                storage.verify()
+                if args.file is not None:
+                    verify_local(args.file, identity)
+                    manifest = recovery.restore_recovery(args.file, identity, start=args.start)
+                else:
+                    manifest = restore_remote_once(args.from_remote, identity, start=args.start)
+                ui.ok(f"restored recovery point created {manifest['created_at']}")
+                if not args.start:
+                    ui.action("services remain stopped; run 'vwctl start' when ready")
+                return 0
 
         if args.command == "recovery":
             if args.recovery_command == "list":
@@ -810,18 +1050,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print_inventory(list_remote_points(args.remote))
                 return 0
             if args.recovery_command == "verify":
-                storage.verify()
-                if args.file is not None:
-                    verified = verify_local(args.file, args.identity)
-                    location = str(args.file)
-                else:
-                    verified = verify_remote(args.from_remote, args.identity)
-                    location = args.from_remote
-                ui.ok(
-                    f"verified recovery {location} created={verified.created_at} "
-                    f"size={verified.size} sha256={verified.sha256}"
-                )
-                return 0
+                with _offline_identity_for_command(
+                    args.identity,
+                    option_name="--identity",
+                    ui=ui,
+                ) as identity:
+                    if identity is None:
+                        ui.info("recovery verification cancelled; no live state was changed")
+                        return 0
+                    storage.verify()
+                    if args.file is not None:
+                        verified = verify_local(args.file, identity)
+                        location = str(args.file)
+                    else:
+                        verified = verify_remote(args.from_remote, identity)
+                        location = args.from_remote
+                    ui.ok(
+                        f"verified recovery {location} created={verified.created_at} "
+                        f"size={verified.size} sha256={verified.sha256}"
+                    )
+                    return 0
             if args.recovery_command == "prune":
                 decision = recovery.prune_remote(args.remote, args.keep_last, confirm=args.confirm)
                 print("Keep:")
@@ -837,15 +1085,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
 
         if args.command == "recovery-kit":
+            if args.offline_identity is None and not _interactive_tty():
+                raise RecoveryUXError(
+                    "offline recovery identity is required for non-TTY use; "
+                    "pass --offline-identity /path/to/key"
+                )
             if not sys.stdin.isatty():
                 raise RecoveryUXError("recovery-kit export requires an interactive TTY for the independent ZIP passphrase")
-            result = export_recovery_kit(args.offline_identity, offer_email=not args.no_email)
-            ui.ok(f"verified complete recovery kit: {result.archive}")
-            ui.info("the ZIP contains credential custody material; it is not a .vwrec application recovery point")
-            ui.info("store the ZIP passphrase separately; it was not written to disk or email")
-            if result.emailed:
-                ui.ok("verified ZIP delivered through authenticated SMTP")
-            return 0
+            with _offline_identity_for_command(
+                args.offline_identity,
+                option_name="--offline-identity",
+                ui=ui,
+            ) as identity:
+                if identity is None:
+                    ui.info("recovery-kit export cancelled; no credential kit was created")
+                    return 0
+                result = export_recovery_kit(identity, offer_email=not args.no_email)
+                ui.ok(f"verified complete recovery kit: {result.archive}")
+                ui.info("the ZIP contains credential custody material; it is not a .vwrec application recovery point")
+                ui.info("store the ZIP passphrase separately; it was not written to disk or email")
+                if result.emailed:
+                    ui.ok("verified ZIP delivered through authenticated SMTP")
+                return 0
     except (
         RecoveryUXError,
         notification.NotificationError,
