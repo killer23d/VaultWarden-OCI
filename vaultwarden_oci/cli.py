@@ -697,6 +697,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         try:
             config = runtime.load_config()
+            if not config.notification_provider:
+                print("SKIP: operational notifications are not configured")
+                return 0
             values = secrets.load(config.offline_recovery_recipient)
             result = notification.deliver(
                 event_id=args.event,
