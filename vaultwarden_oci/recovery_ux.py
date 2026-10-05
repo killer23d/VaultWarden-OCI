@@ -385,7 +385,7 @@ def _local_recovery_kits(publication_dir: Path = PUBLICATION_DIR) -> list[Path]:
 
 def _print_local_recovery_kits(candidates: Sequence[Path]) -> None:
     for index, archive in enumerate(candidates, 1):
-        stamp = datetime.fromtimestamp(archive.stat().st_mtime, timezone.utc).replace(microsecond=0)
+        stamp = datetime.fromtimestamp(archive.lstat().st_mtime, timezone.utc).replace(microsecond=0)
         print(f"  {index}) {stamp.isoformat().replace('+00:00', 'Z')}  {archive}")
 
 

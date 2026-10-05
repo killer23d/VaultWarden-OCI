@@ -146,11 +146,13 @@ Export a later/current kit interactively:
 sudo vwctl recovery-kit export
 ```
 
-The same secure identity chooser is used here. For automation or headless use, supply the already-custodied identity explicitly:
+The same secure identity chooser is used here. You can also supply the already-custodied identity explicitly:
 
 ```bash
 sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
 ```
+
+This keeps identity selection explicit for scripted wrappers, but recovery-kit export itself remains an interactive TTY workflow because its independent ZIP passphrase is entered and confirmed securely at run time.
 
 The command proves the supplied offline identity matches config, proves both operational/offline identities decrypt the same current SOPS document, prompts twice for an independent passphrase of at least 16 characters, creates AES-256 ZIP encryption, verifies the exact member set/encryption, proves correct-password success and wrong/empty/no-password failure, then atomically publishes the archive. Email, when configured/chosen, happens only after ZIP verification and sends only the encrypted ZIP through the existing authenticated SMTP owner.
 
