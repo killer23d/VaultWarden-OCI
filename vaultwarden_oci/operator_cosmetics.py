@@ -247,7 +247,12 @@ def notify_failure(event: str) -> int:
         print("FAIL: --event must be a bounded systemd event identifier", file=sys.stderr)
         return 2
     try:
-        config, values = _load_mail()
+        storage.verify()
+        config = runtime.load_config()
+        if not config.notification_provider:
+            print("SKIP: operational notifications are not configured")
+            return 0
+        values = secrets.load(config.offline_recovery_recipient)
         host = _host()
         result = _deliver_with_transport_context(
             event_id=event,
