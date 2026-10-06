@@ -1,7 +1,7 @@
 [Unit]
 Description=VaultWarden-OCI Cloudflare DNS synchronization
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-After=network-online.target
+After=vaultwarden-oci.service network-online.target
 Wants=network-online.target
 OnFailure=vaultwarden-oci-notify@%n.service
 
