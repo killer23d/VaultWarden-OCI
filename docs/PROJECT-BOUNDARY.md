@@ -42,6 +42,8 @@ Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. Do not genera
 
 That is distinct from origin protection. The host-level `DOCKER-USER` path still validates Cloudflare IPv4/IPv6 ranges and permits published HTTPS only from those source ranges. The trusted-proxy module does not replace this fail-closed origin firewall.
 
+The configured Vaultwarden hostname has one bounded Cloudflare DNS publication owner under `vwctl`. It may synchronize only one pre-existing proxied IPv4 A record to the host's validated public IPv4, using the existing encrypted `cloudflare_api_token`; it must not introduce a second domain/zone/credential authority, expose the token through argv/environment/logs, silently create ambiguous records, take ownership of explicit AAAA records, or make a DNS-only origin public.
+
 CrowdSec has two deliberately non-overlapping remediation roles. The Cloudflare Worker receives locally generated proxied web-client decisions and acts at the edge where the real client IP is enforceable. The firewall bouncer may consume broader CrowdSec/community/list decisions for host services, but is constrained to nftables `input`; Docker forwarding and `DOCKER-USER` remain owned only by the Cloudflare origin-filter path above.
 
 Preserve lightweight `/admin` defense in depth: Vaultwarden's admin token plus Caddy-side rate limiting and one simple outer authentication gate. Do not add an enterprise identity stack or redundant authentication layers.
