@@ -23,6 +23,7 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
 
         rendered = output.getvalue()
         ordered = (
+            "ACTION run: sudo vwctl dns update to publish the configured hostname to this host",
             "ACTION run: sudo vwctl crowdsec setup",
             "ACTION run: sudo vwctl crowdsec remediation-start",
             "ACTION then run: sudo vwctl crowdsec confirm-fail-open",
@@ -37,6 +38,7 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("when doctor is ready", rendered)
         self.assertIn("sudo vwctl notification test --smtp", rendered)
+        self.assertLess(rendered.index("sudo vwctl dns update"), rendered.index("sudo vwctl start"))
         self.assertIn("offsite/rclone recovery is expected", rendered)
 
     def test_explicit_recipient_public_setup_uses_same_completion_path(self) -> None:
