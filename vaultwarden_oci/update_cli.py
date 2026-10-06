@@ -11,7 +11,7 @@ from typing import Sequence
 from . import cli, install, storage, update, update_appliance, update_guard
 from .update_versions import UpdateError, resolve_pinned_file
 
-_STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "crowdsec", "notify", "notification"}
+_STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "dns", "crowdsec", "notify", "notification"}
 _STORAGE_DOCTOR_ID = "storage.dedicated"
 if _STORAGE_DOCTOR_ID not in cli.DOCTOR_CHECK_IDS:
     position = cli.DOCTOR_CHECK_IDS.index("runtime.paths") + 1
