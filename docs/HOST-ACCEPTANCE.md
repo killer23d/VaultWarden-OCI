@@ -189,9 +189,9 @@ sudo vwctl host-upgrade check
 sudo vwctl host-upgrade apply
 ```
 
-Exercise the DNS synchronization service/timer and require the configured hostname to match the host's validated public IPv4 with one proxied A record and no explicit AAAA ownership. Record the Cloudflare last-known-good age immediately before and after the maintenance invocation. The maintenance unit must refresh the origin policy through `vwctl edge refresh` before running doctor, and the installed maintenance timer must be daily so a continuously running host does not age past the 72-hour last-known-good validity window merely because no operator restarted or manually refreshed it.
+Exercise the five-minute health service's DNS synchronization path and require the configured hostname to match the host's validated public IPv4 with one proxied A record and no explicit AAAA ownership. Record the Cloudflare last-known-good age immediately before and after the maintenance invocation. The maintenance unit must refresh the origin policy through `vwctl edge refresh` before running doctor, and the installed maintenance timer must be daily so a continuously running host does not age past the 72-hour last-known-good validity window merely because no operator restarted or manually refreshed it.
 
-**PASS:** the maintenance service reports `success`, the Cloudflare CIDR and iptables checks pass with a newly refreshed policy, all five appliance timers remain healthy, automatic project **check/notification** works without unattended application apply, host package workflow remains separate except for an explicitly documented/tested supported-predecessor compatibility dependency transition from section 9, reboot-required state is surfaced when applicable, and no supported path auto-reboots.
+**PASS:** the maintenance service reports `success`, the Cloudflare CIDR and iptables checks pass with a newly refreshed policy, all four appliance timers remain healthy, automatic project **check/notification** works without unattended application apply, host package workflow remains separate except for an explicitly documented/tested supported-predecessor compatibility dependency transition from section 9, reboot-required state is surfaced when applicable, and no supported path auto-reboots.
 
 ## 12. CrowdSec split remediation and representative notification path
 
