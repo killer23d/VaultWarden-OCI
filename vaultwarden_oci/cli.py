@@ -399,6 +399,7 @@ def _parser() -> argparse.ArgumentParser:
     dns_commands.add_parser("status", help="show current public IPv4 and Cloudflare A-record state")
     dns_update = dns_commands.add_parser("update", help="synchronize the existing proxied A record to this host")
     dns_update.add_argument("--dry-run", action="store_true", help="report whether the A record would change without mutation")
+    dns_update.add_argument("--timer", action="store_true", help=argparse.SUPPRESS)
 
     crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
     crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
@@ -682,11 +683,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{before.record_ipv4} -> {result.after.record_ipv4} (proxied=true)"
                 )
             return 0
+        except LockBusyError as exc:
+            if getattr(args, "timer", False):
+                print(f"SKIP: DNS synchronization deferred because another vwctl mutation owns the lock: {exc}")
+                return 0
+            print(f"FAIL: DNS operation failed: {exc}", file=sys.stderr)
+            return 1
         except (
             dns_publication.DNSError,
             runtime.RuntimeConfigError,
             secrets.SecretsError,
-            LockBusyError,
             RuntimeError,
             OSError,
         ) as exc:
