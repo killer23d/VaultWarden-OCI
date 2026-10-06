@@ -189,6 +189,7 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
         )
     ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
     ui.action("run: sudo vwctl secrets validate")
+    ui.action("run: sudo vwctl dns update to publish the configured hostname to this host")
     ui.action("run: sudo vwctl notification test --smtp to verify the shared SMTP transport")
     ui.action("run: sudo vwctl crowdsec setup")
     ui.action("run: sudo vwctl crowdsec remediation-start")
