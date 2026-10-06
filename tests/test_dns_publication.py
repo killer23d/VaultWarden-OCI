@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import unittest
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from unittest import mock
 
-from vaultwarden_oci import dns_publication
+from vaultwarden_oci import cli, dns_publication
 
 
 TOKEN = "cfut_" + "a" * 40
@@ -243,6 +244,49 @@ class UpdateTests(unittest.TestCase):
 
         self.assertEqual(context, (DOMAIN, "8.8.8.8", TOKEN, ZONE))
         resolve.assert_called_once_with(DOMAIN, TOKEN)
+
+
+class CliTimerTests(unittest.TestCase):
+    def test_timer_mode_skips_lock_contention_without_masking_other_failures(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                dns_publication,
+                "update",
+                side_effect=cli.LockBusyError("busy"),
+            ),
+            redirect_stdout(output),
+        ):
+            code = cli.main(["dns", "update", "--timer"])
+        self.assertEqual(code, 0)
+        self.assertIn("SKIP:", output.getvalue())
+
+        error = io.StringIO()
+        with (
+            mock.patch.object(
+                dns_publication,
+                "update",
+                side_effect=cli.LockBusyError("busy"),
+            ),
+            redirect_stderr(error),
+        ):
+            code = cli.main(["dns", "update"])
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL:", error.getvalue())
+
+    def test_timer_mode_does_not_mask_real_dns_failure(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch.object(
+                dns_publication,
+                "update",
+                side_effect=dns_publication.DNSError("bad DNS shape"),
+            ),
+            redirect_stderr(error),
+        ):
+            code = cli.main(["dns", "update", "--timer"])
+        self.assertEqual(code, 1)
+        self.assertIn("bad DNS shape", error.getvalue())
 
 
 if __name__ == "__main__":
