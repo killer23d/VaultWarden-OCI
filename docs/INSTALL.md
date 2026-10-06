@@ -31,7 +31,7 @@ Create Cloudflare credentials before starting an interactive first-run so the va
 
 Use **two separate Cloudflare user API tokens**:
 
-- `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
+- `cloudflare_api_token` is the narrow Caddy DNS-01 and Vaultwarden hostname publication token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname. The DNS updater discovers the zone dynamically; do not store a second zone-ID authority.
 - `cloudflare_remediation_token` is the separate CrowdSec Cloudflare remediation token. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions. The standard production first-run security baseline includes that remediation, so setup-generated custody requires this token before the initial recovery kit is published. Explicit `--offline-recipient` installs must populate it before `sudo vwctl crowdsec setup`.
 
 Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
@@ -159,11 +159,12 @@ Generic SOPS validation always requires `cloudflare_api_token`, `smtp_username`,
 
 ## First security activation, start, recovery point, and persistent automation
 
-Follow the completion actions printed by setup. CrowdSec security setup precedes application start, while full steady-state doctor acceptance follows start:
+Follow the completion actions printed by setup. Before browser/public-service checks, publish the configured hostname with `sudo vwctl dns update`. The command updates only one pre-existing Cloudflare-proxied IPv4 A record, refuses ambiguous/multiple A records or explicit AAAA ownership, and verifies the authoritative API read-back. CrowdSec security setup precedes application start, while full steady-state doctor acceptance follows start:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
+sudo vwctl dns update
 sudo vwctl notification test --smtp
 sudo vwctl crowdsec setup
 sudo vwctl crowdsec remediation-start
