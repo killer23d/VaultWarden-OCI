@@ -281,15 +281,8 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
     previous_units = update_unit_migration._systemd_source(previous)
     installed_units = layout.path(install.SYSTEMD_DIR)
     for unit in install.SYSTEMD_UNITS:
-        installed_unit = installed_units / unit
-        previous_unit = previous_units / unit
-        if previous_unit.is_file():
-            if not installed_unit.is_file() or installed_unit.is_symlink():
-                raise SystemExit(f"candidate-owned rollback did not restore predecessor unit: {unit}")
-            if installed_unit.read_bytes() != previous_unit.read_bytes():
-                raise SystemExit(f"candidate-owned rollback did not restore predecessor unit: {unit}")
-        elif installed_unit.exists() or installed_unit.is_symlink():
-            raise SystemExit(f"candidate-owned rollback did not remove candidate-only unit: {unit}")
+        if (installed_units / unit).read_bytes() != (previous_units / unit).read_bytes():
+            raise SystemExit(f"candidate-owned rollback did not restore predecessor unit: {unit}")
     if marker.read_text(encoding="utf-8") != "previous-data\n":
         raise SystemExit("candidate-owned rollback did not restore pre-update data")
     if layout.path(update_guard.RECOVERY_REQUIRED_STATE).exists():
