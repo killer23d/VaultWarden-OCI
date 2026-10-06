@@ -36,6 +36,7 @@ Useful journals:
 ```bash
 journalctl -u vaultwarden-oci.service
 journalctl -u vaultwarden-oci-health.service
+journalctl -u vaultwarden-oci-dns.service
 journalctl -u vaultwarden-oci-backup.service
 journalctl -u vaultwarden-oci-maintenance.service
 journalctl -u vaultwarden-oci-update-check.service
@@ -113,7 +114,7 @@ sudo vwctl edge refresh
 sudo vwctl doctor --json
 ```
 
-The managed maintenance timer runs `vwctl dns update`, then the same authoritative `vwctl edge refresh`, once per day before `vwctl doctor`. This keeps normal long-running hosts inside the 72-hour last-known-good validity window without adding another scheduler or firewall owner. If the current Cloudflare range fetch fails, the existing bounded last-known-good policy may be reused only while it is still valid; when no safe policy remains, the refresh and maintenance unit fail closed rather than silently accepting stale origin rules.
+The dedicated DNS timer runs the idempotent `vwctl dns update --timer` path every five minutes (and shortly after boot), so a changed public IPv4 converges without waiting for daily maintenance. Expected mutation-lock contention is reported as a clean skip and retried on the next interval; real discovery/API/DNS-shape failures still fail the unit and use normal failure notification. The separate daily maintenance timer continues to run the authoritative `vwctl edge refresh` before `vwctl doctor`, keeping long-running hosts inside the 72-hour Cloudflare last-known-good validity window.
 
 **Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
@@ -177,7 +178,7 @@ If the Vaultwarden Admin SMTP test reports `429` followed by JavaScript such as 
 
 ## Timers and automation
 
-systemd owns scheduling. The enabled `vaultwarden-oci.target` wants the health, backup, maintenance, and update-check timers.
+systemd owns scheduling. The enabled `vaultwarden-oci.target` wants the health, DNS synchronization, backup, maintenance, and update-check timers.
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
@@ -188,7 +189,7 @@ systemctl list-timers 'vaultwarden-oci-*'
 
 `vwctl timers` checks the triggered services too, so a waiting timer cannot hide a previously failed run.
 
-**Expected success:** target active and all four timers healthy. **On failure:** inspect the corresponding service journal and any `OnFailure` notification.
+**Expected success:** target active and all five timers healthy. **On failure:** inspect the corresponding service journal and any `OnFailure` notification.
 
 ## Application updates
 
