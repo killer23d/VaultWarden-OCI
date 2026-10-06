@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep VaultWarden-OCI Cloudflare DNS synchronized
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=30s
+Unit=vaultwarden-oci-dns.service
+
+[Install]
+WantedBy=vaultwarden-oci.target
