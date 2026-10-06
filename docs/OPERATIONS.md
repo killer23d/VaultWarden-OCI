@@ -80,6 +80,16 @@ Caddy uses exact-pinned Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP,
 
 For creation or rotation of `cloudflare_api_token` and `cloudflare_remediation_token`, including the intentionally different Cloudflare permission sets, see [Cloudflare tokens](CLOUDFLARE-TOKENS.md). Keep the two credentials separate and update them only through `sudo vwctl secrets edit`.
 
+The configured public hostname is published through the same narrow `cloudflare_api_token` without creating another zone-ID or DNS configuration authority:
+
+```bash
+sudo vwctl dns status
+sudo vwctl dns update --dry-run
+sudo vwctl dns update
+```
+
+`dns update` discovers this host's public IPv4 through a bounded direct-HTTPS fallback set, requires exactly one existing Cloudflare A record for `[site].domain`, requires that record to already be proxied, refuses explicit AAAA records, patches only the A-record content, and then reads the record back authoritatively. It does not put the Cloudflare token in argv, environment variables, logs, or persistent runtime files. The initial proxied A record remains an operator/Cloudflare setup prerequisite; the appliance does not guess whether a missing record should be created or whether IPv6 should be published.
+
 The host separately owns a fail-closed Docker `DOCKER-USER` origin filter that permits published TCP/443 only from validated Cloudflare IPv4/IPv6 ranges. A bounded last-known-good range set can be used. With neither current nor safe cached ranges, public origin ingress remains blocked.
 
 `/admin` uses only the intended small stack: Vaultwarden admin token, Caddy rate limiting, and one outer Basic Auth gate. A deliberately disabled admin route is a valid closed state. The outer route defaults to 60 requests per minute, which is intentionally high enough for the Admin page's normal multi-request UI while still bounded. Vaultwarden's own admin-login limiter remains separate at its 300-second/3-burst default. The previous 5-requests-per-5-minutes outer limit was too restrictive for normal Admin navigation and could return HTTP 429 before an SMTP test reached Vaultwarden.
@@ -103,7 +113,7 @@ sudo vwctl edge refresh
 sudo vwctl doctor --json
 ```
 
-The managed maintenance timer also runs the same authoritative `vwctl edge refresh` once per day before `vwctl doctor`. This keeps normal long-running hosts inside the 72-hour last-known-good validity window without adding another scheduler or firewall owner. If the current Cloudflare range fetch fails, the existing bounded last-known-good policy may be reused only while it is still valid; when no safe policy remains, the refresh and maintenance unit fail closed rather than silently accepting stale origin rules.
+The managed maintenance timer runs `vwctl dns update`, then the same authoritative `vwctl edge refresh`, once per day before `vwctl doctor`. This keeps normal long-running hosts inside the 72-hour last-known-good validity window without adding another scheduler or firewall owner. If the current Cloudflare range fetch fails, the existing bounded last-known-good policy may be reused only while it is still valid; when no safe policy remains, the refresh and maintenance unit fail closed rather than silently accepting stale origin rules.
 
 **Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
@@ -224,6 +234,7 @@ The narrow supported-predecessor compatibility dependency described above does n
 ## Common troubleshooting
 
 - **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
+- **DNS publication FAIL:** run `sudo vwctl dns status` and `sudo vwctl dns update --dry-run`. Require one existing proxied A record and no explicit AAAA record before allowing automated mutation; do not publish a DNS-only origin.
 - **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
 - **Legacy Admin reconciliation pending:** run `sudo vwctl config edit`, copy the displayed supported legacy values into `config.toml`, update SOPS through `sudo vwctl secrets edit` where appropriate, and finalize only after the supported differences are gone. Do not delete `/data/config.json` to bypass the transition.
 - **Vaultwarden Admin SMTP test returns HTTP 429 / JSON parse error:** test `sudo vwctl notification test --smtp` and inspect Caddy logs. The supported outer `/admin` limit is 60/minute; a 429 is an HTTP boundary failure, not proof of SMTP rejection.
