@@ -17,7 +17,6 @@ from . import cli, durability, notification, recovery, runtime, secrets, storage
 AUTOMATION_TARGET = "vaultwarden-oci.target"
 TIMER_UNITS = (
     "vaultwarden-oci-health.timer",
-    "vaultwarden-oci-dns.timer",
     "vaultwarden-oci-backup.timer",
     "vaultwarden-oci-maintenance.timer",
     "vaultwarden-oci-update-check.timer",
