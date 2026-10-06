@@ -2,6 +2,7 @@
 set -euo pipefail
 
 RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$RELEASE_ROOT"
+unset PYTHONHOME
 export PYTHONPATH="$RELEASE_ROOT"
-exec python3 -m vaultwarden_oci.dashboard "$@"
+export PYTHONNOUSERSITE=1
+exec python3 -P -m vaultwarden_oci.dashboard "$@"
