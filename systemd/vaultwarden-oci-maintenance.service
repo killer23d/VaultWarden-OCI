@@ -10,7 +10,6 @@ Type=oneshot
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/opt/vaultwarden-oci/current/vwctl dns update
 ExecStart=/opt/vaultwarden-oci/current/vwctl edge refresh
 ExecStart=/opt/vaultwarden-oci/current/vwctl doctor
 TimeoutStartSec=180
