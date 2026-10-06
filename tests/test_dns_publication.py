@@ -12,8 +12,8 @@ TOKEN = "cfut_" + "a" * 40
 DOMAIN = "vault.example.com"
 ZONE = "zone-id"
 RECORD_ID = "record-id"
-OLD_IP = "192.0.2.10"
-PUBLIC_IP = "203.0.113.42"
+OLD_IP = "8.8.4.4"
+PUBLIC_IP = "8.8.8.8"
 
 
 def api_payload(result: object) -> bytes:
