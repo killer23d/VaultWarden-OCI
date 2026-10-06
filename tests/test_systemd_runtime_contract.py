@@ -144,7 +144,9 @@ class SystemdRuntimeContractTests(unittest.TestCase):
             directives.get("ExecStart"),
             ["/opt/vaultwarden-oci/current/vwctl dns update --timer"],
         )
-        self.assertIn("Wants=network-online.target\n", service_path.read_text(encoding="utf-8"))
+        service = service_path.read_text(encoding="utf-8")
+        self.assertIn("Wants=network-online.target\n", service)
+        self.assertIn("After=vaultwarden-oci.service network-online.target\n", service)
 
         timer = (ROOT / "systemd/vaultwarden-oci-dns.timer").read_text(encoding="utf-8")
         self.assertIn("OnBootSec=2min\n", timer)
