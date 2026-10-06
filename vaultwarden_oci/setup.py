@@ -228,7 +228,7 @@ def _sha256(path: Path) -> str:
 def _install_dependencies(host_arch: str, ui: UI) -> None:
     ui.header("Dependencies")
     _must(["apt-get", "update"], "apt package index refresh")
-    _must(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", AGE_APT_PACKAGE, "rclone", "7zip", "util-linux"], "Ubuntu dependency installation")
+    _must(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", AGE_APT_PACKAGE, "nano", "rclone", "7zip", "util-linux"], "Ubuntu dependency installation")
     DOCKER_KEYRING.parent.mkdir(parents=True, exist_ok=True)
     _must(["curl", "-fsSL", DOCKER_KEY, "-o", str(DOCKER_KEYRING)], "Docker repository key download")
     os.chmod(DOCKER_KEYRING, 0o644)
@@ -254,8 +254,8 @@ Signed-By: /etc/apt/keyrings/docker.asc
         (["docker", "version", "--format", "{{.Server.Version}}"], "Docker Engine"),
         (["docker", "compose", "version", "--short"], "Docker Compose"),
         (["sops", "--version"], "SOPS"), (["age", "--version"], "Age"),
-        (["age-keygen", "--version"], "Age keygen"), (["rclone", "version"], "rclone"),
-        (["7zz", "--help"], "7-Zip"),
+        (["age-keygen", "--version"], "Age keygen"), (["nano", "--version"], "nano editor"),
+        (["rclone", "version"], "rclone"), (["7zz", "--help"], "7-Zip"),
     )
     for command, label in checks:
         if _run(command).returncode != 0: raise SetupError(f"dependency verification failed: {label}")
