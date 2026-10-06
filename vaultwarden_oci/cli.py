@@ -394,6 +394,13 @@ def _parser() -> argparse.ArgumentParser:
     edge_commands = edge_cmd.add_subparsers(dest="edge_command", required=True)
     edge_commands.add_parser("refresh", help="refresh validated Cloudflare CIDRs and apply origin policy")
 
+    dns_cmd = commands.add_parser("dns", help="inspect or synchronize the configured Cloudflare DNS record")
+    dns_commands = dns_cmd.add_subparsers(dest="dns_command", required=True)
+    dns_commands.add_parser("status", help="show current public IPv4 and Cloudflare A-record state")
+    dns_update = dns_commands.add_parser("update", help="synchronize the existing proxied A record to this host")
+    dns_update.add_argument("--dry-run", action="store_true", help="report whether the A record would change without mutation")
+    dns_update.add_argument("--timer", action="store_true", help=argparse.SUPPRESS)
+
     crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
     crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
     crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec path")
@@ -646,6 +653,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
         except edge.EdgeError as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "dns":
+        from . import dns_publication, runtime, secrets
+        try:
+            if args.dns_command == "status":
+                state = dns_publication.status()
+                print(
+                    f"dns: domain={state.domain} public_ipv4={state.public_ipv4} "
+                    f"record_ipv4={state.record_ipv4} proxied={'true' if state.proxied else 'false'} "
+                    f"in_sync={'true' if state.in_sync else 'false'}"
+                )
+                return 0 if state.in_sync else 1
+            result = dns_publication.update(dry_run=args.dry_run)
+            before = result.before
+            if not result.changed:
+                print(
+                    f"PASS: DNS already current: {before.domain} -> {before.public_ipv4} "
+                    "(proxied=true)"
+                )
+            elif not result.applied:
+                print(
+                    f"PLAN: DNS update required: {before.domain} "
+                    f"{before.record_ipv4} -> {before.public_ipv4} (proxied=true)"
+                )
+            else:
+                print(
+                    f"PASS: DNS updated and verified: {result.after.domain} "
+                    f"{before.record_ipv4} -> {result.after.record_ipv4} (proxied=true)"
+                )
+            return 0
+        except LockBusyError as exc:
+            if getattr(args, "timer", False):
+                print(f"SKIP: DNS synchronization deferred because another vwctl mutation owns the lock: {exc}")
+                return 0
+            print(f"FAIL: DNS operation failed: {exc}", file=sys.stderr)
+            return 1
+        except (
+            dns_publication.DNSError,
+            runtime.RuntimeConfigError,
+            secrets.SecretsError,
+            RuntimeError,
+            OSError,
+        ) as exc:
+            print(f"FAIL: DNS operation failed: {exc}", file=sys.stderr)
             return 1
     if args.command == "crowdsec":
         from . import edge, secrets

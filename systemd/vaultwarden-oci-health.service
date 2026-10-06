@@ -1,5 +1,5 @@
 [Unit]
-Description=VaultWarden-OCI health check
+Description=VaultWarden-OCI DNS synchronization and health check
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=vaultwarden-oci.service
 OnFailure=vaultwarden-oci-notify@%n.service
@@ -9,6 +9,7 @@ Type=oneshot
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+ExecStart=/opt/vaultwarden-oci/current/vwctl dns update --timer
 ExecStart=/opt/vaultwarden-oci/current/vwctl status
 TimeoutStartSec=60
 NoNewPrivileges=yes

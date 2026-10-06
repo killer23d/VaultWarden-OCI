@@ -31,7 +31,7 @@ Create Cloudflare credentials before starting an interactive first-run so the va
 
 Use **two separate Cloudflare user API tokens**:
 
-- `cloudflare_api_token` is the narrow Caddy DNS-01 token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname.
+- `cloudflare_api_token` is the narrow Caddy DNS-01 and Vaultwarden hostname publication token. Give it **Zone -> Zone -> Read** and **Zone -> DNS -> Edit**, scoped to the specific DNS zone that contains the Vaultwarden hostname. The DNS updater discovers the zone dynamically; do not store a second zone-ID authority.
 - `cloudflare_remediation_token` is the separate CrowdSec Cloudflare remediation token. It is intentionally separate because the supported Cloudflare Worker bouncer needs broader Worker/KV/Turnstile permissions. The standard production first-run security baseline includes that remediation, so setup-generated custody requires this token before the initial recovery kit is published. Explicit `--offline-recipient` installs must populate it before `sudo vwctl crowdsec setup`.
 
 Cloudflare Account ID and Zone ID are discovered by the appliance and are not first-run inputs. The local CrowdSec LAPI bouncer credential is also generated locally; do not create a separate legacy bouncer token for SOPS.
@@ -159,11 +159,12 @@ Generic SOPS validation always requires `cloudflare_api_token`, `smtp_username`,
 
 ## First security activation, start, recovery point, and persistent automation
 
-Follow the completion actions printed by setup. CrowdSec security setup precedes application start, while full steady-state doctor acceptance follows start:
+Follow the completion actions printed by setup. Before startup, use `sudo vwctl dns update --dry-run` to validate the existing Cloudflare-proxied A-record shape, token/zone access, and intended public IPv4 without moving public traffic. The command refuses ambiguous/multiple A records, DNS-only proxy state, or explicit AAAA ownership. CrowdSec security setup then precedes application start:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
+sudo vwctl dns update --dry-run
 sudo vwctl notification test --smtp
 sudo vwctl crowdsec setup
 sudo vwctl crowdsec remediation-start
@@ -174,7 +175,10 @@ After `remediation-start`, set every Worker Route created by the bouncer to **Fa
 ```bash
 sudo vwctl crowdsec confirm-fail-open
 sudo vwctl start
+sudo vwctl dns update
 ```
+
+Only after the new host is running does the non-dry-run DNS command patch the existing proxied A-record content and verify authoritative Cloudflare read-back. This avoids moving a hostname from an old origin onto a host that has not started yet.
 
 `vwctl start` materializes the runtime directories, rendered Caddy policy, and validated Cloudflare origin policy. Therefore a full pre-start `vwctl doctor` is useful for diagnostics but is **not** a readiness gate: missing pre-start runtime/edge material can legitimately be `SKIP`/`FAIL` until startup owns it. After the first healthy start, establish the first application recovery point and then perform steady-state acceptance:
 

@@ -117,6 +117,16 @@ class SystemdRuntimeContractTests(unittest.TestCase):
                     self.assert_runtime_directory_contract(unit_path)
 
 
+    def test_health_timer_synchronizes_dns_before_status(self) -> None:
+        service = service_directives(ROOT / "systemd/vaultwarden-oci-health.service")
+        self.assertEqual(
+            service.get("ExecStart"),
+            [
+                "/opt/vaultwarden-oci/current/vwctl dns update --timer",
+                "/opt/vaultwarden-oci/current/vwctl status",
+            ],
+        )
+
     def test_maintenance_refreshes_edge_daily_before_doctor(self) -> None:
         unit_path = ROOT / "systemd/vaultwarden-oci-maintenance.service"
         directives = service_directives(unit_path)
@@ -135,6 +145,7 @@ class SystemdRuntimeContractTests(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* 04:10:00\n", timer)
         self.assertIn("Persistent=true\n", timer)
         self.assertNotIn("OnCalendar=Sun ", timer)
+
 
 
 if __name__ == "__main__":

@@ -367,9 +367,11 @@ def main(
             ui.header("Next actions")
             ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")
             ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml")
+            ui.action("run: sudo vwctl dns update --dry-run after entering the Cloudflare DNS token")
             ui.action("run: sudo vwctl notification test --smtp after entering SMTP credentials")
             ui.action("run: sudo vwctl doctor")
             ui.action("when doctor is ready, run: sudo vwctl start")
+            ui.action("after start is healthy, run: sudo vwctl dns update to publish the configured hostname")
         return 0
     except (
         SetupError,

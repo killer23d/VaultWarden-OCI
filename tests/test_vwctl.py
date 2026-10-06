@@ -317,7 +317,7 @@ class VwctlIntegrationTests(unittest.TestCase):
     def test_public_commands_and_versions(self) -> None:
         help_result = self.run_vwctl("--help")
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
-        for command in ("start", "stop", "restart", "status", "logs", "doctor", "versions"):
+        for command in ("start", "stop", "restart", "status", "logs", "doctor", "versions", "dns"):
             self.assertIn(command, help_result.stdout)
         self.assertIn("update check", help_result.stdout)
         self.assertIn("host-upgrade {check,apply}", help_result.stdout)

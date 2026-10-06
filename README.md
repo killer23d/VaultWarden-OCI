@@ -12,7 +12,7 @@ VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. 
 | CrowdSec | Detects abuse across Caddy, Vaultwarden, SSH/Linux, and kernel/firewall signals; locally generated proxied web decisions are remediated through Cloudflare while broad/community decisions can protect host INPUT through the nftables firewall bouncer. |
 | SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
 | rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
-| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers. |
+| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers; the five-minute health run synchronizes DNS before status. |
 | Notifications | Shares the SMTP endpoint/sender/credentials used by Vaultwarden for direct-SMTP/fallback delivery; an optional built-in HTTPS provider remains available for operational events. The appliance direct SMTP path always keeps normal certificate/hostname validation. |
 
 ```text
@@ -53,19 +53,21 @@ Interactive setup can select a suitable non-boot data device and can generate th
 
 The setup-generated `config.toml` contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP controls, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
 
-The standard production security baseline uses two separate Cloudflare credentials: `cloudflare_api_token` for Caddy DNS-01 and `cloudflare_remediation_token` for CrowdSec Worker remediation. Setup-generated recovery custody requires both before it publishes the initial credential kit; explicit `--offline-recipient` installs must populate the remediation token before `sudo vwctl crowdsec setup`.
+The standard production security baseline uses two separate Cloudflare credentials: `cloudflare_api_token` for Caddy DNS-01 and the appliance's bounded proxied-A DNS publication, and `cloudflare_remediation_token` for CrowdSec Worker remediation. Setup-generated recovery custody requires both before it publishes the initial credential kit; explicit `--offline-recipient` installs must populate the remediation token before `sudo vwctl crowdsec setup`.
 
 After setup and external credentials are complete, follow the displayed first-run actions in order. Full steady-state doctor acceptance is intentionally **after** `start`, because lifecycle startup materializes the runtime/Caddy state and the Cloudflare origin policy that those doctor checks inspect:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
+sudo vwctl dns update --dry-run
 sudo vwctl notification test --smtp
 sudo vwctl crowdsec setup
 sudo vwctl crowdsec remediation-start
 # Set every bouncer-created Worker Route to Fail Open in Cloudflare.
 sudo vwctl crowdsec confirm-fail-open
 sudo vwctl start
+sudo vwctl dns update
 sudo vwctl backup
 sudo vwctl doctor --json
 sudo systemctl enable --now vaultwarden-oci.target

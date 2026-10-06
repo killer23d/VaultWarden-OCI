@@ -23,10 +23,12 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
 
         rendered = output.getvalue()
         ordered = (
+            "ACTION run: sudo vwctl dns update --dry-run to validate the existing proxied A record without changing public traffic",
             "ACTION run: sudo vwctl crowdsec setup",
             "ACTION run: sudo vwctl crowdsec remediation-start",
             "ACTION then run: sudo vwctl crowdsec confirm-fail-open",
             "ACTION run: sudo vwctl start",
+            "ACTION after start is healthy, run: sudo vwctl dns update to publish the configured hostname to this host",
             "ACTION run: sudo vwctl backup to create and verify the first application recovery point",
             "ACTION run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy",
             "ACTION enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target",
@@ -37,6 +39,11 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("when doctor is ready", rendered)
         self.assertIn("sudo vwctl notification test --smtp", rendered)
+        self.assertLess(rendered.index("sudo vwctl dns update --dry-run"), rendered.index("sudo vwctl start"))
+        self.assertLess(
+            rendered.index("ACTION run: sudo vwctl start"),
+            rendered.index("ACTION after start is healthy, run: sudo vwctl dns update to publish"),
+        )
         self.assertIn("offsite/rclone recovery is expected", rendered)
 
     def test_explicit_recipient_public_setup_uses_same_completion_path(self) -> None:
