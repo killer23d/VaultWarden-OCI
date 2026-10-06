@@ -65,8 +65,16 @@ def _http_text(url: str, maximum: int = _MAX_RESPONSE_BYTES) -> str:
         headers={"User-Agent": "VaultWarden-OCI dns-publication"},
         method="GET",
     )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        return _read_url(request, maximum).decode("utf-8")
+        with opener.open(request, timeout=15) as response:
+            data = response.read(maximum + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise DNSError("public IPv4 discovery request failed") from exc
+    if len(data) > maximum:
+        raise DNSError("public IPv4 discovery response exceeds the bounded response size")
+    try:
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise DNSError("public IPv4 discovery response is not UTF-8") from exc
 
