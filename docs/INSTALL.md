@@ -159,12 +159,12 @@ Generic SOPS validation always requires `cloudflare_api_token`, `smtp_username`,
 
 ## First security activation, start, recovery point, and persistent automation
 
-Follow the completion actions printed by setup. Before browser/public-service checks, publish the configured hostname with `sudo vwctl dns update`. The command updates only one pre-existing Cloudflare-proxied IPv4 A record, refuses ambiguous/multiple A records or explicit AAAA ownership, and verifies the authoritative API read-back. CrowdSec security setup precedes application start, while full steady-state doctor acceptance follows start:
+Follow the completion actions printed by setup. Before startup, use `sudo vwctl dns update --dry-run` to validate the existing Cloudflare-proxied A-record shape, token/zone access, and intended public IPv4 without moving public traffic. The command refuses ambiguous/multiple A records, DNS-only proxy state, or explicit AAAA ownership. CrowdSec security setup then precedes application start:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
-sudo vwctl dns update
+sudo vwctl dns update --dry-run
 sudo vwctl notification test --smtp
 sudo vwctl crowdsec setup
 sudo vwctl crowdsec remediation-start
@@ -175,7 +175,10 @@ After `remediation-start`, set every Worker Route created by the bouncer to **Fa
 ```bash
 sudo vwctl crowdsec confirm-fail-open
 sudo vwctl start
+sudo vwctl dns update
 ```
+
+Only after the new host is running does the non-dry-run DNS command patch the existing proxied A-record content and verify authoritative Cloudflare read-back. This avoids moving a hostname from an old origin onto a host that has not started yet.
 
 `vwctl start` materializes the runtime directories, rendered Caddy policy, and validated Cloudflare origin policy. Therefore a full pre-start `vwctl doctor` is useful for diagnostics but is **not** a readiness gate: missing pre-start runtime/edge material can legitimately be `SKIP`/`FAIL` until startup owns it. After the first healthy start, establish the first application recovery point and then perform steady-state acceptance:
 
