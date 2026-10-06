@@ -123,6 +123,7 @@ class SystemdRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             directives.get("ExecStart"),
             [
+                "/opt/vaultwarden-oci/current/vwctl dns update",
                 "/opt/vaultwarden-oci/current/vwctl edge refresh",
                 "/opt/vaultwarden-oci/current/vwctl doctor",
             ],
