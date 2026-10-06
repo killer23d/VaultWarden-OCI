@@ -2,5 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
-exec python3 -m vaultwarden_oci.dashboard "$@"
+unset PYTHONHOME
+export PYTHONPATH="$SCRIPT_DIR"
+export PYTHONNOUSERSITE=1
+exec python3 -P -m vaultwarden_oci.dashboard "$@"

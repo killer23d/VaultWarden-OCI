@@ -436,6 +436,38 @@ class DashboardBoundaryTests(unittest.TestCase):
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
             self.assertIn("Operations Dashboard", help_result.stdout)
 
+    def test_dashboard_wrappers_ignore_hostile_cwd_and_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            hostile = Path(directory)
+            package = hostile / "vaultwarden_oci"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            marker = hostile / "hostile-dashboard-loaded"
+            (package / "dashboard.py").write_text(
+                "from pathlib import Path\n"
+                + f"Path({str(marker)!r}).write_text('loaded', encoding='utf-8')\n"
+                + "print('HOSTILE DASHBOARD EXECUTED')\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(hostile)
+
+            for path in (ROOT / "dashboard.sh", ROOT / "vaultwarden_oci/dashboard.sh"):
+                with self.subTest(path=str(path)):
+                    marker.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", str(path), "--help"],
+                        cwd=hostile,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("Operations Dashboard", result.stdout)
+                    self.assertNotIn("HOSTILE DASHBOARD EXECUTED", result.stdout)
+                    self.assertFalse(marker.exists(), f"{path} imported dashboard code from caller-controlled path")
+
 
 class PublicCliTests(unittest.TestCase):
     def run_vwctl(self, *args: str) -> subprocess.CompletedProcess[str]:
