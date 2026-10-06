@@ -60,13 +60,14 @@ After setup and external credentials are complete, follow the displayed first-ru
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl secrets validate
-sudo vwctl dns update
+sudo vwctl dns update --dry-run
 sudo vwctl notification test --smtp
 sudo vwctl crowdsec setup
 sudo vwctl crowdsec remediation-start
 # Set every bouncer-created Worker Route to Fail Open in Cloudflare.
 sudo vwctl crowdsec confirm-fail-open
 sudo vwctl start
+sudo vwctl dns update
 sudo vwctl backup
 sudo vwctl doctor --json
 sudo systemctl enable --now vaultwarden-oci.target
