@@ -123,7 +123,6 @@ class SystemdRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             directives.get("ExecStart"),
             [
-                "/opt/vaultwarden-oci/current/vwctl dns update",
                 "/opt/vaultwarden-oci/current/vwctl edge refresh",
                 "/opt/vaultwarden-oci/current/vwctl doctor",
             ],
@@ -136,6 +135,24 @@ class SystemdRuntimeContractTests(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* 04:10:00\n", timer)
         self.assertIn("Persistent=true\n", timer)
         self.assertNotIn("OnCalendar=Sun ", timer)
+
+
+    def test_dns_sync_has_dedicated_five_minute_timer(self) -> None:
+        service_path = ROOT / "systemd/vaultwarden-oci-dns.service"
+        directives = service_directives(service_path)
+        self.assertEqual(
+            directives.get("ExecStart"),
+            ["/opt/vaultwarden-oci/current/vwctl dns update --timer"],
+        )
+        self.assertIn("Wants=network-online.target\n", service_path.read_text(encoding="utf-8"))
+
+        timer = (ROOT / "systemd/vaultwarden-oci-dns.timer").read_text(encoding="utf-8")
+        self.assertIn("OnBootSec=2min\n", timer)
+        self.assertIn("OnUnitActiveSec=5min\n", timer)
+        self.assertIn("Unit=vaultwarden-oci-dns.service\n", timer)
+
+        target = (ROOT / "systemd/vaultwarden-oci.target").read_text(encoding="utf-8")
+        self.assertIn("vaultwarden-oci-dns.timer", target)
 
 
 if __name__ == "__main__":
