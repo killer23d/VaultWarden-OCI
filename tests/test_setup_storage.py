@@ -112,6 +112,73 @@ class SetupContractTests(unittest.TestCase):
         host, url, email = setup._normalize("Example.COM.", "https://vault.example.com/", "admin@example.com")
         self.assertEqual((host, url, email), ("vault.example.com", "https://vault.example.com", "admin@example.com")); self.assertNotIn("https://vault.example.com", setup._config_text(host, email, "age1" + "q" * 58))
 
+    def test_setup_dependencies_install_and_verify_default_nano_editor(self) -> None:
+        commands: list[tuple[str, ...]] = []
+        checks: list[tuple[str, ...]] = []
+
+        def fake_must(argv, label, *, input_text=None, env=None):
+            del label, input_text, env
+            commands.append(tuple(argv))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def fake_run(argv, *, input_text=None, env=None):
+            del input_text, env
+            checks.append(tuple(argv))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(setup, "DOCKER_KEYRING", root / "docker.asc"),
+                mock.patch.object(setup, "DOCKER_SOURCE", root / "docker.sources"),
+                mock.patch.object(setup, "_must", side_effect=fake_must),
+                mock.patch.object(setup, "_run", side_effect=fake_run),
+                mock.patch.object(setup, "_write_atomic"),
+                mock.patch.object(setup, "_sha256", return_value=setup.SOPS_SHA256["amd64"]),
+                mock.patch.object(setup.os, "chmod"),
+                mock.patch.object(setup.os, "replace"),
+            ):
+                setup._install_dependencies("amd64", setup.UI(color=False))
+
+        package_install = next(
+            command
+            for command in commands
+            if command[:3] == ("apt-get", "install", "-y") and "ca-certificates" in command
+        )
+        self.assertIn("nano", package_install)
+        self.assertIn(("nano", "--version"), checks)
+
+    def test_setup_dependency_verification_fails_without_default_nano_editor(self) -> None:
+        def fake_must(argv, label, *, input_text=None, env=None):
+            del argv, label, input_text, env
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def fake_run(argv, *, input_text=None, env=None):
+            del input_text, env
+            return mock.Mock(
+                returncode=127 if tuple(argv) == ("nano", "--version") else 0,
+                stdout="",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(setup, "DOCKER_KEYRING", root / "docker.asc"),
+                mock.patch.object(setup, "DOCKER_SOURCE", root / "docker.sources"),
+                mock.patch.object(setup, "_must", side_effect=fake_must),
+                mock.patch.object(setup, "_run", side_effect=fake_run),
+                mock.patch.object(setup, "_write_atomic"),
+                mock.patch.object(setup, "_sha256", return_value=setup.SOPS_SHA256["amd64"]),
+                mock.patch.object(setup.os, "chmod"),
+                mock.patch.object(setup.os, "replace"),
+            ):
+                with self.assertRaisesRegex(
+                    setup.SetupError,
+                    "dependency verification failed: nano editor",
+                ):
+                    setup._install_dependencies("amd64", setup.UI(color=False))
+
     def test_malformed_email_cannot_generate_invalid_toml(self) -> None:
         with self.assertRaisesRegex(setup.SetupError, "email"): setup._normalize("example.com", "https://vault.example.com", 'admin"@example.com')
 
