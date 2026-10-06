@@ -48,8 +48,6 @@ SYSTEMD_UNITS = (
     "vaultwarden-oci.service",
     "vaultwarden-oci-health.service",
     "vaultwarden-oci-health.timer",
-    "vaultwarden-oci-dns.service",
-    "vaultwarden-oci-dns.timer",
     "vaultwarden-oci-backup.service",
     "vaultwarden-oci-backup.timer",
     "vaultwarden-oci-maintenance.service",
