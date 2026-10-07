@@ -398,6 +398,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args:
         print("dashboard.sh: no positional arguments are supported", file=sys.stderr)
         return 2
+    if os.geteuid() != 0:
+        print("FAIL: dashboard must run as root; use sudo dashboard.sh", file=sys.stderr)
+        return 1
     handlers = {
         "1": stack_menu, "s": stack_menu,
         "2": diagnostics_menu, "d": diagnostics_menu,
