@@ -8,6 +8,23 @@ The normal rule is:
 
 Do not use broad Docker cleanup, delete appliance state, bypass the dedicated-storage guard, disable the Cloudflare origin filter, hand-edit generated runtime files, or repoint `/opt/vaultwarden-oci/current` to make a check green.
 
+## Find your symptom
+
+| Symptom | Go to |
+| --- | --- |
+| Setup cannot use the data disk | [Setup cannot find or accept storage](#setup-cannot-find-or-accept-storage) |
+| Setup stopped while handing off the recovery identity/kit | [Setup stops during recovery custody](#setup-stops-during-recovery-custody) |
+| Config or SOPS validation fails | [Config validation fails](#config-validation-fails) / [Secrets validation fails](#secrets-validation-fails) |
+| Stack or container will not start | [Stack will not start](#stack-will-not-start) / [A container is unhealthy](#a-container-is-unhealthy) |
+| Doctor, timer, or systemd failure | [`vwctl doctor` reports FAIL](#vwctl-doctor-reports-fail) / [A systemd unit or timer failed](#a-systemd-unit-or-timer-failed) |
+| DNS, origin, or real-client-IP issue | [DNS is wrong](#dns-is-wrong-or-the-dns-update-fails) / [Cloudflare origin policy](#cloudflare-origin-policy-is-stale-or-fails) / [Real client IP](#real-client-ip-is-wrong) |
+| `/admin` or Admin SMTP-test problem | [`/admin` access fails](#admin-access-fails) |
+| CrowdSec problem | [CrowdSec engine, Hub, or host firewall fails](#crowdsec-engine-hub-or-host-firewall-fails) / [Cloudflare remediation is not armed](#cloudflare-crowdsec-remediation-is-not-armed) |
+| Notification or SMTP delivery fails | [Notification or SMTP test fails](#notification-or-smtp-test-fails) |
+| Backup, rclone, verify, or restore problem | [Local backup fails](#local-backup-fails) / [Offsite/rclone recovery fails](#offsiterclone-recovery-fails) / [Recovery artifact cannot be verified](#a-recovery-artifact-cannot-be-verified) |
+| Update stopped, rolled back, or requires recovery | [Update check/candidate failure](#update-check-or-candidate-preparation-fails) / [Update health gate/recovery required](#update-health-gate-rolled-back-or-recovery-is-required) |
+| Reboot leaves Worker unarmed | [Reboot leaves CrowdSec Worker unarmed](#reboot-leaves-crowdsec-worker-unarmed) |
+
 ## First response: collect the appliance view
 
 These commands are safe first checks on an installed host:
