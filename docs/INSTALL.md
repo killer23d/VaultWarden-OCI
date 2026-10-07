@@ -116,7 +116,7 @@ When `--use-latest` is used without `--auto` in a terminal, setup asks for confi
 
 ## Dry run
 
-`--dry-run` performs host/input/device-relationship checks without formatting, mounting, dependency installation, or project-state writes. Use it to prove a storage selection before changing a host. Dry run does not generate an offline private identity or create a recovery kit.
+`--dry-run` performs host/input/device-relationship checks without formatting, mounting, dependency installation, or project-state writes. Use it to prove a storage selection before changing a host. Dry run does not generate an offline private identity or create a recovery kit. It still validates the normal required custody input: an interactive run can prompt for the public offline recipient, while an `--auto`/headless dry run must supply `--offline-recipient`.
 
 ## Complete config and secrets
 
@@ -211,4 +211,4 @@ Runtime acceptance requires `/var/lib/vaultwarden-oci` to be a real mount distin
 
 Setup is rerunnable after interruption. It proves existing fstab/storage identity, immutable releases, operational Age identity, config, and encrypted secrets before replacement. A customized valid operator config is not silently overwritten. If setup generated an offline identity and reports that it remains in volatile storage after a failed custody handoff, secure that exact identity before reboot; do not rerun in a way that silently creates a different recovery identity for already-written recipients.
 
-Continue with [Configuration](CONFIGURATION.md) and [Operations](OPERATIONS.md), then establish and verify recovery using [Recovery](RECOVERY.md).
+Continue with [Configuration](CONFIGURATION.md) and [Operations](OPERATIONS.md), then establish and verify recovery using [Recovery](RECOVERY.md). If any step does not reach the documented expected result, use [Troubleshooting](TROUBLESHOOTING.md) before attempting manual repair.
