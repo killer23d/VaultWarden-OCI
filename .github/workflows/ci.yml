@@ -71,8 +71,15 @@ jobs:
           previous_version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["vaultwarden_oci"]["version"])' /tmp/vwoci-previous/versions.toml)"
           candidate_version="$(python3 -c 'import tomllib; print(tomllib.load(open("versions.toml", "rb"))["vaultwarden_oci"]["version"])')"
 
+          release_changes="$(git diff --name-only "$previous_ref" HEAD -- vwctl versions.toml email-providers.toml vaultwarden_oci systemd)"
+
           if [ "$candidate_version" = "$previous_version" ]; then
-            echo "SKIP: current predecessor update acceptance requires a distinct project release; both base and candidate are $candidate_version"
+            if [ -n "$release_changes" ]; then
+              echo "FAIL: immutable release content changed without a vaultwarden_oci.version bump:" >&2
+              printf '%s\n' "$release_changes" >&2
+              exit 1
+            fi
+            echo "SKIP: current predecessor update acceptance requires a distinct project release; both base and candidate are $candidate_version and immutable release content is unchanged"
           else
             PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_rollback_host"
             PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$current_rollback_host" "$current_state"
