@@ -231,20 +231,20 @@ The narrow supported-predecessor compatibility dependency described above does n
 
 **Expected success:** package outcome and reboot requirement are reported truthfully. **On failure:** use normal Ubuntu package diagnostics; do not use `.vwrec` as an apt rollback mechanism.
 
-## Common troubleshooting
+## Troubleshooting
 
-- **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
-- **DNS publication FAIL:** run `sudo vwctl dns status` and `sudo vwctl dns update --dry-run`. Require one existing proxied A record and no explicit AAAA record before allowing automated mutation; do not publish a DNS-only origin.
-- **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
-- **Legacy Admin reconciliation pending:** run `sudo vwctl config edit`, copy the displayed supported legacy values into `config.toml`, update SOPS through `sudo vwctl secrets edit` where appropriate, and finalize only after the supported differences are gone. Do not delete `/data/config.json` to bypass the transition.
-- **Vaultwarden Admin SMTP test returns HTTP 429 / JSON parse error:** test `sudo vwctl notification test --smtp` and inspect Caddy logs. The supported outer `/admin` limit is 60/minute; a 429 is an HTTP boundary failure, not proof of SMTP rejection.
-- **CrowdSec FAIL:** inspect the exact `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, or `crowdsec.cloudflare` check. Keep the firewall bouncer host-INPUT-only and the Worker Fail Open confirmation tied to its current explicit invocation.
-- **Secrets FAIL:** use `sudo vwctl secrets validate`/`edit`; do not copy decrypted YAML into files or shell history.
-- **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
-- **Recovery stale/missing:** create and verify a new recovery point before depending on it.
-- **Timer failure:** inspect `vwctl timers` plus the specific service journal.
-- **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary. If a supported update-controller handoff is active, leave the launcher/handoff state intact and retry the same update command; ordinary commands continue to use the selected release. If a forward-only compatibility dependency was already installed, keep it in place, prove predecessor health, and retry the same supported target rather than attempting package rollback.
-- **Support diagnostics:** use `sudo vwctl support-bundle` and review it before sharing.
+For failures, use the symptom-oriented [Troubleshooting guide](TROUBLESHOOTING.md). It starts from the observed problem, gives safe diagnostics, explains what the result means, names the supported correction, and ends with a verification step.
+
+A good first triage is:
+
+```bash
+sudo vwctl status
+sudo vwctl doctor --json
+sudo vwctl timers
+systemctl --failed --no-pager
+```
+
+Do not use broad Docker cleanup, bypass dedicated storage or the Cloudflare origin filter, delete state, or manually repoint the active release to make a check green. Use `sudo vwctl support-bundle` when you need a bounded sanitized diagnostic artifact.
 
 ## Where things live
 
