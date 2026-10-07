@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from typing import Mapping
 
-from . import cli, dashboard, day2, notification, runtime, secrets, storage
+from . import cli, dashboard, operations, notification, runtime, secrets, storage
 
 
 def _host() -> str:
@@ -103,7 +103,7 @@ def _human_status_payload(payload: dict[str, object]) -> dict[str, object]:
 
 def status() -> int:
     """Render the authoritative day-2 model through the proven dashboard view."""
-    payload = _human_status_payload(day2.status_payload())
+    payload = _human_status_payload(operations.status_payload())
     dashboard.draw_header(payload)
     dashboard.draw_status(payload)
     return _status_exit_code(payload)
@@ -111,7 +111,7 @@ def status() -> int:
 
 def timers() -> int:
     """Render timer ownership clearly while preserving the authoritative day-2 snapshot."""
-    snapshot = day2.automation_snapshot()
+    snapshot = operations.automation_snapshot()
     target = snapshot["target"]
     rows = snapshot["timers"]
     assert isinstance(target, dict)
@@ -119,7 +119,7 @@ def timers() -> int:
 
     target_problems = "; ".join(str(item) for item in target.get("problems", [])) or "healthy"
     print(
-        f"[{target.get('health')}] {day2.AUTOMATION_TARGET}: "
+        f"[{target.get('health')}] {operations.AUTOMATION_TARGET}: "
         f"{target.get('active_state')} enabled={target.get('enabled')} ({target_problems})"
     )
     for row in rows:
