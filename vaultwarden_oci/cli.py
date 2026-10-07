@@ -543,8 +543,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
     if args.command == "status":
         if args.json:
-            from . import day2
-            return day2.status_command()
+            from . import operations
+            return operations.status_command()
         from . import notification, recovery, runtime
         overall, rows = runtime.status()
         for row in rows:
@@ -567,14 +567,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
     if args.command == "timers":
-        from . import day2
-        return day2.timers_command(machine=args.json)
+        from . import operations
+        return operations.timers_command(machine=args.json)
     if args.command == "support-bundle":
-        from . import day2
+        from . import operations
         try:
-            day2.support_bundle(args.output)
+            operations.support_bundle(args.output)
             return 0
-        except (day2.Day2Error, OSError) as exc:
+        except (operations.OperationsError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "notification":
