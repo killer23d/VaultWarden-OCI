@@ -64,6 +64,7 @@ def _status() -> dict[str, object]:
             "storage": {"state": "failure", "warning": True, "error": "status JSON unavailable"},
             "recovery": [],
             "edge": {"overall": "FAIL", "checks": []},
+            "crowdsec": {"overall": "FAIL", "checks": []},
             "admin": {"id": "edge.admin.protection", "status": "FAIL", "message": "status unavailable"},
             "automation": {"overall": "FAIL", "healthy": 0, "expected": 4},
             "timers": [],
@@ -148,6 +149,7 @@ def draw_status(payload: dict[str, object]) -> None:
     update = payload.get("update", {})
     notification = payload.get("notification", {})
     edge = payload.get("edge", {})
+    crowdsec = payload.get("crowdsec", {})
     automation = payload.get("automation", {})
     print(f" {STYLE.bold('Stack:')} Vaultwarden {_service(payload, 'vaultwarden')} | Caddy {_service(payload, 'caddy')}")
     print(f" {STYLE.bold('Doctor:')} {_state(doctor.get('overall', 'unknown') if isinstance(doctor, dict) else 'unknown')}")
@@ -159,9 +161,12 @@ def draw_status(payload: dict[str, object]) -> None:
         print(f" {STYLE.bold('Storage:')} {STYLE.failure('MISSING/INVALID')} {storage.get('error', '') if isinstance(storage, dict) else ''}")
     print(f" {STYLE.bold('Recovery:')} local {_recovery_line(payload, 'local')} | offsite {_recovery_line(payload, 'offsite')}")
     print(f" {STYLE.bold('Rclone:')} {_doctor_check(payload, 'recovery.rclone')}")
+    crowdsec_overall = crowdsec.get("overall", "unknown") if isinstance(crowdsec, dict) else "unknown"
     print(
         f" {STYLE.bold('Security:')} edge {_state(edge.get('overall', 'unknown') if isinstance(edge, dict) else 'unknown')} "
-        f"| CrowdSec {_doctor_check(payload, 'crowdsec.engine')}/{_doctor_check(payload, 'crowdsec.cloudflare')} "
+        f"| CrowdSec {_state(crowdsec_overall)} "
+        f"(engine {_doctor_check(payload, 'crowdsec.engine')} / hub {_doctor_check(payload, 'crowdsec.hub')} / "
+        f"firewall {_doctor_check(payload, 'crowdsec.firewall')} / worker {_doctor_check(payload, 'crowdsec.cloudflare')}) "
         f"| admin {_admin_state(payload)}"
     )
     if isinstance(automation, dict):
@@ -208,7 +213,7 @@ def _journal_screen() -> None:
     _clear()
     print(STYLE.header(" VaultWarden-OCI systemd journal "))
     print(STYLE.info(DIVIDER))
-    subprocess.run(
+    result = subprocess.run(
         [
             "journalctl", "--no-pager", "--lines=200",
             "-u", "vaultwarden-oci.service",
@@ -216,9 +221,15 @@ def _journal_screen() -> None:
             "-u", "vaultwarden-oci-backup.service",
             "-u", "vaultwarden-oci-maintenance.service",
             "-u", "vaultwarden-oci-update-check.service",
+            "-u", "vaultwarden-oci-notify@*",
+            "-u", "crowdsec.service",
+            "-u", "crowdsec-firewall-bouncer.service",
+            "-u", "crowdsec-cloudflare-worker-bouncer.service",
         ],
         check=False,
     )
+    if result.returncode != 0:
+        print(STYLE.failure(f"FAIL: journalctl exited with status {result.returncode}"))
     _press_enter()
 
 
@@ -277,26 +288,52 @@ def recovery_menu() -> None:
             _command_screen("Recovery inventory", args)
         elif choice == "4":
             location = _prompt(" Local .vwrec path: ")
-            identity = _prompt(" Offline Age identity path: ")
-            if location and identity: _command_screen("Verify local recovery", ["recovery", "verify", "--file", location, "--identity", identity])
+            if location: _command_screen("Verify local recovery", ["recovery", "verify", "--file", location])
         elif choice == "5":
             remote = _prompt(" Remote .vwrec REMOTE:path: ")
-            identity = _prompt(" Offline Age identity path: ")
-            if remote and identity: _command_screen("Verify remote recovery", ["recovery", "verify", "--from-remote", remote, "--identity", identity])
+            if remote: _command_screen("Verify remote recovery", ["recovery", "verify", "--from-remote", remote])
         elif choice == "6": _command_screen("Guided restore", ["restore"])
     _menu("Backup & Recovery", (("1", "Backup now"), ("2", "Backup + verified offsite publication"), ("3", "Recovery inventory"), ("4", "Verify local recovery"), ("5", "Verify remote recovery"), ("6", "Guided local/remote restore")), handle)
 
 
 def security_menu() -> None:
     def handle(choice: str) -> None:
-        if choice == "1": _command_screen("CrowdSec status", ["crowdsec", "status"])
-        elif choice == "2": _command_screen("CrowdSec decisions", ["crowdsec", "decisions"])
-        elif choice == "3":
+        if choice == "1": _command_screen("Security doctor", ["doctor"])
+        elif choice == "2": _command_screen("CrowdSec status", ["crowdsec", "status"])
+        elif choice == "3": _command_screen("CrowdSec decisions", ["crowdsec", "decisions"])
+        elif choice == "4":
             address = _prompt(" IP address to unban: ")
             if address: _command_screen("Unban IP", ["crowdsec", "unban", address])
-        elif choice == "4": _command_screen("Edge/admin diagnostic status", ["doctor"])
-        elif choice == "5": _command_screen("Refresh Cloudflare origin policy", ["edge", "refresh"])
-    _menu("Security", (("1", "CrowdSec status"), ("2", "CrowdSec decisions"), ("3", "Unban IP"), ("4", "Edge + admin protection status"), ("5", "Refresh Cloudflare edge policy")), handle)
+        elif choice == "5": _command_screen("Cloudflare DNS status", ["dns", "status"])
+        elif choice == "6": _command_screen("Cloudflare DNS dry run", ["dns", "update", "--dry-run"])
+        elif choice == "7" and _confirm("Synchronize the existing proxied Cloudflare A record to this host?"):
+            _command_screen("Synchronize Cloudflare DNS", ["dns", "update"])
+        elif choice == "8": _command_screen("Refresh Cloudflare origin policy", ["edge", "refresh"])
+        elif choice == "9":
+            _command_screen("Start/re-arm CrowdSec Cloudflare remediation", ["crowdsec", "remediation-start"])
+        elif choice == "10":
+            print(
+                "\n Before confirming, set every bouncer-created Cloudflare Worker Route "
+                "to Fail Open in Cloudflare for the current invocation."
+            )
+            if _confirm("Have all current bouncer-created Worker Routes been set to Fail Open?"):
+                _command_screen("Confirm CrowdSec Worker Fail Open", ["crowdsec", "confirm-fail-open"])
+    _menu(
+        "Security",
+        (
+            ("1", "Security doctor"),
+            ("2", "CrowdSec status"),
+            ("3", "CrowdSec decisions"),
+            ("4", "Unban IP"),
+            ("5", "Cloudflare DNS status"),
+            ("6", "Cloudflare DNS update dry run"),
+            ("7", "Synchronize Cloudflare DNS"),
+            ("8", "Refresh Cloudflare origin policy"),
+            ("9", "Start/re-arm CrowdSec Cloudflare remediation"),
+            ("10", "Confirm current Worker Routes are Fail Open"),
+        ),
+        handle,
+    )
 
 
 def config_menu() -> None:
@@ -311,9 +348,7 @@ def config_menu() -> None:
 def recovery_kit_menu() -> None:
     def handle(choice: str) -> None:
         if choice in {"1", "2"}:
-            identity = _prompt(" Matching offline Age identity path: ")
-            if not identity: return
-            args = ["recovery-kit", "export", "--offline-identity", identity]
+            args = ["recovery-kit", "export"]
             if choice == "2": args.append("--no-email")
             _command_screen("Verified encrypted recovery kit", args)
     _menu("Recovery Kit", (("1", "Export; offer verified SMTP email"), ("2", "Export locally only")), handle)
@@ -358,7 +393,7 @@ def draw_main_menu() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args in (["--help"], ["-h"]):
-        print("VaultWarden-OCI Operations Dashboard\n\nUsage: dashboard.sh\n\nThin day-2 interface; mutations are delegated to vwctl.")
+        print("VaultWarden-OCI Operations Dashboard\n\nUsage: dashboard.sh\n\nThin operations interface; mutations are delegated to vwctl.")
         return 0
     if args:
         print("dashboard.sh: no positional arguments are supported", file=sys.stderr)
