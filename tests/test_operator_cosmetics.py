@@ -18,10 +18,10 @@ class OperatorCosmeticsTests(unittest.TestCase):
             "edge": {"checks": [{"status": "PASS"}]},
         }
 
-    def test_status_reuses_authoritative_day2_payload_and_dashboard_renderer(self) -> None:
+    def test_status_reuses_authoritative_operations_payload_and_dashboard_renderer(self) -> None:
         payload = self._healthy_payload()
         with (
-            mock.patch.object(operator_cosmetics.day2, "status_payload", return_value=payload),
+            mock.patch.object(operator_cosmetics.operations, "status_payload", return_value=payload),
             mock.patch.object(operator_cosmetics.dashboard, "draw_header") as header,
             mock.patch.object(operator_cosmetics.dashboard, "draw_status") as status,
         ):
