@@ -5,13 +5,13 @@ import unittest
 from contextlib import redirect_stderr
 from unittest import mock
 
-from vaultwarden_oci import day2, storage, update_cli
+from vaultwarden_oci import operations, storage, update_cli
 
 
 class AutomationTargetTests(unittest.TestCase):
     @staticmethod
     def properties(unit: str, *, target_enabled: str = "enabled") -> dict[str, object]:
-        if unit == day2.AUTOMATION_TARGET:
+        if unit == operations.AUTOMATION_TARGET:
             return {
                 "unit": unit,
                 "load_state": "loaded",
@@ -49,20 +49,20 @@ class AutomationTargetTests(unittest.TestCase):
 
     def test_enabled_active_target_makes_active_wanted_timers_persistent(self) -> None:
         with mock.patch(
-            "vaultwarden_oci.day2._systemd_properties",
+            "vaultwarden_oci.operations._systemd_properties",
             side_effect=lambda unit: self.properties(unit),
         ):
-            snapshot = day2.automation_snapshot()
+            snapshot = operations.automation_snapshot()
         self.assertEqual(snapshot["overall"], "PASS")
         self.assertEqual(snapshot["target"]["health"], "PASS")
         self.assertTrue(all(row["health"] == "PASS" for row in snapshot["timers"]))
 
     def test_disabled_target_is_not_green_even_if_timers_are_currently_active(self) -> None:
         with mock.patch(
-            "vaultwarden_oci.day2._systemd_properties",
+            "vaultwarden_oci.operations._systemd_properties",
             side_effect=lambda unit: self.properties(unit, target_enabled="disabled"),
         ):
-            snapshot = day2.automation_snapshot()
+            snapshot = operations.automation_snapshot()
         self.assertEqual(snapshot["overall"], "FAIL")
         self.assertEqual(snapshot["target"]["health"], "FAIL")
 

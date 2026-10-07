@@ -1,4 +1,4 @@
-"""Read-only day-2 appliance summary, timer inspection, and sanitized support bundle."""
+"""Read-only appliance operations summary, timer inspection, and sanitized support bundle."""
 from __future__ import annotations
 
 import json
@@ -33,7 +33,7 @@ _REDACTIONS = (
 )
 
 
-class Day2Error(RuntimeError):
+class OperationsError(RuntimeError):
     """Raised for bounded read-model/support-bundle failures."""
 
 
@@ -236,15 +236,11 @@ def _check(checks: Sequence[cli.DoctorCheck], check_id: str) -> dict[str, str]:
     }
 
 
-def _edge_status(checks: Sequence[cli.DoctorCheck]) -> dict[str, object]:
-    edge_checks = [
-        check
-        for check in checks
-        if check.check_id.startswith("edge.") or check.check_id.startswith("crowdsec.")
-    ]
+def _doctor_group(checks: Sequence[cli.DoctorCheck], prefix: str) -> dict[str, object]:
+    grouped = [check for check in checks if check.check_id.startswith(prefix)]
     return {
-        "overall": cli.doctor_overall(edge_checks),
-        "checks": [check.as_dict() for check in edge_checks],
+        "overall": cli.doctor_overall(grouped) if grouped else "FAIL",
+        "checks": [check.as_dict() for check in grouped],
     }
 
 
@@ -280,7 +276,8 @@ def status_payload() -> dict[str, object]:
         "storage": storage_state,
         "recovery": _recovery_status(),
         "rclone": _check(doctor_checks, "recovery.rclone"),
-        "edge": _edge_status(doctor_checks),
+        "edge": _doctor_group(doctor_checks, "edge."),
+        "crowdsec": _doctor_group(doctor_checks, "crowdsec."),
         "admin": _check(doctor_checks, "edge.admin.protection"),
         "timers": timers,
         "automation": {
@@ -366,7 +363,7 @@ def _versions_text() -> str:
 
 def _support_output(output: Path | None) -> Path:
     if SUPPORT_ROOT.is_symlink():
-        raise Day2Error(f"support runtime path must not be a symlink: {SUPPORT_ROOT}")
+        raise OperationsError(f"support runtime path must not be a symlink: {SUPPORT_ROOT}")
     SUPPORT_ROOT.mkdir(parents=True, exist_ok=True)
     os.chmod(SUPPORT_ROOT, 0o700)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -375,15 +372,15 @@ def _support_output(output: Path | None) -> Path:
     else:
         final = output if output.is_absolute() else Path.cwd() / output
         if final.parent.is_symlink() or not final.parent.is_dir():
-            raise Day2Error(f"support-bundle output parent must be an existing directory: {final.parent}")
+            raise OperationsError(f"support-bundle output parent must be an existing directory: {final.parent}")
     if final.exists() or final.is_symlink():
-        raise Day2Error(f"support-bundle output already exists; refusing overwrite: {final}")
+        raise OperationsError(f"support-bundle output already exists; refusing overwrite: {final}")
     return final
 
 
 def support_bundle(output: Path | None = None) -> Path:
     if os.geteuid() != 0:
-        raise Day2Error("support-bundle must run as root")
+        raise OperationsError("support-bundle must run as root")
     final = _support_output(output)
     known, secret_error = _known_secret_values()
     with tempfile.TemporaryDirectory(prefix="vwoci-support-", dir=str(SUPPORT_ROOT)) as directory:
@@ -423,9 +420,9 @@ def support_bundle(output: Path | None = None) -> Path:
             try:
                 os.link(temporary, final, follow_symlinks=False)
             except FileExistsError as exc:
-                raise Day2Error(f"support-bundle output already exists; refusing overwrite: {final}") from exc
+                raise OperationsError(f"support-bundle output already exists; refusing overwrite: {final}") from exc
             except OSError as exc:
-                raise Day2Error(f"cannot publish support bundle {final}: {exc}") from exc
+                raise OperationsError(f"cannot publish support bundle {final}: {exc}") from exc
             durability.fsync_file_and_parent(final)
         finally:
             temporary.unlink(missing_ok=True)

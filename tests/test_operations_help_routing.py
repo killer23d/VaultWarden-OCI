@@ -6,7 +6,7 @@ from unittest import mock
 from vaultwarden_oci import update_cli
 
 
-class Day2HelpRoutingTests(unittest.TestCase):
+class OperationsHelpRoutingTests(unittest.TestCase):
     def test_public_help_never_requires_storage_or_update_recovery_clearance(self) -> None:
         for argv in (
             ["start", "--help"],

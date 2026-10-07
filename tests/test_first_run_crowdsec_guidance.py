@@ -167,7 +167,7 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
             ],
         }
         with (
-            mock.patch.object(operator_cosmetics.day2, "automation_snapshot", return_value=snapshot),
+            mock.patch.object(operator_cosmetics.operations, "automation_snapshot", return_value=snapshot),
             redirect_stdout(output),
         ):
             code = operator_cosmetics.timers()

@@ -8,7 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vaultwarden_oci import cli, dashboard, day2, edge, runtime, secrets, update_status
+from vaultwarden_oci import cli, dashboard, operations, edge, runtime, secrets, update_status
 
 
 def valid_config(domain: str = "vault.invalid") -> str:
@@ -39,7 +39,7 @@ timeout_seconds = 15
 '''
 
 
-class Day2TimerTests(unittest.TestCase):
+class OperationsTimerTests(unittest.TestCase):
     def timer_properties(self, unit: str, *, service_result: str = "success", timer_enabled: str = "enabled") -> dict[str, object]:
         if unit.endswith(".timer"):
             return {
@@ -66,10 +66,10 @@ class Day2TimerTests(unittest.TestCase):
     def test_real_systemd_failure_results_are_failures(self) -> None:
         for result in ("exit-code", "signal", "timeout"):
             with self.subTest(result=result), mock.patch(
-                "vaultwarden_oci.day2._systemd_properties",
+                "vaultwarden_oci.operations._systemd_properties",
                 side_effect=lambda unit, result=result: self.timer_properties(unit, service_result=result),
             ):
-                rows = day2.timer_rows()
+                rows = operations.timer_rows()
             self.assertTrue(all(row["health"] == "FAIL" for row in rows))
             self.assertTrue(all(row["failed"] for row in rows))
             self.assertTrue(all(f"trigger result={result}" in row["problems"] for row in rows))
@@ -98,21 +98,21 @@ class Day2TimerTests(unittest.TestCase):
                 "last_trigger": None,
             }
 
-        with mock.patch("vaultwarden_oci.day2._systemd_properties", side_effect=properties):
-            rows = day2.timer_rows()
-        self.assertEqual(len(rows), len(day2.TIMER_UNITS))
+        with mock.patch("vaultwarden_oci.operations._systemd_properties", side_effect=properties):
+            rows = operations.timer_rows()
+        self.assertEqual(len(rows), len(operations.TIMER_UNITS))
         self.assertTrue(all(row["health"] == "FAIL" for row in rows))
 
     def test_healthy_waiting_timer_accepts_successful_inactive_trigger(self) -> None:
         with mock.patch(
-            "vaultwarden_oci.day2._systemd_properties",
+            "vaultwarden_oci.operations._systemd_properties",
             side_effect=lambda unit: self.timer_properties(unit),
         ):
-            rows = day2.timer_rows()
+            rows = operations.timer_rows()
         self.assertTrue(all(row["health"] == "PASS" for row in rows))
 
 
-class Day2StatusTests(unittest.TestCase):
+class OperationsStatusTests(unittest.TestCase):
     def base_checks(self, admin_status: str, admin_message: str) -> list[cli.DoctorCheck]:
         return [
             cli.DoctorCheck("recovery.rclone", "PASS", "rclone ready"),
@@ -132,19 +132,19 @@ class Day2StatusTests(unittest.TestCase):
             {"kind": "offsite", "state": "none", "verified_at": "-"},
         ]
         storage_ok = {"state": "ok", "mount": "/var/lib/vaultwarden-oci", "warning": False, "used_percent": 25}
-        timer_rows = [{"unit": unit, "health": "PASS", "active_state": "active"} for unit in day2.TIMER_UNITS]
+        timer_rows = [{"unit": unit, "health": "PASS", "active_state": "active"} for unit in operations.TIMER_UNITS]
         with (
-            mock.patch("vaultwarden_oci.day2.runtime.status", return_value=("running", runtime_rows)),
-            mock.patch("vaultwarden_oci.day2.cli.doctor_checks", return_value=self.base_checks(admin_status, admin_message)),
-            mock.patch("vaultwarden_oci.day2._storage_status", return_value=storage_ok),
-            mock.patch("vaultwarden_oci.day2.recovery.status_rows", return_value=recovery_rows),
-            mock.patch("vaultwarden_oci.day2.notification.status_row", return_value={"state": "success"}),
-            mock.patch("vaultwarden_oci.day2.update_status.snapshot", return_value={"installed": "1.0.0", "check_stale": False, "available": False}),
-            mock.patch("vaultwarden_oci.day2.timer_rows", return_value=timer_rows),
-            mock.patch("vaultwarden_oci.day2._now", return_value=2_000_000_000.0),
-            mock.patch("vaultwarden_oci.day2.Path.exists", return_value=False),
+            mock.patch("vaultwarden_oci.operations.runtime.status", return_value=("running", runtime_rows)),
+            mock.patch("vaultwarden_oci.operations.cli.doctor_checks", return_value=self.base_checks(admin_status, admin_message)),
+            mock.patch("vaultwarden_oci.operations._storage_status", return_value=storage_ok),
+            mock.patch("vaultwarden_oci.operations.recovery.status_rows", return_value=recovery_rows),
+            mock.patch("vaultwarden_oci.operations.notification.status_row", return_value={"state": "success"}),
+            mock.patch("vaultwarden_oci.operations.update_status.snapshot", return_value={"installed": "1.0.0", "check_stale": False, "available": False}),
+            mock.patch("vaultwarden_oci.operations.timer_rows", return_value=timer_rows),
+            mock.patch("vaultwarden_oci.operations._now", return_value=2_000_000_000.0),
+            mock.patch("vaultwarden_oci.operations.Path.exists", return_value=False),
         ):
-            return day2.status_payload()
+            return operations.status_payload()
 
     def test_admin_disabled_is_authoritative_pass_not_red_failure(self) -> None:
         payload = self.status_with_admin("PASS", "Vaultwarden admin route is disabled at Caddy")
@@ -156,10 +156,26 @@ class Day2StatusTests(unittest.TestCase):
         self.assertEqual(payload["admin"]["status"], "PASS")
 
     def test_broken_caddy_admin_gate_remains_fail_even_if_secrets_exist(self) -> None:
-        with mock.patch("vaultwarden_oci.day2.secrets.load") as secret_load:
+        with mock.patch("vaultwarden_oci.operations.secrets.load") as secret_load:
             payload = self.status_with_admin("FAIL", "admin route is missing rate limit or outer Basic Auth gate")
         self.assertEqual(payload["admin"]["status"], "FAIL")
         secret_load.assert_not_called()
+
+    def test_edge_and_crowdsec_aggregates_are_independent(self) -> None:
+        checks = [
+            cli.DoctorCheck("edge.cloudflare.cidrs", "PASS", "current"),
+            cli.DoctorCheck("edge.cloudflare.iptables", "PASS", "protected"),
+            cli.DoctorCheck("crowdsec.engine", "PASS", "active"),
+            cli.DoctorCheck("crowdsec.hub", "PASS", "collections"),
+            cli.DoctorCheck("crowdsec.firewall", "FAIL", "firewall unavailable"),
+            cli.DoctorCheck("crowdsec.cloudflare", "PASS", "worker active"),
+        ]
+        self.assertEqual(operations._doctor_group(checks, "edge.")["overall"], "PASS")
+        self.assertEqual(operations._doctor_group(checks, "crowdsec.")["overall"], "FAIL")
+
+    def test_missing_security_group_fails_closed(self) -> None:
+        self.assertEqual(operations._doctor_group([], "edge.")["overall"], "FAIL")
+        self.assertEqual(operations._doctor_group([], "crowdsec.")["overall"], "FAIL")
 
     def test_status_json_is_uncolored_and_automation_failure_affects_exit(self) -> None:
         payload = {
@@ -168,8 +184,8 @@ class Day2StatusTests(unittest.TestCase):
             "automation": {"overall": "FAIL"},
         }
         output = io.StringIO()
-        with mock.patch("vaultwarden_oci.day2.status_payload", return_value=payload), redirect_stdout(output):
-            code = day2.status_command()
+        with mock.patch("vaultwarden_oci.operations.status_payload", return_value=payload), redirect_stdout(output):
+            code = operations.status_command()
         self.assertEqual(code, 1)
         self.assertNotIn("\x1b[", output.getvalue())
         self.assertEqual(json.loads(output.getvalue())["schema_version"], 1)
@@ -213,9 +229,9 @@ class OwnerBoundaryTests(unittest.TestCase):
             self.assertEqual(cli.main(["crowdsec", "unban", "203.0.113.8"]), 0)
         unban.assert_called_once_with("203.0.113.8")
 
-    def test_day2_module_has_no_mutation_owners(self) -> None:
+    def test_operations_module_has_no_mutation_owners(self) -> None:
         for name in ("crowdsec_unban", "crowdsec_decisions", "config_edit", "secrets_edit", "secrets_validate", "notification_test"):
-            self.assertFalse(hasattr(day2, name), name)
+            self.assertFalse(hasattr(operations, name), name)
 
 
 class ValidatedEditTests(unittest.TestCase):
@@ -295,16 +311,16 @@ class SupportBundleTests(unittest.TestCase):
             output = root / "bundle.tar.gz"
             secret = "canonical-super-secret"
             with (
-                mock.patch("vaultwarden_oci.day2.SUPPORT_ROOT", support_root),
-                mock.patch("vaultwarden_oci.day2.os.geteuid", return_value=0),
-                mock.patch("vaultwarden_oci.day2._known_secret_values", return_value=([secret], None)),
-                mock.patch("vaultwarden_oci.day2.status_payload", return_value=self.base_status()),
-                mock.patch("vaultwarden_oci.day2._versions_text", return_value="versions safe\n"),
-                mock.patch("vaultwarden_oci.day2._bounded_journal", return_value=f"token={secret}\nAuthorization: Bearer abc.def.ghi\nordinary log\n"),
-                mock.patch("vaultwarden_oci.day2.cli.run_command", side_effect=lambda argv: self.command_result(argv)),
+                mock.patch("vaultwarden_oci.operations.SUPPORT_ROOT", support_root),
+                mock.patch("vaultwarden_oci.operations.os.geteuid", return_value=0),
+                mock.patch("vaultwarden_oci.operations._known_secret_values", return_value=([secret], None)),
+                mock.patch("vaultwarden_oci.operations.status_payload", return_value=self.base_status()),
+                mock.patch("vaultwarden_oci.operations._versions_text", return_value="versions safe\n"),
+                mock.patch("vaultwarden_oci.operations._bounded_journal", return_value=f"token={secret}\nAuthorization: Bearer abc.def.ghi\nordinary log\n"),
+                mock.patch("vaultwarden_oci.operations.cli.run_command", side_effect=lambda argv: self.command_result(argv)),
                 redirect_stdout(io.StringIO()),
             ):
-                day2.support_bundle(output)
+                operations.support_bundle(output)
             with tarfile.open(output, "r:gz") as archive:
                 names = set(archive.getnames())
                 content = "\n".join(
@@ -323,16 +339,16 @@ class SupportBundleTests(unittest.TestCase):
             root = Path(directory)
             output = root / "bundle.tar.gz"
             with (
-                mock.patch("vaultwarden_oci.day2.SUPPORT_ROOT", root / "support"),
-                mock.patch("vaultwarden_oci.day2.os.geteuid", return_value=0),
-                mock.patch("vaultwarden_oci.day2._known_secret_values", return_value=([], "secret load failed")),
-                mock.patch("vaultwarden_oci.day2.status_payload", return_value=self.base_status()),
-                mock.patch("vaultwarden_oci.day2._versions_text", return_value="versions safe\n"),
-                mock.patch("vaultwarden_oci.day2._bounded_journal") as journal,
-                mock.patch("vaultwarden_oci.day2.cli.run_command", side_effect=lambda argv: self.command_result(argv)),
+                mock.patch("vaultwarden_oci.operations.SUPPORT_ROOT", root / "support"),
+                mock.patch("vaultwarden_oci.operations.os.geteuid", return_value=0),
+                mock.patch("vaultwarden_oci.operations._known_secret_values", return_value=([], "secret load failed")),
+                mock.patch("vaultwarden_oci.operations.status_payload", return_value=self.base_status()),
+                mock.patch("vaultwarden_oci.operations._versions_text", return_value="versions safe\n"),
+                mock.patch("vaultwarden_oci.operations._bounded_journal") as journal,
+                mock.patch("vaultwarden_oci.operations.cli.run_command", side_effect=lambda argv: self.command_result(argv)),
                 redirect_stdout(io.StringIO()),
             ):
-                day2.support_bundle(output)
+                operations.support_bundle(output)
             journal.assert_not_called()
             with tarfile.open(output, "r:gz") as archive:
                 names = set(archive.getnames())
@@ -345,11 +361,11 @@ class SupportBundleTests(unittest.TestCase):
             existing = root / "existing.tar.gz"
             existing.write_text("do-not-touch", encoding="utf-8")
             with (
-                mock.patch("vaultwarden_oci.day2.SUPPORT_ROOT", root / "support"),
-                mock.patch("vaultwarden_oci.day2.os.geteuid", return_value=0),
+                mock.patch("vaultwarden_oci.operations.SUPPORT_ROOT", root / "support"),
+                mock.patch("vaultwarden_oci.operations.os.geteuid", return_value=0),
             ):
-                with self.assertRaises(day2.Day2Error):
-                    day2.support_bundle(existing)
+                with self.assertRaises(operations.OperationsError):
+                    operations.support_bundle(existing)
             self.assertEqual(existing.read_text(encoding="utf-8"), "do-not-touch")
 
 
@@ -361,6 +377,7 @@ class DashboardBoundaryTests(unittest.TestCase):
             "storage": {"state": "failure", "error": "test"},
             "recovery": [],
             "edge": {"overall": "PASS"},
+            "crowdsec": {"overall": "PASS"},
             "admin": {"status": "PASS", "message": "Vaultwarden admin route is disabled at Caddy"},
             "automation": {"overall": "PASS", "healthy": 4, "expected": 4},
             "notification": {"state": "success"},
@@ -400,6 +417,7 @@ class DashboardBoundaryTests(unittest.TestCase):
 
     def test_eof_exits_main_instead_of_redrawing_forever(self) -> None:
         with (
+            mock.patch("vaultwarden_oci.dashboard.os.geteuid", return_value=0),
             mock.patch("vaultwarden_oci.dashboard._status", return_value=self.minimal_status()) as status,
             mock.patch("builtins.input", side_effect=EOFError),
             redirect_stdout(io.StringIO()),
@@ -409,6 +427,7 @@ class DashboardBoundaryTests(unittest.TestCase):
 
     def test_e_shortcut_exits_and_email_uses_n(self) -> None:
         with (
+            mock.patch("vaultwarden_oci.dashboard.os.geteuid", return_value=0),
             mock.patch("vaultwarden_oci.dashboard._status", return_value=self.minimal_status()),
             mock.patch("builtins.input", return_value="e"),
             redirect_stdout(io.StringIO()),
@@ -427,6 +446,77 @@ class DashboardBoundaryTests(unittest.TestCase):
         ).lower()
         for forbidden in ("make -c", "postfix", "email-queue", "backup tier", "docker prune", "docker compose"):
             self.assertNotIn(forbidden, sources)
+
+    def test_security_summary_keeps_edge_and_crowdsec_truthful(self) -> None:
+        payload = self.minimal_status()
+        payload["doctor"] = {
+            "overall": "FAIL",
+            "checks": [
+                {"id": "crowdsec.engine", "status": "PASS", "message": "active"},
+                {"id": "crowdsec.hub", "status": "PASS", "message": "collections"},
+                {"id": "crowdsec.firewall", "status": "FAIL", "message": "firewall unavailable"},
+                {"id": "crowdsec.cloudflare", "status": "PASS", "message": "worker active"},
+            ],
+        }
+        payload["edge"] = {"overall": "PASS", "checks": []}
+        payload["crowdsec"] = {"overall": "FAIL", "checks": []}
+        output = io.StringIO()
+        with redirect_stdout(output):
+            dashboard.draw_status(payload)
+        rendered = output.getvalue()
+        self.assertIn("edge PASS", rendered)
+        self.assertIn("CrowdSec FAIL", rendered)
+        self.assertIn("firewall FAIL", rendered)
+
+    def test_security_menu_delegates_dns_and_worker_actions_to_vwctl(self) -> None:
+        cases = {
+            "5": ["dns", "status"],
+            "6": ["dns", "update", "--dry-run"],
+            "7": ["dns", "update"],
+            "8": ["edge", "refresh"],
+            "9": ["crowdsec", "remediation-start"],
+            "10": ["crowdsec", "confirm-fail-open"],
+        }
+        for choice, expected in cases.items():
+            with self.subTest(choice=choice):
+                calls: list[list[str]] = []
+                with (
+                    mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler, selected=choice: handler(selected)),
+                    mock.patch("vaultwarden_oci.dashboard._confirm", return_value=True),
+                    mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
+                ):
+                    dashboard.security_menu()
+                self.assertEqual(calls, [expected])
+
+    def test_recovery_verification_delegates_identity_selection_to_recovery_owner(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("4")),
+            mock.patch("vaultwarden_oci.dashboard._prompt", return_value="/tmp/recovery.vwrec"),
+            mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
+        ):
+            dashboard.recovery_menu()
+        self.assertEqual(calls, [["recovery", "verify", "--file", "/tmp/recovery.vwrec"]])
+
+    def test_recovery_kit_delegates_identity_selection_to_recovery_owner(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("1")),
+            mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
+        ):
+            dashboard.recovery_kit_menu()
+        self.assertEqual(calls, [["recovery-kit", "export"]])
+
+    def test_dashboard_refuses_non_root_before_reading_status(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch("vaultwarden_oci.dashboard.os.geteuid", return_value=1000),
+            mock.patch("vaultwarden_oci.dashboard._status") as status,
+            redirect_stderr(error),
+        ):
+            self.assertEqual(dashboard.main([]), 1)
+        status.assert_not_called()
+        self.assertIn("must run as root", error.getvalue())
 
     def test_source_and_installed_dashboard_wrappers_parse_and_help(self) -> None:
         for path in (ROOT / "dashboard.sh", ROOT / "vaultwarden_oci/dashboard.sh"):
@@ -451,6 +541,16 @@ class DashboardBoundaryTests(unittest.TestCase):
             )
             env = dict(os.environ)
             env["PYTHONPATH"] = str(hostile)
+            interpreter_marker = hostile / "hostile-python-executed"
+            hostile_python = hostile / "python3"
+            hostile_python.write_text(
+                "#!/bin/sh\n"
+                + f"printf x > {str(interpreter_marker)!r}\n"
+                + "exit 99\n",
+                encoding="utf-8",
+            )
+            hostile_python.chmod(0o755)
+            env["PATH"] = str(hostile) + os.pathsep + env.get("PATH", "")
 
             for path in (ROOT / "dashboard.sh", ROOT / "vaultwarden_oci/dashboard.sh"):
                 with self.subTest(path=str(path)):
@@ -467,13 +567,14 @@ class DashboardBoundaryTests(unittest.TestCase):
                     self.assertIn("Operations Dashboard", result.stdout)
                     self.assertNotIn("HOSTILE DASHBOARD EXECUTED", result.stdout)
                     self.assertFalse(marker.exists(), f"{path} imported dashboard code from caller-controlled path")
+                    self.assertFalse(interpreter_marker.exists(), f"{path} executed python3 from caller-controlled PATH")
 
 
 class PublicCliTests(unittest.TestCase):
     def run_vwctl(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(ROOT / "vwctl"), *args], cwd=ROOT, text=True, capture_output=True, check=False)
 
-    def test_help_tree_exposes_day2_commands_normally(self) -> None:
+    def test_help_tree_exposes_operations_commands_normally(self) -> None:
         result = self.run_vwctl("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         for surface in ("config", "secrets", "notification", "support-bundle", "timers", "crowdsec"):

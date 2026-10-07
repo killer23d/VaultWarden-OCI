@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import cli, day2
+from vaultwarden_oci import cli, operations
 
 
 class SupportBundleRedactionRegressionTests(unittest.TestCase):
@@ -42,13 +42,13 @@ class SupportBundleRedactionRegressionTests(unittest.TestCase):
             root = Path(directory)
             output = root / "bundle.tar.gz"
             with (
-                mock.patch("vaultwarden_oci.day2.SUPPORT_ROOT", root / "support"),
-                mock.patch("vaultwarden_oci.day2.os.geteuid", return_value=0),
-                mock.patch("vaultwarden_oci.day2._known_secret_values", return_value=([configured], None)),
-                mock.patch("vaultwarden_oci.day2.status_payload", return_value=self.base_status()),
-                mock.patch("vaultwarden_oci.day2._versions_text", return_value="versions safe\n"),
+                mock.patch("vaultwarden_oci.operations.SUPPORT_ROOT", root / "support"),
+                mock.patch("vaultwarden_oci.operations.os.geteuid", return_value=0),
+                mock.patch("vaultwarden_oci.operations._known_secret_values", return_value=([configured], None)),
+                mock.patch("vaultwarden_oci.operations.status_payload", return_value=self.base_status()),
+                mock.patch("vaultwarden_oci.operations._versions_text", return_value="versions safe\n"),
                 mock.patch(
-                    "vaultwarden_oci.day2._bounded_journal",
+                    "vaultwarden_oci.operations._bounded_journal",
                     return_value=(
                         f"Authorization: Bearer {bearer}\n"
                         f"Authorization: Basic {basic}\n"
@@ -57,12 +57,12 @@ class SupportBundleRedactionRegressionTests(unittest.TestCase):
                     ),
                 ),
                 mock.patch(
-                    "vaultwarden_oci.day2.cli.run_command",
+                    "vaultwarden_oci.operations.cli.run_command",
                     side_effect=lambda argv: self.command_result(argv),
                 ),
                 redirect_stdout(io.StringIO()),
             ):
-                day2.support_bundle(output)
+                operations.support_bundle(output)
 
             names, content = self.archive_text(output)
             self.assertIn("journal.txt", names)
@@ -84,23 +84,23 @@ class SupportBundleRedactionRegressionTests(unittest.TestCase):
             output = root / "bundle.tar.gz"
             journal = mock.Mock(return_value=f"unlabeled secret value {short_secret}\n")
             with (
-                mock.patch("vaultwarden_oci.day2.SUPPORT_ROOT", root / "support"),
-                mock.patch("vaultwarden_oci.day2.os.geteuid", return_value=0),
+                mock.patch("vaultwarden_oci.operations.SUPPORT_ROOT", root / "support"),
+                mock.patch("vaultwarden_oci.operations.os.geteuid", return_value=0),
                 mock.patch(
-                    "vaultwarden_oci.day2.runtime.load_config",
+                    "vaultwarden_oci.operations.runtime.load_config",
                     return_value=mock.Mock(offline_recovery_recipient="age1" + "q" * 58),
                 ),
-                mock.patch("vaultwarden_oci.day2.secrets.load", return_value=loaded),
-                mock.patch("vaultwarden_oci.day2.status_payload", return_value=self.base_status()),
-                mock.patch("vaultwarden_oci.day2._versions_text", return_value="versions safe\n"),
-                mock.patch("vaultwarden_oci.day2._bounded_journal", journal),
+                mock.patch("vaultwarden_oci.operations.secrets.load", return_value=loaded),
+                mock.patch("vaultwarden_oci.operations.status_payload", return_value=self.base_status()),
+                mock.patch("vaultwarden_oci.operations._versions_text", return_value="versions safe\n"),
+                mock.patch("vaultwarden_oci.operations._bounded_journal", journal),
                 mock.patch(
-                    "vaultwarden_oci.day2.cli.run_command",
+                    "vaultwarden_oci.operations.cli.run_command",
                     side_effect=lambda argv: self.command_result(argv),
                 ),
                 redirect_stdout(io.StringIO()),
             ):
-                day2.support_bundle(output)
+                operations.support_bundle(output)
 
             journal.assert_not_called()
             names, content = self.archive_text(output)

@@ -105,7 +105,7 @@ def _human_output(args: Sequence[str]) -> Iterator[None]:
 
 
 def _cosmetic_override(args: Sequence[str]) -> int | None:
-    """Keep machine contracts in cli/day2 while restoring the proven human presentation."""
+    """Keep machine contracts in cli/operations while restoring the proven human presentation."""
     from . import operator_cosmetics
 
     command = tuple(args)
@@ -124,10 +124,10 @@ def _cosmetic_override(args: Sequence[str]) -> int | None:
 
 def _automation_enable_action() -> str | None:
     """Return the supported first-run automation action only when it is needed."""
-    from . import day2
+    from . import operations
 
     try:
-        target = day2.automation_snapshot()["target"]
+        target = operations.automation_snapshot()["target"]
     except (OSError, RuntimeError, TypeError, KeyError):
         return None
     if not isinstance(target, dict):

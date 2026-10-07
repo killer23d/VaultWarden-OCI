@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "email-providers.toml"
 
 
-class NotificationDay2BoundaryTests(unittest.TestCase):
+class NotificationOperationsBoundaryTests(unittest.TestCase):
     def config(self, *, notifications: bool = True) -> runtime.RuntimeConfig:
         return runtime.RuntimeConfig(
             domain="vault.example.invalid",
