@@ -141,3 +141,5 @@ Setup does not preselect a notification API provider because it cannot truthfull
 The same discoverability rule applies across the stack, but only where there is a safe operator choice. Caddy's supported `/admin` rate-limit controls are pre-populated. SMTP controls are pre-populated with the scope described above. Cloudflare tokens, CrowdSec remediation, rclone destinations, storage identity, systemd timers, Docker runtime limits, and proxy-trust behavior are either credentials, workflow inputs, or appliance-owned safety controls rather than free-form application settings, so they intentionally do not become a generic `[options]` bag.
 
 Use [Operations](OPERATIONS.md) for those supported workflows and [Security](SECURITY.md) for the boundaries that remain intentionally non-configurable.
+
+For validation, restart, Admin, SMTP, or secret-custody failures, use the symptom-oriented [Troubleshooting guide](TROUBLESHOOTING.md) rather than editing rendered runtime files directly.
