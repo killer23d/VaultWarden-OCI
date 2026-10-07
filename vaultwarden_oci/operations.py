@@ -239,7 +239,7 @@ def _check(checks: Sequence[cli.DoctorCheck], check_id: str) -> dict[str, str]:
 def _doctor_group(checks: Sequence[cli.DoctorCheck], prefix: str) -> dict[str, object]:
     grouped = [check for check in checks if check.check_id.startswith(prefix)]
     return {
-        "overall": cli.doctor_overall(grouped),
+        "overall": cli.doctor_overall(grouped) if grouped else "FAIL",
         "checks": [check.as_dict() for check in grouped],
     }
 
