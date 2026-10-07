@@ -49,7 +49,7 @@ systemctl status vaultwarden-oci.service --no-pager
 journalctl -u vaultwarden-oci.service --no-pager --lines=200
 ```
 
-A `doctor` **FAIL** is an unresolved appliance problem. A `WARN` is not automatically ignorable; read the named check. The normal fresh-install exception is offsite recovery: `recovery.offsite` / `recovery.rclone` can remain warning/unconfigured until an offsite target is deliberately configured.
+A `doctor` **FAIL** is an unresolved appliance problem. A `WARN` is not automatically ignorable; read the named check. During first-run, `recovery.local` is expected to remain WARN until you create the first verified `.vwrec` with `sudo vwctl backup`. Offsite recovery is separately optional: `recovery.offsite` / `recovery.rclone` can remain warning/unconfigured until an offsite target is deliberately configured.
 
 If you need to hand diagnostics to another administrator, create the bounded sanitized bundle:
 
