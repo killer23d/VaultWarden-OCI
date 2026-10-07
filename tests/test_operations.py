@@ -173,6 +173,10 @@ class OperationsStatusTests(unittest.TestCase):
         self.assertEqual(operations._doctor_group(checks, "edge.")["overall"], "PASS")
         self.assertEqual(operations._doctor_group(checks, "crowdsec.")["overall"], "FAIL")
 
+    def test_missing_security_group_fails_closed(self) -> None:
+        self.assertEqual(operations._doctor_group([], "edge.")["overall"], "FAIL")
+        self.assertEqual(operations._doctor_group([], "crowdsec.")["overall"], "FAIL")
+
     def test_status_json_is_uncolored_and_automation_failure_affects_exit(self) -> None:
         payload = {
             "schema_version": 1,
