@@ -90,10 +90,14 @@ From a source checkout, `sudo ./dashboard.sh` is equivalent.
 
 - [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, terminal-generated versus pre-existing offline recovery custody, explicit `--use-latest`, config/secrets completion, and first start.
 - [Configuration](docs/CONFIGURATION.md) — the pre-populated operator setting catalog, bounded transition from an existing Vaultwarden Admin `config.json`, SMTP ownership/scope, Caddy `/admin` limit, optional notifications, and restart behavior after edits.
-- [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, troubleshooting, and file locations.
+- [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, and file locations.
 - [Recovery](docs/RECOVERY.md) — backup contents/exclusions, verification, same-host restore, lost-server disaster recovery, rclone, and the separate recovery-kit ZIP.
 - [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
+- [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md) — which token is used for DNS/certificates versus CrowdSec remediation, required permissions, scoping, and storage.
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — symptom-oriented diagnostics, supported corrections, verification steps, and the evidence to collect when something fails.
 - [Host acceptance](docs/HOST-ACCEPTANCE.md) — disposable Ubuntu 24.04 release gate for `amd64` and `arm64`; unavailable real-host coverage must be recorded as `NOT RUN`.
+
+If an install or day-2 action fails, start with [Troubleshooting](docs/TROUBLESHOOTING.md) rather than searching the source tree or trying broad Docker/system repairs.
 
 Maintainer/product authorities are [Project boundary](docs/PROJECT-BOUNDARY.md), [Durable decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), and [Test strategy](reports/TEST-STRATEGY.md). The prompt archives under `reports/` are historical execution/review records, not competing product authority.
 
