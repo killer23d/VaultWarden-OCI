@@ -6,13 +6,13 @@ This file complements `docs/PROJECT-BOUNDARY.md`. It intentionally consolidates 
 
 ## 1. Product and compatibility boundary
 
-**Decision:** VaultWarden-OCI is a fresh-install small-team appliance for roughly 10 users, operated by a junior administrator on Ubuntu 24.04 LTS. `amd64` and `arm64` are supported/tested targets and the runtime remains cloud-provider neutral.
+**Decision:** VaultWarden-OCI is a fresh-install small-team appliance for roughly 10 users, operated by a junior administrator. Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. The runtime remains cloud-provider neutral; OCI is the principal deployment environment, not a runtime dependency.
 
 The earlier product is intentionally retained as a **UI/UX, security, and behavioral design reference**. Its backend architecture is **not** a compatibility target. Do not recreate Make orchestration, Postfix/queue machinery, multiple backup tiers, migration/archive compatibility, broad helper libraries, broad repair commands, generic Docker cleanup, or the old implementation/test shape merely because they existed before.
 
 ## 2. Language and ownership boundary
 
-**Decision:** Python 3.12 standard-library-first owns structured logic. Bash is limited to thin bootstrap, supported interactive UI, host/container glue, or cases where shell is materially simpler.
+**Decision:** The appliance uses each supported LTS's native Python 3 with a standard-library-first design: Python 3.12 on Ubuntu 24.04 and Python 3.14 on Ubuntu 26.04. Bash is limited to thin bootstrap, supported interactive UI, host/container glue, or cases where shell is materially simpler.
 
 Python owns configuration/version parsing, CLI dispatch, normalized subprocess execution, validation, locking, diagnostics, SOPS/Age orchestration, notification catalog/transport orchestration and failure classification, recovery metadata/orchestration, rclone orchestration, update transactions, and Cloudflare origin policy.
 
@@ -265,7 +265,7 @@ This exception does not authorize ordinary package drift during application upda
 
 1. focused unit tests;
 2. small integration tests;
-3. disposable real-host Ubuntu 24.04 release acceptance on `amd64` and `arm64` where environments are available.
+3. disposable real-host Ubuntu 24.04 release acceptance on `amd64` and `arm64` where environments are available; Ubuntu 26.04 receives native Python 3.14 and OS-sensitive CI compatibility coverage, with real OCI host acceptance recorded as `NOT RUN` until deliberately performed.
 
 Tests protect security, availability, recoverability, and operator truthfulness. Setup/custody coverage must protect the explicit-recipient boundary, supported CLI value forms, headless fail-closed-before-mutation behavior, and transient-key cleanup after handoff. Do not add permanent private source-string/order assertions, prose freezing, duplicated state machines, a custom test-runner product, or a coverage-percentage gate.
 
