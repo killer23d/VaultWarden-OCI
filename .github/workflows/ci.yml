@@ -239,6 +239,11 @@ jobs:
           date --version >/dev/null
           tar --version >/dev/null
 
+      - name: Real CrowdSec package containment on Resolute
+        run: sudo -E python3 tests/acceptance_crowdsec_firewall_package.py
+      - name: Real Docker origin packet path on Resolute
+        run: sudo bash tests/acceptance_edge_packet.sh
+
   ubuntu-26-04-arm64-compatibility:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
