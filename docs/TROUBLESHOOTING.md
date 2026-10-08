@@ -1,5 +1,7 @@
 # Troubleshooting
 
+This guide applies to supported Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute hosts. When collecting host evidence, record the Ubuntu version/codename and architecture; do not assume a failure on one LTS proves the same behavior on the other.
+
 Use this guide when the appliance is installed or being installed but a supported workflow does not reach its expected result. Start with the symptom; use the narrow diagnostics shown here before changing state.
 
 The normal rule is:
