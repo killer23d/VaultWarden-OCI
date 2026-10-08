@@ -4,14 +4,14 @@ VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of rou
 
 ## Supported production path
 
-- Ubuntu 24.04 LTS only.
-- `amd64` and `arm64` are supported/tested architectures.
+- Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute.
+- `amd64` and `arm64` are supported architectures. Ubuntu 24.04 retains the existing disposable real-host acceptance baseline; Ubuntu 26.04 is code/CI compatibility validated and has not received real OCI host acceptance in this workstream.
 - Runtime behavior is cloud-provider neutral.
 - Production persistent application state must live on a separate storage filesystem/volume. A host whose production state resides only on the boot/root filesystem is unsupported.
 - Cloudflare-proxied production ingress with Caddy.
 - Docker bridge networking with one small project-owned `DOCKER-USER` origin-filter path that permits published HTTPS only from validated Cloudflare source ranges, uses bounded last-known-good state, and fails closed when no safe policy is available.
 - CrowdSec detects Caddy, Vaultwarden, SSH/Linux, and kernel/firewall abuse. Proxied real-client web decisions are remediated through the Cloudflare Worker. A separate CrowdSec nftables firewall bouncer may enforce broad/community decisions on host `INPUT` only; it must not own Docker `FORWARD` or `DOCKER-USER` policy.
-- Python 3.12 standard-library-first owns structured logic; Bash is limited to bootstrap, supported interactive UI, and host/container glue where materially simpler.
+- Native supported Python owns structured logic with a standard-library-first design: Python 3.12 on Ubuntu 24.04 and Python 3.14 on Ubuntu 26.04. Bash is limited to bootstrap, supported interactive UI, and host/container glue where materially simpler.
 - `vwctl` is the implementation and mutation authority.
 - `dashboard.sh` is a supported day-2 human interface. One mutation authority does not mean one user interface.
 - The normal first-run human path is `setup.sh`: validate host/storage, install dependencies and appliance content, prepopulate config from operator inputs, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
