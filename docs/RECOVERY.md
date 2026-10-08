@@ -97,7 +97,7 @@ This is intentionally a different procedure from same-host restore.
 
 **Required off-host material:** a `.vwrec`, the matching offline Age private identity, and preferably the complete recovery-kit ZIP plus its separately stored passphrase. If the only `.vwrec` is on an rclone remote, you also need the credentials/config needed to retrieve it.
 
-1. Build a fresh Ubuntu 24.04 LTS host on a supported architecture and attach a **dedicated** ext4/xfs data volume. Do not restore onto root-only storage.
+1. Build a fresh supported Ubuntu host—24.04 LTS Noble or 26.04 LTS Resolute—on a supported architecture and attach a **dedicated** ext4/xfs data volume. Do not restore onto root-only storage. A `.vwrec` is application-level recovery material, not an operating-system snapshot; an OS move is performed by restoring onto a fresh supported host rather than upgrading the old host in place.
 2. Obtain a trusted release/source checkout and inspect storage as described in [Install](INSTALL.md).
 3. Derive the offline public recipient without making the private key persistent appliance state:
 
