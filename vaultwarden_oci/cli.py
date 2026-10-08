@@ -51,6 +51,7 @@ DOCTOR_CHECK_IDS = (
     "recovery.rclone",
 )
 _ARCH = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+SUPPORTED_UBUNTU_RELEASES = {"24.04": "noble", "26.04": "resolute"}
 _EVENT = re.compile(r"^[A-Za-z0-9_.@:-]{1,160}$")
 
 
@@ -63,6 +64,10 @@ class VersionsError(ValueError):
 
 
 class UnsupportedArchitecture(ValueError):
+    pass
+
+
+class UnsupportedHost(ValueError):
     pass
 
 
@@ -252,8 +257,8 @@ def mutation_lock(path: Path = GLOBAL_LOCK_PATH) -> Iterator[None]:
         handle.close()
 
 
-def _os_release(path: Path) -> dict[str, str]:
-    values = {}
+def read_os_release(path: Path = OS_RELEASE_PATH) -> dict[str, str]:
+    values: dict[str, str] = {}
     with path.open("r", encoding="utf-8") as handle:
         for raw in handle:
             line = raw.strip()
@@ -261,6 +266,36 @@ def _os_release(path: Path) -> dict[str, str]:
                 key, value = line.split("=", 1)
                 values[key] = value.strip().strip("\"'")
     return values
+
+
+def validate_supported_ubuntu_release(values: Mapping[str, str]) -> tuple[str, str]:
+    distro = values.get("ID", "").strip().lower()
+    version = values.get("VERSION_ID", "").strip()
+    expected_codename = SUPPORTED_UBUNTU_RELEASES.get(version)
+    supported = ", ".join(
+        f"Ubuntu {release} LTS ({codename})"
+        for release, codename in SUPPORTED_UBUNTU_RELEASES.items()
+    )
+    if distro != "ubuntu" or expected_codename is None:
+        raise UnsupportedHost(
+            f"unsupported host {distro or 'unknown'} {version or 'unknown'}; supported hosts are {supported}"
+        )
+
+    codenames = [
+        value.strip().lower()
+        for value in (values.get("VERSION_CODENAME", ""), values.get("UBUNTU_CODENAME", ""))
+        if value.strip()
+    ]
+    if not codenames:
+        raise UnsupportedHost(
+            f"unsupported Ubuntu {version} release metadata; codename {expected_codename!r} is required"
+        )
+    if any(codename != expected_codename for codename in codenames):
+        observed = ", ".join(dict.fromkeys(codenames))
+        raise UnsupportedHost(
+            f"unsupported Ubuntu release metadata; {version} requires codename {expected_codename!r}, got {observed!r}"
+        )
+    return version, expected_codename
 
 
 def doctor_checks(
@@ -271,13 +306,14 @@ def doctor_checks(
     machine: str | None = None,
 ) -> list[DoctorCheck]:
     try:
-        release = _os_release(os_release_path)
+        release = read_os_release(os_release_path)
+        version, codename = validate_supported_ubuntu_release(release)
         os_check = DoctorCheck(
             "host.os",
-            "PASS" if release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04" else "FAIL",
-            "Ubuntu 24.04 LTS required",
+            "PASS",
+            f"supported Ubuntu {version} LTS ({codename})",
         )
-    except OSError as exc:
+    except (OSError, UnsupportedHost) as exc:
         os_check = DoctorCheck("host.os", "FAIL", str(exc))
     try:
         arch = normalize_architecture(machine if machine is not None else platform.machine())
