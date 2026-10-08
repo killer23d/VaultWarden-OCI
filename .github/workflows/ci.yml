@@ -193,6 +193,77 @@ jobs:
               raise SystemExit(1)
           PY
 
+
+  ubuntu-26-04-compatibility:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Verify Resolute native runtime
+        run: |
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 26.04
+          test "$VERSION_CODENAME" = resolute
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 14), sys.version'
+          test "$(uname -m)" = x86_64
+          systemd --version | head -n 1
+      - name: Compile and run focused application suite
+        run: |
+          python3 -m compileall -q vaultwarden_oci tests
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify supported package and Docker repository availability
+        run: |
+          sudo apt-get update
+          for package in ca-certificates curl gnupg age nano rclone 7zip util-linux; do
+            apt-cache show "$package" >/dev/null
+          done
+          docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"
+          grep -q '^Architectures:' <<<"$docker_release"
+          grep -q 'amd64' <<<"$docker_release"
+          grep -q 'arm64' <<<"$docker_release"
+      - name: Verify systemd 259 unit contract
+        run: |
+          sudo mkdir -p /opt/vaultwarden-oci/current
+          sudo ln -sf "$GITHUB_WORKSPACE/vwctl" /opt/vaultwarden-oci/current/vwctl
+          systemd-analyze verify systemd/*.service systemd/*.timer systemd/*.target
+      - name: Exercise OS-sensitive read-only command forms
+        run: |
+          lsblk -J -b -p -o PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL >/dev/null
+          findmnt -n -o SOURCE --target / >/dev/null
+          wipefs --help >/dev/null
+          blkid --help >/dev/null
+          stat --version >/dev/null
+          readlink --version >/dev/null
+          realpath --version >/dev/null
+          date --version >/dev/null
+          tar --version >/dev/null
+
+  ubuntu-26-04-arm64-compatibility:
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Verify Resolute Arm64 native runtime
+        run: |
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 26.04
+          test "$VERSION_CODENAME" = resolute
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 14), sys.version'
+          test "$(uname -m)" = aarch64
+      - name: Compile and run architecture-sensitive coverage
+        run: |
+          python3 -m compileall -q vaultwarden_oci tests
+          python3 tests/test_install.py -v
+          python3 tests/test_setup_storage.py -v
+          python3 tests/test_update_workflow.py -v
+          python3 tests/test_immutable_vwctl_bytecode.py -v
+      - name: Verify Resolute Docker repository advertises Arm64
+        run: |
+          docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"
+          grep -q 'arm64' <<<"$docker_release"
+
   caddy-config-integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
