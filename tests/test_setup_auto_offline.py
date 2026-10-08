@@ -62,7 +62,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 setup_main.assert_called_once_with(args, defer_next_actions=True)
 
     def test_headless_auto_without_recipient_fails_before_storage_mutation(self) -> None:
-        host = mock.Mock(architecture="amd64")
+        host = mock.Mock(distro="ubuntu", version="24.04", codename="noble", architecture="amd64")
         with (
             mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=False),
             mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
@@ -88,7 +88,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
     def test_recipient_derivation_failure_cleans_generated_private_identity(self) -> None:
         created: dict[str, Path] = {}
         args = install_args()
-        host = mock.Mock(architecture="amd64")
+        host = mock.Mock(distro="ubuntu", version="24.04", codename="noble", architecture="amd64")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "run"
             real_generate = setup_frontend._generate_offline_identity
@@ -134,7 +134,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
 
     def test_blank_vm_preflights_then_bootstraps_age_before_generated_identity_and_storage(self) -> None:
         events: list[tuple[str, ...] | str] = []
-        host = mock.Mock(architecture="amd64")
+        host = mock.Mock(distro="ubuntu", version="24.04", codename="noble", architecture="amd64")
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
             workspace.mkdir()
@@ -183,7 +183,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
         )
 
     def test_age_bootstrap_failure_stops_after_preflight_before_private_identity_or_storage(self) -> None:
-        host = mock.Mock(architecture="amd64")
+        host = mock.Mock(distro="ubuntu", version="24.04", codename="noble", architecture="amd64")
         with (
             mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
             mock.patch.object(setup.os, "geteuid", return_value=0),
