@@ -15,7 +15,7 @@ VaultWarden-OCI favors explicit ownership over frameworks. Python 3.12 standard-
 - `vaultwarden_oci/recovery.py` / `recovery_ux.py` — `.vwrec`, rclone, guided restore, recovery-kit flow.
 - `vaultwarden_oci/notification.py` — closed provider catalog rendering/delivery and bounded SMTP fallback.
 - `vaultwarden_oci/update*.py` — exact version discovery/freezing and explicit immutable update transaction.
-- `vaultwarden_oci/day2.py` / `dashboard.py` — read-only aggregation and supported presentation; no mutation ownership.
+- `vaultwarden_oci/operations.py` / `dashboard.py` — read-only aggregation and supported presentation; no mutation ownership.
 - `email-providers.toml` — immutable closed notification metadata.
 - `versions.toml` — exact release/component/image authority.
 

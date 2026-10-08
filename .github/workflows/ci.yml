@@ -60,21 +60,36 @@ jobs:
           PYTHONPATH=/tmp/vwoci-transition-candidate python3 /tmp/vwoci-transition-candidate/tests/acceptance_predecessor_controller_handoff.py /tmp/vwoci-transition-candidate "$transition_handoff_host"
 
           # Separately prove the actual current PR base can update to this
-          # candidate. This pair is intentionally generic: dev.17 already owns
-          # the migrated CrowdSec host state, so dev.17 -> dev.18 must not replay
-          # the historical host transition.
+          # candidate when the PR contains a new project release. Documentation-
+          # only and other non-release changes intentionally retain the same
+          # versions.toml project version and therefore have no distinct release
+          # transition for this acceptance harness to exercise.
           previous_ref="$(git merge-base HEAD origin/v2)"
           if [ "$previous_ref" = "$(git rev-parse HEAD)" ]; then previous_ref="$(git rev-parse HEAD^)"; fi
           git worktree add --detach /tmp/vwoci-previous "$previous_ref"
 
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_rollback_host"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$current_rollback_host" "$current_state"
-          current_candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$current_state")"
-          current_candidate_python="$current_rollback_host/opt/vaultwarden-oci/releases/$current_candidate_version"
-          PYTHONPATH="$current_candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$current_rollback_host" "$current_state"
+          previous_version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["vaultwarden_oci"]["version"])' /tmp/vwoci-previous/versions.toml)"
+          candidate_version="$(python3 -c 'import tomllib; print(tomllib.load(open("versions.toml", "rb"))["vaultwarden_oci"]["version"])')"
 
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_success_host"
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$current_success_host"
+          release_changes="$(git diff --name-only "$previous_ref" HEAD -- vwctl versions.toml email-providers.toml vaultwarden_oci systemd)"
+
+          if [ "$candidate_version" = "$previous_version" ]; then
+            if [ -n "$release_changes" ]; then
+              echo "FAIL: immutable release content changed without a vaultwarden_oci.version bump:" >&2
+              printf '%s\n' "$release_changes" >&2
+              exit 1
+            fi
+            echo "SKIP: current predecessor update acceptance requires a distinct project release; both base and candidate are $candidate_version and immutable release content is unchanged"
+          else
+            PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_rollback_host"
+            PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$current_rollback_host" "$current_state"
+            current_candidate_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["candidate"])' "$current_state")"
+            current_candidate_python="$current_rollback_host/opt/vaultwarden-oci/releases/$current_candidate_version"
+            PYTHONPATH="$current_candidate_python" python3 tests/acceptance_previous_update.py rollback-with-candidate "$current_rollback_host" "$current_state"
+
+            PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$current_success_host"
+            PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_success.py "$PWD" "$current_success_host"
+          fi
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative

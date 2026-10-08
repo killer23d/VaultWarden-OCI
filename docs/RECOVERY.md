@@ -193,3 +193,5 @@ Creating/publishing a recovery point never implicitly prunes older offsite mater
 ## Update recovery boundary
 
 Application update verifies a pre-update `.vwrec`. A candidate that fails before possible persistent-state mutation may permit coherent binary rollback. Once candidate runtime may have changed persistent data, the verified pre-update recovery point—not an old binary symlink—is the downgrade boundary. Ubuntu apt/kernel state is outside `.vwrec` recovery.
+
+If backup, rclone publication, verification, identity selection, restore, or update recovery does not behave as described, use [Troubleshooting](TROUBLESHOOTING.md). Preserve the original recovery artifact and custody material while diagnosing the failure.

@@ -12,8 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReleaseSurfaceTests(unittest.TestCase):
     def test_operator_manual_exists(self) -> None:
         for relative in (
-            "README.md", "docs/INSTALL.md", "docs/OPERATIONS.md", "docs/SECURITY.md",
-            "docs/RECOVERY.md", "docs/HOST-ACCEPTANCE.md",
+            "README.md",
+            "docs/INSTALL.md",
+            "docs/CONFIGURATION.md",
+            "docs/OPERATIONS.md",
+            "docs/RECOVERY.md",
+            "docs/TROUBLESHOOTING.md",
+            "docs/SECURITY.md",
+            "docs/CLOUDFLARE-TOKENS.md",
+            "docs/HOST-ACCEPTANCE.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
 

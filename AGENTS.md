@@ -10,7 +10,7 @@ For each task, use this order of authority:
 
 1. explicit human instructions for the current task;
 2. `docs/PROJECT-BOUNDARY.md` and `docs/DECISIONS.md` as the durable product/implementation contract;
-3. the administrator manuals (`README.md`, `docs/INSTALL.md`, `docs/OPERATIONS.md`, `docs/SECURITY.md`, `docs/RECOVERY.md`);
+3. the administrator manuals (`README.md`, `docs/INSTALL.md`, `docs/CONFIGURATION.md`, `docs/OPERATIONS.md`, `docs/RECOVERY.md`, `docs/TROUBLESHOOTING.md`, `docs/SECURITY.md`, and `docs/CLOUDFLARE-TOKENS.md`);
 4. this file as the repository map;
 5. historical material only as evidence/rationale unless the human explicitly promotes it for the task.
 
