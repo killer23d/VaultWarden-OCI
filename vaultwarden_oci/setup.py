@@ -225,24 +225,34 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _install_dependencies(host_arch: str, ui: UI) -> None:
+def _docker_source(host: install.HostInfo) -> str:
+    expected_codename = cli.SUPPORTED_UBUNTU_RELEASES.get(host.version)
+    if (
+        host.distro != "ubuntu"
+        or expected_codename != host.codename
+        or host.architecture not in {"amd64", "arm64"}
+    ):
+        raise SetupError("Docker repository generation requires a validated supported Ubuntu host")
+    return f'''Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: {expected_codename}
+Components: stable
+Architectures: {host.architecture}
+Signed-By: /etc/apt/keyrings/docker.asc
+'''
+
+
+def _install_dependencies(host: install.HostInfo, ui: UI) -> None:
     ui.header("Dependencies")
     _must(["apt-get", "update"], "apt package index refresh")
     _must(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", AGE_APT_PACKAGE, "nano", "rclone", "7zip", "util-linux"], "Ubuntu dependency installation")
     DOCKER_KEYRING.parent.mkdir(parents=True, exist_ok=True)
     _must(["curl", "-fsSL", DOCKER_KEY, "-o", str(DOCKER_KEYRING)], "Docker repository key download")
     os.chmod(DOCKER_KEYRING, 0o644)
-    docker_source = '''Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: noble
-Components: stable
-Architectures: {arch}
-Signed-By: /etc/apt/keyrings/docker.asc
-'''.format(arch="amd64" if host_arch == "amd64" else "arm64")
-    _write_atomic(DOCKER_SOURCE, docker_source, 0o644)
+    _write_atomic(DOCKER_SOURCE, _docker_source(host), 0o644)
     _must(["apt-get", "update"], "Docker repository refresh")
     _must(["apt-get", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"], "Docker Engine/Compose installation")
-    sops_arch = "amd64" if host_arch == "amd64" else "arm64"
+    sops_arch = host.architecture
     url = SOPS_URL.format(version=SOPS_VERSION, arch=sops_arch)
     with tempfile.TemporaryDirectory(prefix="vwoci-sops-") as directory:
         candidate = Path(directory) / "sops"
@@ -344,7 +354,7 @@ def main(
     try:
         if os.geteuid() != 0: raise SetupError("setup must run as root; use sudo ./setup.sh install ...")
         host = install.validate_host(); domain, normalized_url, email = _normalize(args.domain, args.url, args.email)
-        ui.header("Host and dedicated storage preflight"); ui.ok(f"Ubuntu 24.04 {host.architecture}; canonical URL {normalized_url}")
+        ui.header("Host and dedicated storage preflight"); ui.ok(f"Ubuntu {host.version} {host.codename.title()} {host.architecture}; canonical URL {normalized_url}")
         selected = _select_storage(args, ui); ui.info(f"selected dedicated storage: {selected} -> {storage.STATE_ROOT}")
         offline = args.offline_recipient
         if not offline and offline_recipient_factory is not None and not args.dry_run:
@@ -359,7 +369,7 @@ def main(
             ui.warn("dry run: no filesystem, package, config, secret, or systemd changes were made"); ui.action("re-run without --dry-run after verifying the selected dedicated device"); return 0
         identity = storage.provision(selected, acknowledge_existing=args.accept_existing_filesystem, acknowledge_format=args.confirm_format, interactive=not args.auto and sys.stdin.isatty())
         ui.ok(f"dedicated storage proven: UUID={identity.uuid} {identity.fs_type} at {identity.mount}")
-        _install_dependencies(host.architecture, ui); ui.header("Immutable application install")
+        _install_dependencies(host, ui); ui.header("Immutable application install")
         release = _install_release(Path(__file__).resolve().parents[1], use_latest=args.use_latest); ui.ok(f"installed exact immutable release at {release}")
         operational = _ensure_age_identity(); _ensure_config(domain, email, offline); _ensure_secret_start(operational, offline); storage.verify()
         ui.ok("operational Age identity, validated operator config, and decryptable encrypted-secrets starting point are present")

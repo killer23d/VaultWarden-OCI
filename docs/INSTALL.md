@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Use a clean Ubuntu 24.04 LTS VM on `amd64` or `arm64`. Attach a dedicated ext4/xfs data filesystem that is separate from the boot/root block-device family. Production state is mounted at `/var/lib/vaultwarden-oci`; that path is never a supported root-filesystem fallback.
+Use a clean Ubuntu 24.04 LTS Noble or Ubuntu 26.04 LTS Resolute VM on `amd64` or `arm64`. On OCI, select a current official Canonical image for the chosen supported LTS and architecture; do not depend on a static image OCID or a particular block-device name. Attach a dedicated ext4/xfs data filesystem that is separate from the boot/root block-device family. Production state is mounted at `/var/lib/vaultwarden-oci`; that path is never a supported root-filesystem fallback.
 
 Inspect storage read-only before setup:
 
@@ -40,7 +40,9 @@ See [Cloudflare tokens](CLOUDFLARE-TOKENS.md) for the current Cloudflare dashboa
 
 ## Interactive blank-VM install
 
-**Prerequisite:** Ubuntu 24.04, root access, Internet access for dependencies, and an attached non-boot data volume.
+**Prerequisite:** Ubuntu 24.04 LTS Noble or Ubuntu 26.04 LTS Resolute, root access, Internet access for dependencies, and an attached non-boot data volume.
+
+Existing Ubuntu 24.04 installations remain supported. VaultWarden-OCI does not provide an in-place Ubuntu release-upgrade workflow and `vwctl update` never upgrades the operating system. If an administrator intentionally moves an OCI deployment to Ubuntu 26.04, use a fresh supported 26.04 host and the normal recovery/migration mechanisms rather than `do-release-upgrade` as an appliance operation.
 
 ```bash
 sudo ./setup.sh install \

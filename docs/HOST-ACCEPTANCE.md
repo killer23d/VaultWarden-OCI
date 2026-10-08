@@ -1,6 +1,10 @@
-# Ubuntu 24.04 disposable-host acceptance
+# Supported-host validation and disposable-host acceptance
 
-This is the real release gate, not an ordinary PR controller. Run it on disposable Ubuntu 24.04 hosts for both `amd64` and `arm64` when those environments are available. Record unavailable architecture/provider/destructive coverage as **NOT RUN**; CI mocks or container integrations do not turn missing real-host evidence into `PASS`.
+Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`.
+
+The established destructive/full-system release gate remains disposable Ubuntu 24.04 real-host acceptance on both architectures when those environments are available. Ubuntu 26.04 compatibility is validated by source review, automated tests, native Python 3.14 execution, explicit Ubuntu 26.04 x64/Arm64 GitHub Actions jobs, package/repository checks, systemd verification, and non-destructive OS-sensitive probes. **Real Ubuntu 26.04 OCI host acceptance: NOT RUN by owner decision.** Do not reinterpret that missing live evidence as `PASS`.
+
+Record unavailable architecture/provider/destructive coverage as **NOT RUN**; CI mocks or container integrations do not turn missing real-host evidence into `PASS`.
 
 The gate is intentionally appliance-sized for a small team: prove the supported operator paths and security ownership boundaries directly rather than inventing a second orchestration or migration layer just for acceptance.
 

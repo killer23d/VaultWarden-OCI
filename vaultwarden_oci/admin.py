@@ -46,8 +46,8 @@ def validate_vaultwarden_admin_source(value: str) -> str:
 def _hash_command(image: str) -> list[str]:
     if not image or any(char in image for char in "\0\r\n\t "):
         raise AdminCredentialError("Vaultwarden image reference is invalid")
-    # Vaultwarden's supported `hash` command prompts on a TTY. Ubuntu 24.04
-    # provides `script(1)` as an essential utility, so use it only as a
+    # Vaultwarden's supported `hash` command prompts on a TTY. Supported Ubuntu
+    # LTS hosts provide `script(1)` through util-linux, so use it only as a
     # pseudoterminal boundary. The source secret remains stdin-only and is
     # never placed in argv, environment variables, files, or reported errors.
     child = shlex.join(

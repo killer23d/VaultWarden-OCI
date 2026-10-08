@@ -1,5 +1,7 @@
 # Operations
 
+These operations apply to supported Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute hosts. Application updates and Ubuntu package maintenance remain separate; `vwctl update` does not perform an Ubuntu release upgrade.
+
 `dashboard.sh` is the normal day-2 human interface. `vwctl` remains the single implementation and mutation authority: the dashboard reads stable status/doctor output and delegates every state-changing action to `vwctl`. Its only direct command is bounded read-only `journalctl` display.
 
 ## Dashboard

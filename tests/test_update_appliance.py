@@ -38,6 +38,16 @@ def frozen(project: str = "2.0.0") -> update_versions.FrozenVersions:
 
 
 class ProjectReleaseTests(unittest.TestCase):
+    def test_rc_promotion_orders_after_dev_but_before_stable(self) -> None:
+        self.assertGreater(
+            update_appliance.compare_project_versions("0.1.0-rc.1", "0.1.0-dev.33"),
+            0,
+        )
+        self.assertLess(
+            update_appliance.compare_project_versions("0.1.0-rc.1", "0.1.0"),
+            0,
+        )
+
     def test_stable_selection_ignores_draft_and_prerelease(self) -> None:
         payload = [
             {"tag_name": "v9.0.0-rc1", "draft": False, "prerelease": True, "tarball_url": "https://api.github.com/repos/killer23d/VaultWarden-OCI/tarball/v9.0.0-rc1"},

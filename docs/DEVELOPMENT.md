@@ -1,6 +1,6 @@
 # Development
 
-VaultWarden-OCI favors explicit ownership over frameworks. Python 3.12 standard-library-first owns structured behavior; Bash remains thin bootstrap/UI/host glue where materially simpler.
+VaultWarden-OCI favors explicit ownership over frameworks. The native Python 3 of each supported LTS owns structured behavior with a standard-library-first design: Python 3.12 on Ubuntu 24.04 and Python 3.14 on Ubuntu 26.04. Bash remains thin bootstrap/UI/host glue where materially simpler.
 
 ## First-party owners
 
@@ -45,7 +45,7 @@ Permanent validation has three layers only:
 
 1. focused unit tests under `tests/`;
 2. small deterministic integrations, including Caddy config, recovery crypto/ZIP, and packet-boundary checks;
-3. disposable Ubuntu 24.04 real-host acceptance on `amd64` and `arm64` where environments are available.
+3. disposable Ubuntu 24.04 real-host acceptance on `amd64` and `arm64` where environments are available, plus explicit Ubuntu 26.04 x64/Arm64 CI using native Python 3.14 and OS-sensitive checks. Real Ubuntu 26.04 OCI host acceptance is `NOT RUN` unless separately performed.
 
 Tests protect security, availability, recoverability, and operator truthfulness rather than private source order/text. Do not create a custom runner, coverage gate, giant matrix, or duplicate test architecture.
 

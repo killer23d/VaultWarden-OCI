@@ -41,9 +41,20 @@ arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 
 class InstallLayoutTests(unittest.TestCase):
-    def write_os_release(self, root: Path, *, distro: str = "ubuntu", version: str = "24.04") -> Path:
+    def write_os_release(
+        self,
+        root: Path,
+        *,
+        distro: str = "ubuntu",
+        version: str = "24.04",
+        codename: str = "noble",
+        codename_key: str = "VERSION_CODENAME",
+    ) -> Path:
         path = root / "os-release"
-        path.write_text(f'ID="{distro}"\nVERSION_ID="{version}"\n', encoding="utf-8")
+        path.write_text(
+            f'ID="{distro}"\nVERSION_ID="{version}"\n{codename_key}="{codename}"\n',
+            encoding="utf-8",
+        )
         return path
 
     def write_release_source(self, root: Path, version: str) -> Path:
@@ -56,20 +67,53 @@ class InstallLayoutTests(unittest.TestCase):
         (source / "versions.toml").write_text(exact_versions(version), encoding="utf-8")
         return source
 
-    def test_host_validation_accepts_noble_supported_architectures(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            os_release = self.write_os_release(Path(directory))
-            self.assertEqual(install.validate_host(os_release=os_release, machine="x86_64").architecture, "amd64")
-            self.assertEqual(install.validate_host(os_release=os_release, machine="aarch64").architecture, "arm64")
+    def test_host_validation_accepts_supported_lts_architectures(self) -> None:
+        cases = (("24.04", "noble"), ("26.04", "resolute"))
+        for version, codename in cases:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                os_release = self.write_os_release(
+                    Path(directory),
+                    version=version,
+                    codename=codename,
+                )
+                amd64 = install.validate_host(os_release=os_release, machine="x86_64")
+                arm64 = install.validate_host(os_release=os_release, machine="aarch64")
+                self.assertEqual((amd64.version, amd64.codename, amd64.architecture), (version, codename, "amd64"))
+                self.assertEqual((arm64.version, arm64.codename, arm64.architecture), (version, codename, "arm64"))
 
-    def test_host_validation_rejects_wrong_release_and_architecture(self) -> None:
+    def test_host_validation_accepts_ubuntu_codename_fallback_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            os_release = self.write_os_release(
+                Path(directory),
+                version="26.04",
+                codename="resolute",
+                codename_key="UBUNTU_CODENAME",
+            )
+            host = install.validate_host(os_release=os_release, machine="x86_64")
+            self.assertEqual(host.codename, "resolute")
+
+    def test_host_validation_rejects_unsupported_or_mismatched_hosts(self) -> None:
+        cases = (
+            {"version": "22.04", "codename": "jammy"},
+            {"version": "25.10", "codename": "questing"},
+            {"distro": "debian", "version": "24.04", "codename": "noble"},
+            {"version": "24.04", "codename": "resolute"},
+            {"version": "26.04", "codename": "noble"},
+        )
+        for values in cases:
+            with self.subTest(values=values), tempfile.TemporaryDirectory() as directory:
+                os_release = self.write_os_release(Path(directory), **values)
+                with self.assertRaises(install.InstallError):
+                    install.validate_host(os_release=os_release, machine="x86_64")
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            wrong_release = self.write_os_release(root, version="22.04")
+            missing_codename = root / "os-release"
+            missing_codename.write_text('ID="ubuntu"\nVERSION_ID="26.04"\n', encoding="utf-8")
             with self.assertRaises(install.InstallError):
-                install.validate_host(os_release=wrong_release, machine="x86_64")
+                install.validate_host(os_release=missing_codename, machine="x86_64")
 
-            noble = self.write_os_release(root, version="24.04")
+            noble = self.write_os_release(root, version="24.04", codename="noble")
             with self.assertRaises(install.InstallError):
                 install.validate_host(os_release=noble, machine="ppc64le")
 

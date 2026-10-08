@@ -24,7 +24,9 @@ from vaultwarden_oci.cli import (
     load_versions,
     mutation_lock,
     normalize_architecture,
+    read_os_release,
     run_command,
+    validate_supported_ubuntu_release,
 )
 
 APP_NAME = "vaultwarden-oci"
@@ -106,6 +108,7 @@ class InstallError(RuntimeError):
 class HostInfo:
     distro: str
     version: str
+    codename: str
     architecture: str
 
 
@@ -119,37 +122,19 @@ class Layout:
         return self.root / absolute.relative_to("/")
 
 
-def _parse_os_release(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            values[key] = value
-    return values
-
-
 def validate_host(*, os_release: Path = OS_RELEASE_PATH, machine: str | None = None) -> HostInfo:
     try:
-        values = _parse_os_release(os_release)
+        values = read_os_release(os_release)
+        version, codename = validate_supported_ubuntu_release(values)
     except OSError as exc:
         raise InstallError(f"cannot read host release information from {os_release}: {exc}") from exc
-    distro = values.get("ID", "")
-    version = values.get("VERSION_ID", "")
-    if distro != "ubuntu" or version != "24.04":
-        raise InstallError(
-            f"unsupported host {distro or 'unknown'} {version or 'unknown'}; Ubuntu 24.04 is required"
-        )
+    except ValueError as exc:
+        raise InstallError(str(exc)) from exc
     try:
         architecture = normalize_architecture(machine if machine is not None else platform.machine())
     except ValueError as exc:
         raise InstallError(str(exc)) from exc
-    return HostInfo(distro=distro, version=version, architecture=architecture)
+    return HostInfo(distro="ubuntu", version=version, codename=codename, architecture=architecture)
 
 
 def _assert_root(layout: Layout) -> None:

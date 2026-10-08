@@ -2,7 +2,7 @@
 
 ## Start here
 
-VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of roughly 10 users, operated by a junior administrator on Ubuntu 24.04 LTS. `amd64` and `arm64` are supported/tested targets. The runtime is cloud-provider neutral, with Cloudflare as the supported public-edge model.
+VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of roughly 10 users, operated by a junior administrator on Ubuntu 24.04 LTS Noble or Ubuntu 26.04 LTS Resolute. `amd64` and `arm64` are supported targets. The runtime is cloud-provider neutral, with Cloudflare as the supported public-edge model.
 
 The product was developed greenfield using an earlier implementation only as a source of proven operator/security/recovery lessons. **The earlier UI/UX is a design reference; the earlier backend architecture is not a compatibility target.** Do not recreate Make-based orchestration, Postfix/queues, backup tiers, migration compatibility, broad helper libraries, or the old test architecture.
 
@@ -18,14 +18,14 @@ For each task, use this order of authority:
 
 ## Product invariants
 
-- Ubuntu 24.04 LTS only; `amd64` and `arm64` supported/tested.
+- Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. Ubuntu 24.04 retains the disposable real-host baseline; Ubuntu 26.04 is code/CI compatibility validated unless separate real-host evidence is explicitly recorded.
 - Production persistent application state must live on a dedicated storage filesystem/volume. A root-only host is not a supported production install.
 - The normal first-run human path is `setup.sh`: validate host/storage, install dependencies and the appliance, prepopulate config from operator inputs, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
 - `setup.sh` supports interactive mode, `--auto`, and an independent explicit `--use-latest` override. Terminal-driven `--auto` may generate the separate offline Age identity only when no `--offline-recipient` was supplied, keep that private identity only in root-owned volatile storage, and require verified recovery-kit handoff before deleting it. Fully headless `--auto` requires an existing public `--offline-recipient`. An explicitly supplied recipient is authoritative and must never be silently replaced. Frontend custody decisions must use the same authoritative CLI grammar/parser as the installer rather than ad-hoc raw-token inspection.
 - `--use-latest` resolves once to exact immutable values and must never leave floating `latest` state. The setup frontend must interpret `--use-latest` and `--auto` through the same CLI grammar used by the installer so supported value/long-option forms cannot bypass confirmation semantics.
 - `dashboard.sh` is a supported day-2 human interface. `vwctl` remains the implementation/mutation authority. One implementation authority does not mean one user interface.
 - Retain useful color-coded/AMTM-style interaction conventions from the earlier product as the visual/interaction reference.
-- Python 3.12 standard-library-first owns structured config/state/validation/update/recovery logic. Bash remains thin bootstrap/UI/host glue where materially simpler.
+- Native supported Python standard-library-first owns structured config/state/validation/update/recovery logic. Bash remains thin bootstrap/UI/host glue where materially simpler.
 - One operator-editable non-secret authority under `/etc/vaultwarden-oci`, one encrypted SOPS secret document, and one source-controlled exact version manifest.
 - SOPS + Age remains the secret mechanism. The operational Age private key is root-only. The separate offline recovery private identity is never persistent server state; it normally stays off-host and may exist on the appliance only transiently in root-only volatile storage during the supported first-run recovery-kit handoff.
 - A password-protected recovery-kit ZIP is a separate credential-handoff artifact from the normal encrypted `.vwrec` application recovery point.
@@ -46,7 +46,7 @@ For each task, use this order of authority:
 
 ## Implementation ownership
 
-Use Python 3.12 standard-library-first for structured logic: CLI parsing, TOML/config/version handling, validation, subprocess orchestration, locking, diagnostics, secrets orchestration, notification classification, recovery metadata, rclone orchestration, update transactions, and edge policy.
+Use Native supported Python standard-library-first for structured logic: CLI parsing, TOML/config/version handling, validation, subprocess orchestration, locking, diagnostics, secrets orchestration, notification classification, recovery metadata, rclone orchestration, update transactions, and edge policy.
 
 Use Bash only for the smallest bootstrap, interactive operator UI, host/container glue, or cases where shell is materially simpler. Do not let Bash become the owner of structured configuration, retry policy, state machines, complex locking, or recovery/update transactions.
 
@@ -62,7 +62,7 @@ Do not recreate earlier Make orchestration, Postfix/local MTA, backup tiers, bro
 
 ## Testing and working rules
 
-Use three permanent validation layers: focused unit tests, small integration tests, and disposable real-host Ubuntu 24.04 release acceptance. Test security, availability, recoverability, and operator truthfulness rather than private source structure.
+Use three permanent validation layers: focused unit tests, small integration tests, and disposable real-host Ubuntu 24.04 release acceptance. Add explicit Ubuntu 26.04 native-Python/OS-sensitive CI coverage for the newer LTS. Real Ubuntu 26.04 OCI host acceptance remains `NOT RUN` unless it is actually performed. Test security, availability, recoverability, and operator truthfulness rather than private source structure.
 
 Before editing, confirm the current branch/head and inspect the existing owner of the behavior. Keep changes bounded to the assigned task. Preserve secret redaction, fail-closed security boundaries, truthful success/failure reporting, and recoverability.
 

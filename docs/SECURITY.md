@@ -1,6 +1,6 @@
 # Security
 
-VaultWarden-OCI keeps a small explicit trust boundary: one Ubuntu 24.04 appliance host, mandatory dedicated persistent storage, immutable release code, root-owned operator config, SOPS/Age encrypted credentials, volatile plaintext runtime material, Cloudflare-restricted public origin ingress, a closed notification catalog, and explicit recovery/update boundaries.
+VaultWarden-OCI keeps a small explicit trust boundary: one supported Ubuntu 24.04 Noble or Ubuntu 26.04 Resolute appliance host, mandatory dedicated persistent storage, immutable release code, root-owned operator config, SOPS/Age encrypted credentials, volatile plaintext runtime material, Cloudflare-restricted public origin ingress, a closed notification catalog, and explicit recovery/update boundaries.
 
 ## Secrets and privilege
 

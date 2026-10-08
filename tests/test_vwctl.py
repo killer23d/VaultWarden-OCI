@@ -72,6 +72,28 @@ class VwctlUnitTests(unittest.TestCase):
             with self.assertRaises(cli.VersionsError):
                 cli.load_versions(invalid, require_components=True)
 
+    def test_supported_ubuntu_release_validation(self) -> None:
+        self.assertEqual(
+            cli.validate_supported_ubuntu_release(
+                {"ID": "ubuntu", "VERSION_ID": "24.04", "VERSION_CODENAME": "noble"}
+            ),
+            ("24.04", "noble"),
+        )
+        self.assertEqual(
+            cli.validate_supported_ubuntu_release(
+                {"ID": "ubuntu", "VERSION_ID": "26.04", "UBUNTU_CODENAME": "resolute"}
+            ),
+            ("26.04", "resolute"),
+        )
+        for release in (
+            {"ID": "ubuntu", "VERSION_ID": "22.04", "VERSION_CODENAME": "jammy"},
+            {"ID": "ubuntu", "VERSION_ID": "25.10", "VERSION_CODENAME": "questing"},
+            {"ID": "debian", "VERSION_ID": "26.04", "VERSION_CODENAME": "resolute"},
+            {"ID": "ubuntu", "VERSION_ID": "26.04", "VERSION_CODENAME": "noble"},
+        ):
+            with self.subTest(release=release), self.assertRaises(cli.UnsupportedHost):
+                cli.validate_supported_ubuntu_release(release)
+
     def test_architecture_and_subprocess_boundary(self) -> None:
         self.assertEqual(cli.normalize_architecture("x86_64"), "amd64")
         self.assertEqual(cli.normalize_architecture("aarch64"), "arm64")
@@ -258,7 +280,7 @@ timeout_seconds = 15
                 'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS,
                 encoding="utf-8",
             )
-            os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+            os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\n', encoding="utf-8")
             with (
                 mock.patch.object(runtime, "doctor_checks", return_value=[]),
                 mock.patch.object(edge, "doctor_checks", return_value=[]),

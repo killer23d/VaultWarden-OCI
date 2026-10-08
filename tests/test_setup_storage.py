@@ -138,7 +138,7 @@ class SetupContractTests(unittest.TestCase):
                 mock.patch.object(setup.os, "chmod"),
                 mock.patch.object(setup.os, "replace"),
             ):
-                setup._install_dependencies("amd64", setup.UI(color=False))
+                setup._install_dependencies(setup.install.HostInfo("ubuntu", "24.04", "noble", "amd64"), setup.UI(color=False))
 
         package_install = next(
             command
@@ -147,6 +147,18 @@ class SetupContractTests(unittest.TestCase):
         )
         self.assertIn("nano", package_install)
         self.assertIn(("nano", "--version"), checks)
+
+    def test_docker_source_uses_only_validated_supported_host_suite(self) -> None:
+        noble = setup.install.HostInfo("ubuntu", "24.04", "noble", "amd64")
+        resolute = setup.install.HostInfo("ubuntu", "26.04", "resolute", "arm64")
+        self.assertIn("Suites: noble", setup._docker_source(noble))
+        self.assertIn("Architectures: amd64", setup._docker_source(noble))
+        self.assertIn("Suites: resolute", setup._docker_source(resolute))
+        self.assertIn("Architectures: arm64", setup._docker_source(resolute))
+
+        forged = setup.install.HostInfo("ubuntu", "26.04", "noble", "amd64")
+        with self.assertRaisesRegex(setup.SetupError, "validated supported Ubuntu host"):
+            setup._docker_source(forged)
 
     def test_setup_dependency_verification_fails_without_default_nano_editor(self) -> None:
         def fake_must(argv, label, *, input_text=None, env=None):
@@ -177,7 +189,7 @@ class SetupContractTests(unittest.TestCase):
                     setup.SetupError,
                     "dependency verification failed: nano editor",
                 ):
-                    setup._install_dependencies("amd64", setup.UI(color=False))
+                    setup._install_dependencies(setup.install.HostInfo("ubuntu", "24.04", "noble", "amd64"), setup.UI(color=False))
 
     def test_malformed_email_cannot_generate_invalid_toml(self) -> None:
         with self.assertRaisesRegex(setup.SetupError, "email"): setup._normalize("example.com", "https://vault.example.com", 'admin"@example.com')
@@ -203,7 +215,7 @@ class SetupContractTests(unittest.TestCase):
     def test_supported_operational_exceptions_use_fail_action_ui(self) -> None:
         offline = "age1" + "q" * 58
         argv = ["install", "--domain", "example.com", "--url", "https://vault.example.com", "--email", "admin@example.com", "--data-device", "/dev/vdb", "--offline-recipient", offline, "--accept-existing-filesystem", "--auto"]
-        host = mock.Mock(architecture="amd64")
+        host = mock.Mock(distro="ubuntu", version="24.04", codename="noble", architecture="amd64")
         for exc in (setup.secret_owner.SecretsError("bad metadata"), setup.UpdateError("registry unavailable"), cli.LockBusyError("busy")):
             with self.subTest(exc=type(exc).__name__), mock.patch.object(setup.os, "geteuid", return_value=0), mock.patch.object(setup.install, "validate_host", return_value=host), mock.patch.object(setup, "_select_storage", return_value="/dev/vdb"), mock.patch.object(setup.storage, "provision", side_effect=exc), mock.patch("builtins.print") as printer:
                 self.assertEqual(setup.main(argv), 1)
