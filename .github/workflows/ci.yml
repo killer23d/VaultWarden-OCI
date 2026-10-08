@@ -255,10 +255,10 @@ jobs:
       - name: Compile and run architecture-sensitive coverage
         run: |
           python3 -m compileall -q vaultwarden_oci tests
-          python3 tests/test_install.py -v
-          python3 tests/test_setup_storage.py -v
-          python3 tests/test_update_workflow.py -v
-          python3 tests/test_immutable_vwctl_bytecode.py -v
+          PYTHONPATH=. python3 tests/test_install.py -v
+          PYTHONPATH=. python3 tests/test_setup_storage.py -v
+          PYTHONPATH=. python3 tests/test_update_workflow.py -v
+          PYTHONPATH=. python3 tests/test_immutable_vwctl_bytecode.py -v
       - name: Verify Resolute Docker repository advertises Arm64
         run: |
           docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"
