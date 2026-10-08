@@ -1,6 +1,6 @@
 # VaultWarden-OCI
 
-VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. It targets Ubuntu 24.04 LTS on `amd64` and `arm64`, requires a dedicated production data filesystem, and assumes Cloudflare-proxied public access.
+VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. It requires a dedicated production data filesystem and assumes Cloudflare-proxied public access.
 
 ## What the appliance contains
 
@@ -95,7 +95,7 @@ From a source checkout, `sudo ./dashboard.sh` is equivalent.
 - [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
 - [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md) — which token is used for DNS/certificates versus CrowdSec remediation, required permissions, scoping, and storage.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — symptom-oriented diagnostics, supported corrections, verification steps, and the evidence to collect when something fails.
-- [Host acceptance](docs/HOST-ACCEPTANCE.md) — disposable Ubuntu 24.04 release gate for `amd64` and `arm64`; unavailable real-host coverage must be recorded as `NOT RUN`.
+- [Host acceptance](docs/HOST-ACCEPTANCE.md) — Ubuntu 24.04 retains the disposable real-host release gate; Ubuntu 26.04 is covered by code/CI compatibility validation in this workstream and real OCI host acceptance is `NOT RUN`.
 
 If an install or day-2 action fails, start with [Troubleshooting](docs/TROUBLESHOOTING.md) rather than searching the source tree or trying broad Docker/system repairs.
 
