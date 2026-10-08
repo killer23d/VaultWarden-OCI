@@ -201,7 +201,7 @@ def _confirm(prompt: str, *, acknowledgement: bool, interactive: bool) -> None:
 def _signature_types(device: str, *, runner: Runner) -> set[str]:
     # Listing mode is read-only and already reports all visible signatures.
     # Do not add --all here: util-linux treats it as the erase selector and
-    # rejects it when combined with --output on supported Ubuntu 24.04.
+    # rejects it when combined with --output on the supported Ubuntu LTS releases.
     result = runner(["wipefs", "--noheadings", "--output", "TYPE", device])
     if not result.ok:
         detail = result.stderr.strip() or result.stdout.strip() or "command unavailable"
