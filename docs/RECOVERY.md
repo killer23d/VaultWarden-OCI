@@ -5,7 +5,7 @@ VaultWarden-OCI has two different recovery artifacts:
 - `.vwrec` — encrypted application state used to verify or restore the appliance.
 - recovery-kit ZIP — a separately password-protected AES-256 credential/custody handoff used to rebuild access and secrets.
 
-They are not interchangeable.
+They are not interchangeable. **First-install checklist:** keep the verified encrypted recovery-kit ZIP **off the server**, keep its passphrase **separately**, and create a `.vwrec` after the first healthy start. The kit contains the offline private recovery identity needed to unlock backup material. A backup without a matching usable identity may be unrecoverable.
 
 ## What a `.vwrec` contains
 
