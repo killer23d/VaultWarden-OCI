@@ -111,6 +111,26 @@ class OperationsTimerTests(unittest.TestCase):
             rows = operations.timer_rows()
         self.assertTrue(all(row["health"] == "PASS" for row in rows))
 
+    def test_dns_auxiliary_failure_makes_health_timer_row_fail(self) -> None:
+        def properties(unit: str) -> dict[str, object]:
+            if unit == "vaultwarden-oci-dns.service":
+                return self.timer_properties(unit, service_result="exit-code")
+            return self.timer_properties(unit)
+
+        with mock.patch(
+            "vaultwarden_oci.operations._systemd_properties",
+            side_effect=properties,
+        ):
+            rows = operations.timer_rows()
+        health = next(
+            row for row in rows if row["unit"] == "vaultwarden-oci-health.timer"
+        )
+        self.assertEqual(health["health"], "FAIL")
+        self.assertIn(
+            "auxiliary vaultwarden-oci-dns.service result=exit-code",
+            health["problems"],
+        )
+
 
 class OperationsStatusTests(unittest.TestCase):
     def base_checks(self, admin_status: str, admin_message: str) -> list[cli.DoctorCheck]:

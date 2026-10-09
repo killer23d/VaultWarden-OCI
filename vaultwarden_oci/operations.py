@@ -21,6 +21,9 @@ TIMER_UNITS = (
     "vaultwarden-oci-maintenance.timer",
     "vaultwarden-oci-update-check.timer",
 )
+TIMER_AUXILIARY_UNITS = {
+    "vaultwarden-oci-health.timer": ("vaultwarden-oci-dns.service",),
+}
 SUPPORT_ROOT = runtime.RUN / "support"
 _RECOVERY_WARN_AGE = 36 * 60 * 60
 _DISK_WARN_PERCENT = 85
@@ -127,12 +130,29 @@ def timer_rows() -> list[dict[str, object]]:
         trigger_unit = unit.removesuffix(".timer") + ".service"
         service = _systemd_properties(trigger_unit)
         healthy, problems = _timer_health(timer, service)
+        auxiliaries: list[dict[str, object]] = []
+        for auxiliary_unit in TIMER_AUXILIARY_UNITS.get(unit, ()):
+            auxiliary = _systemd_properties(auxiliary_unit)
+            auxiliaries.append(auxiliary)
+            if auxiliary.get("load_state") != "loaded":
+                problems.append(
+                    f"auxiliary {auxiliary_unit} load={auxiliary.get('load_state')}"
+                )
+            if auxiliary.get("active_state") == "failed":
+                problems.append(f"auxiliary {auxiliary_unit} active=failed")
+            auxiliary_result = auxiliary.get("result")
+            if auxiliary_result not in {"success", ""}:
+                problems.append(
+                    f"auxiliary {auxiliary_unit} result={auxiliary_result}"
+                )
+        healthy = not problems
         timer.update(
             {
                 "trigger_unit": trigger_unit,
                 "trigger_load_state": service.get("load_state"),
                 "trigger_active_state": service.get("active_state"),
                 "trigger_result": service.get("result"),
+                "auxiliary_units": auxiliaries,
                 "health": "PASS" if healthy else "FAIL",
                 "failed": not healthy,
                 "problems": problems,
