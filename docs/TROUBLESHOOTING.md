@@ -445,6 +445,13 @@ sudo vwctl doctor --json
 sudo vwctl backup --remote 'REMOTE:path'
 ```
 
+### Common offsite-backup misunderstandings
+
+- If `sudo vwctl backup` passes but no object appears in cloud storage, that is **expected**: the daily timer runs local-only. To publish remotely, run `sudo vwctl backup --remote 'REMOTE:path'` explicitly.
+- If `sudo rclone listremotes` has no remote but your Ubuntu user's `rclone listremotes` does, you configured the **user's** remote rather than **root's**. Use `sudo rclone config` to configure the account used by `vwctl`; keep credentials safe.
+- If the remote copy uploads successfully but Age verification fails, copying was successful but **recoverability is not proven**. Use the matching offline recovery private key; the server's operational key cannot substitute.
+- Local `.vwrec` files are not automatically deleted. Monitor the dedicated storage volume; there is no supported local-prune command. Remote pruning is explicit and separate.
+
 ## A recovery artifact cannot be verified
 
 For a local artifact:
