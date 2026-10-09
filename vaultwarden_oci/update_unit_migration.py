@@ -9,7 +9,6 @@ from . import durability, install
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
-_UNIT_PREFIX = "vaultwarden-oci"
 _UNIT_SUFFIXES = {".service", ".timer", ".target"}
 
 
@@ -18,7 +17,7 @@ def _owned_unit_names(source: Path) -> set[str]:
     for entry in source.iterdir():
         if entry.is_symlink() or not entry.is_file():
             raise UpdateError(f"immutable release systemd source contains unsafe entry: {entry}")
-        if not entry.name.startswith(_UNIT_PREFIX) or entry.suffix not in _UNIT_SUFFIXES:
+        if entry.suffix not in _UNIT_SUFFIXES:
             raise UpdateError(f"immutable release contains unexpected systemd unit: {entry.name}")
         names.add(entry.name)
     return names
