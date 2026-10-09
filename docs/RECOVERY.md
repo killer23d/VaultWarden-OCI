@@ -139,30 +139,38 @@ This is intentionally a different procedure from same-host restore.
 
 1. Build a fresh supported Ubuntu host—24.04 LTS Noble or 26.04 LTS Resolute—on a supported architecture and attach a **dedicated** ext4/xfs data volume. Do not restore onto root-only storage. A `.vwrec` is application-level recovery material, not an operating-system snapshot; an OS move is performed by restoring onto a fresh supported host rather than upgrading the old host in place.
 2. Obtain a trusted release/source checkout and inspect storage as described in [Install](INSTALL.md).
-3. Derive the offline public recipient without making the private key persistent appliance state:
+3. On a **trusted workstation with Age installed**, derive the **public** recovery recipient from your matching off-server private key:
 
    ```bash
    age-keygen -y /secure/offline-age-key.txt
    ```
 
-4. Run `setup.sh install` with the intended domain/URL/email, dedicated data device, and that `age1...` recipient. Supplying the recipient explicitly tells setup to preserve this existing off-host recovery identity; setup must not generate a replacement identity. Complete the new host's operational setup. If you need old credentials to reach Cloudflare/SMTP/rclone, extract the recovery kit on a trusted workstation and enter needed values through `vwctl secrets edit`.
-5. Make the desired `.vwrec` available. If rclone is not configured yet, retrieve the object to a secure local path from another trusted machine rather than weakening the restore contract.
-6. Verify before restore:
+   Copy only the printed `age1...` **public** value to the replacement server. Do not place your offline private identity in persistent server storage. A fresh Ubuntu image may not have `age-keygen` until setup installs its dependencies.
+
+4. Run the trusted `setup.sh install` from [Install](INSTALL.md) with your domain/URL/email and **`--offline-recipient` set to that existing public value**. Choose and explicitly confirm the new **dedicated data disk**. Setup must preserve the existing offline identity instead of generating a new one. **Do not move the public Cloudflare A record to this server yet.**
+
+5. Make the desired `.vwrec` available under a secure local path (such as `/secure/recovery.vwrec`). If it exists only in cloud storage, reconfigure **root's** rclone remote or retrieve the file via a trusted workstation and securely transfer it. Root's rclone config and access credentials are **not inside the `.vwrec` or recovery kit**. Preserve the original remote object and identity.
+
+6. Verify **decryption** of the archive before modifying the freshly installed state:
 
    ```bash
-   sudo vwctl recovery verify \
-     --file /secure/recovery.vwrec \
-     --identity /secure/offline-age-key.txt
+   sudo vwctl recovery verify --file /secure/recovery.vwrec
    ```
 
-7. Restore, then start and verify:
+   On an interactive terminal, supply the matching off-server Age private identity through the secure chooser. For noninteractive workflows, an explicit `--identity /secure/offline-age-key.txt` is required.
+
+7. Restore the verified application archive, keeping services stopped until the recovered configuration and required host security are ready:
 
    ```bash
-   sudo vwctl restore --file /secure/recovery.vwrec --identity /secure/offline-age-key.txt
-   sudo vwctl start
-   sudo vwctl status
-   sudo vwctl doctor --json
+   sudo vwctl restore --file /secure/recovery.vwrec
+   sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+   sudo vwctl secrets validate
+   sudo vwctl dns update --dry-run
    ```
+
+   Restore replaces the Vaultwarden data/SQLite database, Caddy persistent state, config, and encrypted secrets. It retains or regenerates/rekeys the new host's **operational** Age identity as needed, while the **offline private key stays in your separate custody**. It does not restore Ubuntu, packages, firewall service setup, or root's rclone configuration.
+
+   Complete the standard Cloudflare/CrowdSec security activation and the **Worker Route Fail Open** confirmation in [Install, Step 6](INSTALL.md#6-validate-and-activate-security) **before** starting. Then follow [Install, Step 7](INSTALL.md#7-start-update-dns-and-create-the-first-backup): start the recovered app, check status/doctor, **only then** update the existing Cloudflare A record to the new host, create a verified backup, and enable timers. If the old host is still active, plan the DNS cutover deliberately rather than blindly overriding live traffic.
 
 **Expected success:** the known vault state is healthy on the new dedicated volume and operational secrets are again server-encrypted. **On failure:** keep the original `.vwrec` and offline material unchanged, correct the fresh-host prerequisite, and retry on disposable/new state rather than modifying the artifact.
 
@@ -228,7 +236,9 @@ Execute only after review:
 sudo vwctl recovery prune --remote 'REMOTE:path' --keep-last 7 --confirm
 ```
 
-Creating/publishing a recovery point never implicitly prunes older offsite material.
+Creating/publishing a recovery point **never implicitly prunes** older offsite material. The prune command affects only `.vwrec` files under the **specified remote path**; review the Keep/Delete plan and independently verify the retained recovery points and matching Age private identity before confirming.
+
+**Local backup files accumulate daily, too.** There is currently **no supported local `vwctl recovery prune` subcommand** or automatic local-retention setting. Monitor free space with `df -h /var/lib/vaultwarden-oci`. Do not delete the only working recovery point to free space; first verify an independent offsite copy and agree on a retention policy. Neither local nor remote backup jobs automatically refresh the credential recovery-kit ZIP, so refresh its secure off-server custody after credential rotation.
 
 ## Update recovery boundary
 
