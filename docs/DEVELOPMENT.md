@@ -12,11 +12,13 @@ VaultWarden-OCI favors explicit ownership over frameworks. The native Python 3 o
 - `vaultwarden_oci/setup.py` — authoritative setup CLI grammar, blank-VM installation orchestration, and setup-time host dependency ownership, including the minimal Age bootstrap required before transient offline-recovery generation.
 - `vaultwarden_oci/setup_frontend.py` — thin first-run human wrapper for use-latest confirmation and transient offline-recovery/recovery-kit custody; it must derive custody decisions from the authoritative `setup.py` parser rather than interpreting raw argv independently.
 - `vaultwarden_oci/edge.py` — Cloudflare origin policy and CrowdSec Cloudflare remediation.
+- `vaultwarden_oci/dns_publication.py` — safe publication of one existing Proxied IPv4 A record, public IPv4 discovery, and debounced DNS timer failures.
 - `vaultwarden_oci/recovery.py` / `recovery_ux.py` — `.vwrec`, rclone, guided restore, recovery-kit flow.
 - `vaultwarden_oci/notification.py` — closed provider catalog rendering/delivery and bounded SMTP fallback.
 - `vaultwarden_oci/update*.py` — exact version discovery/freezing and explicit immutable update transaction.
 - `vaultwarden_oci/operations.py` / `dashboard.py` — read-only aggregation and supported presentation; no mutation ownership.
 - `email-providers.toml` — immutable closed notification metadata.
+- `systemd/vaultwarden-oci-dns.service` — independently scheduled DNS sync, pulled in by the five-minute health service; DNS failure does not mask local health.
 - `versions.toml` — exact release/component/image authority.
 
 `setup.sh` and `dashboard.sh` are supported human interfaces but not alternate state owners. Mutations converge on the same Python/`vwctl` owners. The setup frontend may decide whether the supported transient custody handoff is needed, but it does not own storage, installation, package selection, SOPS, recovery-kit cryptography, or notification transport. If terminal-generated custody requires `age-keygen` on a blank host, the frontend delegates that prerequisite to the setup-owned dependency helper before generating any private identity.
