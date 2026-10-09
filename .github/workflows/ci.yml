@@ -20,9 +20,7 @@ jobs:
       - name: Compile Python
         run: python3 -m compileall -q vaultwarden_oci tests
       - name: Parse shell glue
-        run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
-      - name: Real exact-image admin credential boundary
-        run: python3 tests/acceptance_admin_hash.py
+        run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh .github/scripts/retry-command.sh
       - name: Historical compatibility transition and current predecessor update
         run: |
           transition_host="$(mktemp -d /tmp/vwoci-transition-host.XXXXXX)"
@@ -194,6 +192,28 @@ jobs:
           PY
 
 
+  admin-image-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Prefetch exact pinned Vaultwarden image
+        run: |
+          image="$(
+            python3 - <<'PY'
+          import platform
+          from pathlib import Path
+
+          from vaultwarden_oci.update_versions import resolve_pinned_file
+
+          frozen = resolve_pinned_file(Path("versions.toml"), machine=platform.machine())
+          print(frozen.vaultwarden_image.reference)
+          PY
+          )"
+          .github/scripts/retry-command.sh 3 5 docker pull "$image"
+      - name: Real exact-image admin credential boundary
+        run: python3 tests/acceptance_admin_hash.py
+
   ubuntu-26-04-compatibility:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -239,10 +259,15 @@ jobs:
           date --version >/dev/null
           tar --version >/dev/null
 
+  ubuntu-26-04-security-integration:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Real CrowdSec package containment on Resolute
         run: sudo -E python3 tests/acceptance_crowdsec_firewall_package.py
       - name: Real Docker origin packet path on Resolute
-        run: sudo bash tests/acceptance_edge_packet.sh
+        run: sudo .github/scripts/retry-command.sh 3 5 bash tests/acceptance_edge_packet.sh
 
   ubuntu-26-04-arm64-compatibility:
     runs-on: ubuntu-26.04-arm
@@ -274,8 +299,26 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Prefetch exact pinned Caddy base images
+        run: |
+          mapfile -t images < <(
+            python3 - <<'PY'
+          import platform
+          from pathlib import Path
+
+          from vaultwarden_oci.update_versions import resolve_pinned_file
+
+          frozen = resolve_pinned_file(Path("versions.toml"), machine=platform.machine())
+          print(frozen.caddy_builder_image.reference)
+          print(frozen.caddy_runtime_image.reference)
+          PY
+          )
+          test "${#images[@]}" -eq 2
+          for image in "${images[@]}"; do
+            .github/scripts/retry-command.sh 3 5 docker pull "$image"
+          done
       - name: Exact custom Caddy build and config validation
-        run: python3 tests/acceptance_caddy_config.py
+        run: .github/scripts/retry-command.sh 2 5 python3 tests/acceptance_caddy_config.py
 
   crowdsec-package-integration:
     runs-on: ubuntu-24.04
@@ -309,4 +352,4 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Real Docker IPv4 IPv6 origin path
-        run: sudo bash tests/acceptance_edge_packet.sh
+        run: sudo .github/scripts/retry-command.sh 3 5 bash tests/acceptance_edge_packet.sh

@@ -26,6 +26,8 @@ Unavailable host/provider/architecture coverage is `NOT RUN`, never inferred fro
 
 Keep PR CI proportional: compile/shell parsing, focused unit suite, and the small integration jobs already owned by the repository. Do not make destructive cloud/full-host acceptance an ordinary PR controller.
 
+Deterministic quality/unit jobs must not depend on external container registries. Exact-image, custom-image, and packet-path checks live in clearly named integration jobs. External image fetches use bounded retries with short backoff, but an unavailable registry still fails the owning integration job; CI must never silently convert missing external evidence into PASS. Ubuntu-version compatibility jobs keep native runtime/unit/systemd checks separate from registry-dependent security integration so a red check names the failed boundary truthfully.
+
 One behavior should normally have one best permanent test level. Avoid exact private source-string/order assertions, extracted private shell-function harnesses, prose freezing, custom test runners, coverage-percentage gates, or broad matrices without a concrete risk.
 
 ## High-risk focus
