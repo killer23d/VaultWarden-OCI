@@ -12,7 +12,7 @@ VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. 
 | CrowdSec | Detects abuse across Caddy, Vaultwarden, SSH/Linux, and kernel/firewall signals; locally generated proxied web decisions are remediated through Cloudflare while broad/community decisions can protect host INPUT through the nftables firewall bouncer. |
 | SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
 | rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
-| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers; the five-minute health run synchronizes DNS before status. |
+| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers; the five-minute health timer starts independent local-health and DNS-synchronization services so external DNS failures cannot mask appliance health. |
 | Notifications | Shares the SMTP endpoint/sender/credentials used by Vaultwarden for direct-SMTP/fallback delivery; an optional built-in HTTPS provider remains available for operational events. The appliance direct SMTP path always keeps normal certificate/hostname validation. |
 
 ```text

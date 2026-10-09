@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import json
 import io
+import json
+import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from unittest import mock
 
@@ -244,6 +248,99 @@ class UpdateTests(unittest.TestCase):
 
         self.assertEqual(context, (DOMAIN, "8.8.8.8", TOKEN, ZONE))
         resolve.assert_called_once_with(DOMAIN, TOKEN)
+
+
+class TimerResilienceTests(unittest.TestCase):
+    def test_transient_timer_failures_defer_until_third_consecutive_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "dns-sync.json"
+
+            def transient():
+                raise dns_publication.DNSTransientError("HTTPS request failed after 3 attempts")
+
+            first = dns_publication.update_for_timer(state_path=state, updater=transient)
+            second = dns_publication.update_for_timer(state_path=state, updater=transient)
+            self.assertEqual(first.consecutive_transient_failures, 1)
+            self.assertEqual(second.consecutive_transient_failures, 2)
+            self.assertIsNone(first.update)
+            self.assertIsNone(second.update)
+            with self.assertRaisesRegex(
+                dns_publication.DNSTransientError,
+                "consecutive timer failures=3",
+            ):
+                dns_publication.update_for_timer(state_path=state, updater=transient)
+
+    def test_success_resets_transient_timer_failure_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "dns-sync.json"
+
+            def transient():
+                raise dns_publication.DNSTransientError("temporary")
+
+            dns_publication.update_for_timer(state_path=state, updater=transient)
+            self.assertTrue(state.is_file())
+            sample = dns_publication.DNSState(DOMAIN, PUBLIC_IP, PUBLIC_IP, True, RECORD_ID)
+            result = dns_publication.DNSUpdateResult(sample, sample, False, False)
+            recovered = dns_publication.update_for_timer(
+                state_path=state,
+                updater=lambda: result,
+            )
+            self.assertEqual(recovered.update, result)
+            self.assertFalse(state.exists())
+            after_reset = dns_publication.update_for_timer(
+                state_path=state,
+                updater=transient,
+            )
+            self.assertEqual(after_reset.consecutive_transient_failures, 1)
+
+    def test_hard_dns_failure_is_never_debounced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "dns-sync.json"
+
+            def hard_failure():
+                raise dns_publication.DNSError("bad DNS shape")
+
+            with self.assertRaisesRegex(dns_publication.DNSError, "bad DNS shape"):
+                dns_publication.update_for_timer(state_path=state, updater=hard_failure)
+            self.assertFalse(state.exists())
+
+    def test_cloudflare_https_reader_retries_transient_network_failure(self) -> None:
+        request = urllib.request.Request("https://example.invalid")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        with (
+            mock.patch.object(
+                dns_publication.urllib.request,
+                "urlopen",
+                side_effect=[
+                    urllib.error.URLError("one"),
+                    urllib.error.URLError("two"),
+                    response,
+                ],
+            ) as urlopen,
+            mock.patch.object(dns_publication.time, "sleep") as sleeper,
+        ):
+            self.assertEqual(dns_publication._read_url(request, 1024), b"{}")
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(sleeper.call_count, 2)
+
+    def test_cloudflare_https_reader_does_not_retry_hard_http_error(self) -> None:
+        request = urllib.request.Request("https://example.invalid")
+        error = urllib.error.HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+        with (
+            mock.patch.object(dns_publication.urllib.request, "urlopen", side_effect=error) as urlopen,
+            mock.patch.object(dns_publication.time, "sleep") as sleeper,
+        ):
+            with self.assertRaisesRegex(dns_publication.DNSError, "HTTP 403"):
+                dns_publication._read_url(request, 1024)
+        urlopen.assert_called_once()
+        sleeper.assert_not_called()
 
 
 class CliTimerTests(unittest.TestCase):

@@ -195,10 +195,13 @@ journalctl -u vaultwarden-oci-backup.service --no-pager --lines=200
 
 The managed one-shot services are:
 
-- `vaultwarden-oci-health.service` — DNS synchronization followed by status;
+- `vaultwarden-oci-health.service` — local Vaultwarden/Caddy/security status; DNS failure does not fail this unit;
+- `vaultwarden-oci-dns.service` — Cloudflare DNS synchronization, independently started on each five-minute health interval;
 - `vaultwarden-oci-backup.service` — local verified `.vwrec`;
 - `vaultwarden-oci-maintenance.service` — Cloudflare origin refresh followed by doctor;
 - `vaultwarden-oci-update-check.service` — project update availability check.
+
+For `vaultwarden-oci-dns.service`, a single transient external HTTPS failure is retried and then deferred; it should not generate OnFailure until three consecutive timer intervals fail transiently. A hard DNS invariant failure still alerts immediately. If the DNS service fails while `vaultwarden-oci-health.service` remains successful, inspect the DNS journal rather than treating the event as a Vaultwarden/Caddy outage.
 
 **Correction:** repair the underlying appliance check; do not merely reset a failed unit and call the appliance healthy.
 

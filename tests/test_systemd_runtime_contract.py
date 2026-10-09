@@ -117,15 +117,29 @@ class SystemdRuntimeContractTests(unittest.TestCase):
                     self.assert_runtime_directory_contract(unit_path)
 
 
-    def test_health_timer_synchronizes_dns_before_status(self) -> None:
-        service = service_directives(ROOT / "systemd/vaultwarden-oci-health.service")
+    def test_health_timer_starts_dns_independently_from_local_status(self) -> None:
+        health_path = ROOT / "systemd/vaultwarden-oci-health.service"
+        health = service_directives(health_path)
         self.assertEqual(
-            service.get("ExecStart"),
-            [
-                "/opt/vaultwarden-oci/current/vwctl dns update --timer",
-                "/opt/vaultwarden-oci/current/vwctl status",
-            ],
+            health.get("ExecStart"),
+            ["/opt/vaultwarden-oci/current/vwctl status"],
         )
+        health_unit = health_path.read_text(encoding="utf-8")
+        self.assertIn("Wants=vaultwarden-oci-dns.service\n", health_unit)
+
+        dns_path = ROOT / "systemd/vaultwarden-oci-dns.service"
+        dns = service_directives(dns_path)
+        self.assertEqual(
+            dns.get("ExecStart"),
+            ["/opt/vaultwarden-oci/current/vwctl dns update --timer"],
+        )
+        dns_unit = dns_path.read_text(encoding="utf-8")
+        self.assertIn("OnFailure=vaultwarden-oci-notify@%n.service\n", dns_unit)
+        self.assertIn(
+            "ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci\n",
+            dns_unit,
+        )
+        self.assertNotIn("/var/lib/crowdsec/data", dns_unit)
 
     def test_maintenance_refreshes_edge_daily_before_doctor(self) -> None:
         unit_path = ROOT / "systemd/vaultwarden-oci-maintenance.service"

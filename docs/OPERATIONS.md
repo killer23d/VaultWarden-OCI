@@ -115,7 +115,7 @@ sudo vwctl edge refresh
 sudo vwctl doctor --json
 ```
 
-The existing five-minute health timer runs the idempotent `vwctl dns update --timer` path immediately before `vwctl status`, so a changed public IPv4 converges without adding another scheduler. Expected mutation-lock contention is reported as a clean skip and retried on the next health interval; real discovery/API/DNS-shape failures fail the health unit and use normal failure notification. The separate daily maintenance timer continues to run the authoritative `vwctl edge refresh` before `vwctl doctor`, keeping long-running hosts inside the 72-hour Cloudflare last-known-good validity window.
+The existing five-minute health timer starts two independent oneshot services: `vaultwarden-oci-health.service` runs local `vwctl status`, while `vaultwarden-oci-dns.service` runs the idempotent `vwctl dns update --timer` path. A DNS/API outage therefore cannot prevent or fail the local appliance health check. DNS HTTPS transport failures receive bounded retry and are journaled without OnFailure for the first two consecutive timer failures; the third consecutive transient failure fails the DNS service and notifies. Structural configuration, credential, DNS-shape, proxy-state, and authoritative-readback failures remain immediate failures. A successful DNS run clears the transient-failure history. Expected mutation-lock contention remains a clean skip for the next interval. The separate daily maintenance timer continues to run the authoritative `vwctl edge refresh` before `vwctl doctor`, keeping long-running hosts inside the 72-hour Cloudflare last-known-good validity window.
 
 **Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
@@ -179,7 +179,7 @@ If the Vaultwarden Admin SMTP test reports `429` followed by JavaScript such as 
 
 ## Timers and automation
 
-systemd owns scheduling. The enabled `vaultwarden-oci.target` wants the health, backup, maintenance, and update-check timers. The five-minute health service performs DNS synchronization before its status check.
+systemd owns scheduling. The enabled `vaultwarden-oci.target` wants the health, backup, maintenance, and update-check timers. Every five-minute health activation starts the local health service and independently pulls in the DNS synchronization service; they do not share a failure result.
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target

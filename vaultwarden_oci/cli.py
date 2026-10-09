@@ -701,7 +701,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"in_sync={'true' if state.in_sync else 'false'}"
                 )
                 return 0 if state.in_sync else 1
-            result = dns_publication.update(dry_run=args.dry_run)
+            if getattr(args, "timer", False):
+                timer_result = dns_publication.update_for_timer()
+                if timer_result.update is None:
+                    print(
+                        "WARN: transient DNS synchronization failure "
+                        f"{timer_result.consecutive_transient_failures}/"
+                        f"{dns_publication._TRANSIENT_FAILURE_THRESHOLD}; "
+                        f"OnFailure notification deferred: {timer_result.transient_error}"
+                    )
+                    return 0
+                result = timer_result.update
+            else:
+                result = dns_publication.update(dry_run=args.dry_run)
             before = result.before
             if not result.changed:
                 print(

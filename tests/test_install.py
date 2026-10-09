@@ -151,6 +151,7 @@ class InstallLayoutTests(unittest.TestCase):
                 "etc/systemd/system/vaultwarden-oci.target": 0o644,
                 "etc/systemd/system/vaultwarden-oci.service": 0o644,
                 "etc/systemd/system/vaultwarden-oci-health.timer": 0o644,
+                "etc/systemd/system/vaultwarden-oci-dns.service": 0o644,
                 "etc/systemd/system/vaultwarden-oci-backup.timer": 0o644,
                 "etc/systemd/system/vaultwarden-oci-maintenance.timer": 0o644,
                 "etc/systemd/system/vaultwarden-oci-notify@.service": 0o644,

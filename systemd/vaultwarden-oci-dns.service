@@ -1,8 +1,8 @@
 [Unit]
-Description=VaultWarden-OCI local health check
+Description=VaultWarden-OCI Cloudflare DNS synchronization
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-After=vaultwarden-oci.service
-Wants=vaultwarden-oci-dns.service
+Wants=network-online.target
+After=network-online.target vaultwarden-oci.service
 OnFailure=vaultwarden-oci-notify@%n.service
 
 [Service]
@@ -10,13 +10,13 @@ Type=oneshot
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/opt/vaultwarden-oci/current/vwctl status
-TimeoutStartSec=60
+ExecStart=/opt/vaultwarden-oci/current/vwctl dns update --timer
+TimeoutStartSec=90
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci /var/lib/crowdsec/data
+ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=vaultwarden-oci-health
+SyslogIdentifier=vaultwarden-oci-dns
