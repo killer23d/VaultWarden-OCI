@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import cli, install, update, update_cli, update_versions
+from vaultwarden_oci import (
+    cli,
+    install,
+    update,
+    update_cli,
+    update_unit_migration,
+    update_versions,
+)
 
 
 BASELINE_VERSION = "0.1.0-dev"
@@ -257,6 +264,37 @@ class UpdateTransactionTests(unittest.TestCase):
             return command(args)
 
         return run, calls
+
+    def test_unit_migration_discovers_candidate_unit_unknown_to_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            extra_unit = "vaultwarden-oci-future.service"
+            extra_content = "candidate-owned future unit\n"
+            (candidate / install.SYSTEMD_SOURCE_DIR / extra_unit).write_text(
+                extra_content,
+                encoding="utf-8",
+            )
+
+            root = self._installed(temp, old, BASELINE_VERSION)
+            layout = install.Layout(root)
+            previous_release = (
+                layout.path(install.RELEASES_DIR) / BASELINE_VERSION
+            )
+
+            snapshot = update_unit_migration.install_units(
+                candidate,
+                previous_release,
+                layout,
+            )
+
+            destination = layout.path(install.SYSTEMD_DIR / extra_unit)
+            self.assertEqual(destination.read_text(encoding="utf-8"), extra_content)
+            self.assertEqual(
+                snapshot[destination],
+                (b"", update_unit_migration.ABSENT_MODE),
+            )
 
     def test_update_cli_storage_failure_precedes_candidate_download(self) -> None:
         stderr = io.StringIO()

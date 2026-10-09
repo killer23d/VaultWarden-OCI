@@ -9,6 +9,26 @@ from . import durability, install
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
+_UNIT_PREFIX = "vaultwarden-oci"
+_UNIT_SUFFIXES = {".service", ".timer", ".target"}
+
+
+def _owned_unit_names(source: Path) -> set[str]:
+    names: set[str] = set()
+    for entry in source.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            raise UpdateError(f"immutable release systemd source contains unsafe entry: {entry}")
+        if not entry.name.startswith(_UNIT_PREFIX) or entry.suffix not in _UNIT_SUFFIXES:
+            raise UpdateError(f"immutable release contains unexpected systemd unit: {entry.name}")
+        names.add(entry.name)
+    return names
+
+
+def _owned_units(*sources: Path) -> tuple[str, ...]:
+    names: set[str] = set()
+    for source in sources:
+        names.update(_owned_unit_names(source))
+    return tuple(sorted(names))
 
 
 def _release_barrier(release: Path) -> None:
@@ -38,7 +58,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
     actions: list[tuple[Path, bytes | None]] = []
     new_source = _systemd_source(new_release)
     expected_source = _systemd_source(expected_release)
-    for unit in install.SYSTEMD_UNITS:
+    for unit in _owned_units(expected_source, new_source):
         new = new_source / unit
         expected = expected_source / unit
         destination = layout.path(install.SYSTEMD_DIR / unit)
@@ -102,7 +122,9 @@ def converge_units(
         raise UpdateError("unit convergence requires at least one allowed immutable release")
     snapshot: dict[Path, tuple[bytes, int]] = {}
     actions: list[tuple[Path, bytes | None]] = []
-    for unit in install.SYSTEMD_UNITS:
+    sources = [_systemd_source(new_release)]
+    sources.extend(_systemd_source(release) for release in allowed_current_releases)
+    for unit in _owned_units(*sources):
         desired = _state_for_release(new_release, unit)
         allowed = {_state_for_release(release, unit) for release in allowed_current_releases}
         destination = layout.path(install.SYSTEMD_DIR / unit)
