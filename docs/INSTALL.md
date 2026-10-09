@@ -152,6 +152,14 @@ sudo vwctl update check
 
 The five-minute health timer launches **separate** local-health and Cloudflare DNS services; DNS failures cannot hide the local health state. The separate DNS service retries/debounces temporary network errors, while hard configuration/record errors fail immediately. Applying appliance updates is still **manual**.
 
+### Protect the first backup offsite
+
+**Enabling timers schedules local backups only.** The normal backup timer runs daily at **03:15 server-local time** plus up to 15 minutes of randomized delay, saving encrypted `.vwrec` files on the **same dedicated data volume** as the application. It does **not** set up rclone storage or send copies offsite automatically.
+
+After first start, follow [Recovery: Configure and publish offsite backups](RECOVERY.md#configure-and-publish-offsite-backups-rclone): configure your storage provider using `sudo rclone config` (root's remote), then run `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'` with your own remote name/path. Independently verify a real remote `.vwrec` by decrypting it using your **off-server** Age identity. Retain the recovery-kit ZIP and its separate passphrase **off the server**. Local backup files are not automatically pruned, so monitor free space.
+
+Do not consider disaster recovery tested until you have verified offsite decryption and practiced restoring onto a disposable host. See [Recovery](RECOVERY.md) for the safe restore procedure.
+
 Open the administrator dashboard:
 
 ```bash
