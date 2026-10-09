@@ -38,6 +38,7 @@ Useful journals:
 ```bash
 journalctl -u vaultwarden-oci.service
 journalctl -u vaultwarden-oci-health.service
+journalctl -u vaultwarden-oci-dns.service
 journalctl -u vaultwarden-oci-backup.service
 journalctl -u vaultwarden-oci-maintenance.service
 journalctl -u vaultwarden-oci-update-check.service
@@ -82,15 +83,18 @@ Caddy uses exact-pinned Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP,
 
 For creation or rotation of `cloudflare_api_token` and `cloudflare_remediation_token`, including the intentionally different Cloudflare permission sets, see [Cloudflare tokens](CLOUDFLARE-TOKENS.md). Keep the two credentials separate and update them only through `sudo vwctl secrets edit`.
 
-The configured public hostname is published through the same narrow `cloudflare_api_token` without creating another zone-ID or DNS configuration authority:
+### Built-in Cloudflare DNS updates (DDNS)
 
-```bash
-sudo vwctl dns status
-sudo vwctl dns update --dry-run
-sudo vwctl dns update
-```
+The appliance keeps **one existing Proxied IPv4 A record** for `[site].domain` in sync with this server's public IPv4. Use the same encrypted `cloudflare_api_token` as Caddy's certificates; do not create another DDNS account, zone-ID setting, or token.
 
-`dns update` discovers this host's public IPv4 through a bounded direct-HTTPS fallback set, requires exactly one existing Cloudflare A record for `[site].domain`, requires that record to already be proxied, refuses explicit AAAA records, patches only the A-record content, and then reads the record back authoritatively. It does not put the Cloudflare token in argv, environment variables, logs, or persistent runtime files. The initial proxied A record remains an operator/Cloudflare setup prerequisite; the appliance does not guess whether a missing record should be created or whether IPv6 should be published.
+| Task | Command | Outcome |
+| --- | --- | --- |
+| Inspect | `sudo vwctl dns status` | Reports public IPv4, record IPv4, and `in_sync`; exits nonzero if they differ |
+| Preview | `sudo vwctl dns update --dry-run` | Reports `PASS` or `PLAN`; never changes DNS |
+| Apply | `sudo vwctl dns update` | Patches only the A-record address and verifies Cloudflare's read-back |
+| See scheduled runs | `journalctl -u vaultwarden-oci-dns.service --no-pager --lines=100` | DNS service results |
+
+Create exactly **one Proxied A record**, with no explicit AAAA, before the first dry run. The updater will not create records, disable proxying, or publish IPv6. For a replacement server, run the dry run before startup, but **do not move DNS until the new Vaultwarden is running**.
 
 The host separately owns a fail-closed Docker `DOCKER-USER` origin filter that permits published TCP/443 only from validated Cloudflare IPv4/IPv6 ranges. A bounded last-known-good range set can be used. With neither current nor safe cached ranges, public origin ingress remains blocked.
 
@@ -115,7 +119,9 @@ sudo vwctl edge refresh
 sudo vwctl doctor --json
 ```
 
-The existing five-minute health timer starts two independent oneshot services: `vaultwarden-oci-health.service` runs local `vwctl status`, while `vaultwarden-oci-dns.service` runs the idempotent `vwctl dns update --timer` path. A DNS/API outage therefore cannot prevent or fail the local appliance health check. DNS HTTPS transport failures receive bounded retry and are journaled without OnFailure for the first two consecutive timer failures; the third consecutive transient failure fails the DNS service and notifies. Structural configuration, credential, DNS-shape, proxy-state, and authoritative-readback failures remain immediate failures. A successful DNS run clears the transient-failure history. Expected mutation-lock contention remains a clean skip for the next interval. The separate daily maintenance timer continues to run the authoritative `vwctl edge refresh` before `vwctl doctor`, keeping long-running hosts inside the 72-hour Cloudflare last-known-good validity window.
+### Automatic DNS and local health
+
+Every five minutes, `vaultwarden-oci-health.service` checks local health and a **separate** `vaultwarden-oci-dns.service` synchronizes DNS. DNS/API outages do **not** fail the local health check. Temporary DNS HTTPS failures are retried and the first **two consecutive timer failures** are deferred; the third fails the DNS unit and triggers its `OnFailure` hook. Invalid record shapes, permissions, proxy state and read-back errors fail immediately. A successful DNS run clears the transient counter. Email is only sent if an optional HTTPS operational provider is configured; otherwise the notification hook skips email. Daily maintenance separately refreshes the Cloudflare origin policy.
 
 **Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
@@ -164,18 +170,20 @@ sudo vwctl crowdsec unban 203.0.113.7
 
 ## Notifications and email tests
 
-Vaultwarden application mail and the appliance direct SMTP path share the common `[smtp]` host/port/security/sender/timeout values and SOPS `smtp_username`/`smtp_password`. This covers invitations, verification, email 2FA, new-device mail, the Vaultwarden Admin SMTP test, `vwctl notification test --smtp`, and eligible operational-notification fallback. Operational notifications may additionally use one built-in HTTPS provider. For CyberPersons, `503 service_unavailable` is status-only transient; `429 rate_limit_exceeded` and `500 send_failed` are not transient by status alone.
+**Vaultwarden application mail** uses `[smtp]` and encrypted SMTP credentials for invitations, account verification and email 2FA. The direct SMTP test shares this configuration and always validates TLS certificates and hostnames.
 
-The Vaultwarden-specific `smtp.embed_images`, `smtp.accept_invalid_certs`, and `smtp.accept_invalid_hostnames` controls are not settings for the appliance direct SMTP client. The direct client always performs normal certificate and hostname validation and intentionally does not honor Vaultwarden's TLS exceptions.
+**Automatic failure alerts** are **optional**. They require `[notifications]` with a built-in **HTTPS email provider**, recipient and encrypted `email_api_token`. **SMTP alone does not activate systemd alerts**. The provider API is primary; authenticated SMTP is only a fallback for classified temporary failures. There is no durable mail queue. See [Configuration](CONFIGURATION.md#optional-automatic-failure-alerts) for a working example.
 
 ```bash
-sudo vwctl notification test
-sudo vwctl notification test --smtp
+sudo vwctl notification test          # Real operational-route email
+sudo vwctl notification test --smtp   # Real direct SMTP email
+sudo vwctl doctor --json              # notification.* checks
+journalctl -u 'vaultwarden-oci-notify@*' --no-pager --lines=100
 ```
 
-**Expected success:** the first command proves the configured operational route and labels the actual API/fallback transport in the delivered diagnostic; the second proves the common SMTP endpoint/sender/credentials using direct authenticated SMTP with strict TLS validation. It does not prove Vaultwarden-only TLS exception knobs. **On failure:** inspect `notification.*` doctor checks and provider/SMTP settings. Permanent/auth/TLS/ambiguous API failures are intentionally not hidden by SMTP fallback.
+If the operational route is unconfigured, the first test cannot send via a provider and automatic failure hooks skip. A successful direct SMTP test does **not** mean alerts are enabled. CyberPersons 503 qualifies as status-only transient, unlike 429 and 500. Permanent, TLS, authentication and ambiguous provider errors are not silently hidden with fallback.
 
-If the Vaultwarden Admin SMTP test reports `429` followed by JavaScript such as `SyntaxError: Unexpected end of JSON input`, inspect the Caddy access log before changing SMTP credentials. That symptom can be an HTTP rate-limit response rather than an SMTP rejection. The supported default outer `/admin` limit is now 60 requests/minute specifically to avoid the former 5-per-5-minute false failure. Use `sudo vwctl notification test --smtp` to test the common SMTP transport independently under strict TLS.
+Vaultwarden-only `smtp.embed_images` and `smtp.accept_invalid_*` do not weaken the appliance's direct-SMTP TLS checks. A Vaultwarden Admin-panel SMTP test returning HTTP 429 plus a JavaScript JSON parse error can be a Caddy rate-limit response rather than SMTP rejection.
 
 ## Timers and automation
 
