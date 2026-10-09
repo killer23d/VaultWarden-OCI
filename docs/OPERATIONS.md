@@ -185,6 +185,27 @@ If the operational route is unconfigured, the first test cannot send via a provi
 
 Vaultwarden-only `smtp.embed_images` and `smtp.accept_invalid_*` do not weaken the appliance's direct-SMTP TLS checks. A Vaultwarden Admin-panel SMTP test returning HTTP 429 plus a JavaScript JSON parse error can be a Caddy rate-limit response rather than SMTP rejection.
 
+## Backups, offsite copies, and restore
+
+The backup timer in `vaultwarden-oci.target` runs **`vwctl backup` with no `--remote`**. It schedules a daily local encrypted `.vwrec` for **03:15 server-local time** plus up to 15 minutes of randomized delay. These files reside at `/var/lib/vaultwarden-oci/backups/` on the dedicated volume. The backup briefly pauses/resumes running containers for a consistent database snapshot and verifies their health afterward. **A local backup is not an offsite copy.**
+
+| Task | Command or action |
+| --- | --- |
+| List local recovery points | `sudo vwctl recovery list` |
+| Create local backup now | `sudo vwctl backup` |
+| Configure root's cloud rclone remote | `sudo rclone config`, then `sudo rclone listremotes` |
+| Create and verify a new offsite copy | `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'` |
+| List offsite recovery points | `sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'` |
+| Verify actual decryption | `sudo vwctl recovery verify --file /path/to/recovery.vwrec` or `--from-remote 'offsite:path/file.vwrec'`, then supply matching offline identity |
+| Begin guided restore | `sudo vwctl restore` (changes live state **only after** final confirmation) |
+| Check local schedule/failures | `sudo vwctl timers` and `journalctl -u vaultwarden-oci-backup.service --no-pager --lines=100` |
+
+Replace example rclone remote and backup paths. **The current built-in timers do not automate offsite publication.** Normal offsite publication uses rclone copy/round-trip checksum verification, not destructive sync. An uploaded-file checksum does not prove offline-key decryption: use the separate `recovery verify` flow. The root-owned rclone configuration itself is **not** included in the application archive or credential recovery kit.
+
+There is **no automatic local or remote retention**, and no supported `vwctl` local-prune subcommand. Remote-only pruning requires a reviewed `sudo vwctl recovery prune --remote 'offsite:Vaultwarden-OCI' --keep-last 7` plan followed, if appropriate, by the **same command with `--confirm`**. Choose your own retention policy and verify the kept copies before deleting anything. Monitor local disk space with `df -h /var/lib/vaultwarden-oci`.
+
+For step-by-step root rclone setup, recovery-key custody, restoration and replacing a lost server, see [Recovery](RECOVERY.md). Do not use a real production restore merely to test the procedure; use a disposable host.
+
 ## Timers and automation
 
 systemd owns scheduling. The enabled `vaultwarden-oci.target` wants the health, backup, maintenance, and update-check timers. Every five-minute health activation starts the local health service and independently pulls in the DNS synchronization service; they do not share a failure result.
