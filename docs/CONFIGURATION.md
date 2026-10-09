@@ -132,9 +132,56 @@ The default is now 60 requests per minute for the outer interactive route. This 
 
 Allowed Caddy values are 10-1000 events and a simple positive `s`, `m`, or `h` duration such as `30s`, `1m`, or `1h`.
 
-## Optional operational HTTPS notifications
+## Cloudflare DNS updates (DDNS)
 
-Setup does not preselect a notification API provider because it cannot truthfully invent an account or provider choice. Add `[notifications]` only when needed, then keep its API token in SOPS as `email_api_token`. Authenticated SMTP remains independently testable and is the fallback transport only for failures classified as eligible transient by the existing notification owner.
+The built-in DNS updater uses the vault hostname in `[site].domain` and the existing encrypted `cloudflare_api_token`. There is **no second DDNS token, Zone ID, or configuration block**. In Cloudflare, you must first create **exactly one Proxied (orange-cloud) IPv4 A record** for this hostname, and no explicit AAAA record. The updater discovers the server's public IPv4 and changes **only that existing A record's IPv4 content**. It never creates a record, changes proxy status, or publishes IPv6.
+
+```bash
+sudo vwctl dns status             # See server IP, record IP, and sync state
+sudo vwctl dns update --dry-run   # Preview; no DNS write
+sudo vwctl dns update             # Apply, after the first healthy start
+```
+
+After enabling `vaultwarden-oci.target`, a separate DNS service runs on the five-minute health schedule. DNS failure cannot fail local health; the first two consecutive transient timer failures are deferred, while the third fails the DNS service. Unsafe record/credential/read-back failures fail immediately. See [Operations](OPERATIONS.md) and [Troubleshooting](TROUBLESHOOTING.md).
+
+## Optional automatic failure alerts
+
+**Application SMTP is not the same as automatic alerts.** The required `[smtp]` settings and encrypted `smtp_username`/`smtp_password` support Vaultwarden invitations, verification and other account mail. SMTP alone **does not enable systemd failure notifications**.
+
+To receive those alerts, choose a built-in **HTTPS email provider**, a recipient, and its API token. Add this using `sudo vwctl config edit`:
+
+```toml
+[notifications]
+provider = "mailersend"
+to_email = "alerts@example.com"
+```
+
+Replace the provider and recipient with yours. Store its token as `email_api_token` through `sudo vwctl secrets edit`; never put the token in TOML. Supported provider IDs: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons` (also `cyberpanel`). Your provider may require verified sending domains and senders.
+
+Mailgun needs an additional sending-domain option, and its region defaults to `us`. Use the following example **instead of**, not alongside, the first one:
+
+```toml
+[notifications]
+provider = "mailgun"
+to_email = "alerts@example.com"
+
+[notifications.options]
+domain = "mg.example.com"
+region = "us"
+```
+
+The HTTPS API is tried first. Only classified temporary network/provider failures qualify for bounded retry and authenticated SMTP fallback; permanent, authentication, TLS, and ambiguous failures remain visible. There is no local mail queue. CyberPersons HTTP 503 is retryable by status, but HTTP 429 and 500 are not.
+
+Test with real messages:
+
+```bash
+sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl secrets validate
+sudo vwctl notification test          # Requires [notifications]
+sudo vwctl notification test --smtp   # Direct SMTP; does not require [notifications]
+```
+
+The direct SMTP test uses `notifications.to_email` if present or `site.acme_email` otherwise. SMTP test success alone does **not** prove automatic alerts are enabled. Check `notification.*` in `sudo vwctl doctor --json`.
 
 ## Other stack components
 
