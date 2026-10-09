@@ -405,10 +405,11 @@ def _clear_timer_failure_count(path: Path) -> None:
 def update_for_timer(
     *,
     state_path: Path | None = None,
-    updater: Callable[..., DNSUpdateResult] = update,
+    updater: Callable[..., DNSUpdateResult] | None = None,
 ) -> DNSTimerResult:
     """Run timer DNS sync with consecutive transient-failure debouncing."""
     state_path = TIMER_STATE_PATH if state_path is None else state_path
+    updater = update if updater is None else updater
     try:
         result = updater()
     except cli.LockBusyError:
