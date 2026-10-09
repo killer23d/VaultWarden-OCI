@@ -226,24 +226,33 @@ sudo vwctl doctor --json
 
 ## DNS is wrong or the DNS update fails
 
-**Diagnose:**
+**First check without changing Cloudflare:**
 
 ```bash
 sudo vwctl dns status
 sudo vwctl dns update --dry-run
+journalctl -u vaultwarden-oci-dns.service --no-pager --lines=100
 ```
 
-**Interpretation:** the appliance owns one existing proxied IPv4 A record for the configured hostname. It refuses ambiguous/multiple A records, a DNS-only record, or explicit AAAA ownership. It does not silently create a missing record.
+| What you see | What to do |
+| --- | --- |
+| `in_sync=false` | The server public IPv4 and existing A record differ. `dns status` deliberately exits nonzero for drift. |
+| `PLAN: DNS update required` | Dry run passed; an IPv4 update would be made, but **nothing has changed yet**. |
+| `expected exactly one existing Cloudflare A record` | Create the missing A record or remove duplicates **in Cloudflare**. The updater cannot create a record. |
+| `DNS-only` or `AAAA` | Set the single A record to **Proxied** (orange cloud); resolve explicit AAAA records. The updater does not manage IPv6. |
+| Token/zone/permission error | Check `cloudflare_api_token` and its zone scope using [Cloudflare tokens](CLOUDFLARE-TOKENS.md). Edit through `sudo vwctl secrets edit`. |
+| Temporary HTTPS/network error | Check outbound access. The timed service defers the first two consecutive temporary failures, then fails on the third. |
+| Read-back mismatch | Inspect the exact record in Cloudflare; do not force an update or disable proxying. |
 
-**Correction:** in Cloudflare, make the intended hostname unambiguous: one existing proxied A record and no explicit AAAA record owned outside the appliance contract. Confirm the narrow `cloudflare_api_token` has the permissions/scoping in [Cloudflare tokens](CLOUDFLARE-TOKENS.md).
-
-When the dry run is clean and the host is ready:
+**Only after the intended new vault has started**, synchronize the DNS record and check health:
 
 ```bash
 sudo vwctl dns update
+sudo vwctl dns status
+sudo vwctl doctor --json
 ```
 
-**Verify:** `sudo vwctl dns status` reports the current validated public IPv4 and in-sync proxied record.
+DNS runs independently of local health: a failing DNS unit does not automatically mean Vaultwarden containers are down. DNS failures only generate operational failure emails when the optional HTTPS notification route is configured.
 
 ## Cloudflare origin policy is stale or fails
 
@@ -371,18 +380,24 @@ Do not reuse an old confirmation and do not rerun the entire CrowdSec setup mere
 
 ## Notification or SMTP test fails
 
-Test the two paths independently:
+These commands test **two different routes** and may send real messages:
 
 ```bash
 sudo vwctl notification test
 sudo vwctl notification test --smtp
+sudo vwctl doctor --json
+journalctl -u 'vaultwarden-oci-notify@*' --no-pager --lines=100
 ```
 
-**Interpretation:** the first tests the configured operational route; the second tests direct authenticated SMTP with normal certificate/hostname validation. A direct SMTP success does not prove a Vaultwarden-only invalid-certificate exception.
+| Symptom | What to check |
+| --- | --- |
+| Operational notification route not configured | Add `[notifications]` with `provider` and `to_email` plus encrypted `email_api_token`. SMTP alone does **not** enable failure alerts. |
+| Direct SMTP test fails | Check `[smtp]` host, port, TLS mode and sender, plus encrypted `smtp_username` and `smtp_password`. Direct SMTP always validates TLS. |
+| Provider API rejects the message | Check the provider API token, verified sender/domain, recipient and provider-specific options. Permanent/authentication/TLS errors do not qualify for SMTP fallback. |
+| Service failed but no email arrived | Inspect its journal and the notification service. Without `[notifications]`, the `OnFailure` hook deliberately reports `SKIP`. |
+| DNS failed while local health passed | Inspect `vaultwarden-oci-dns.service` rather than assuming the application is down. |
 
-**Correction:** edit non-secret SMTP/provider settings with `sudo vwctl config edit` and credentials with `sudo vwctl secrets edit`. Permanent/authentication/TLS/ambiguous API failures are intentionally not hidden by SMTP fallback.
-
-**Verify:** rerun the failing test and then doctor.
+Use `sudo vwctl config edit` for non-secret settings and `sudo vwctl secrets edit` for credentials. Validate and rerun the failing test. See [Configuration](CONFIGURATION.md#optional-automatic-failure-alerts). Never bypass TLS validation to make a test pass.
 
 ## Local backup fails
 
