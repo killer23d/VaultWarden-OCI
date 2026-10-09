@@ -19,35 +19,75 @@ They are not interchangeable. **First-install checklist:** keep the verified enc
 
 The `.vwrec` envelope uses Age. Its manifest `format_version = 2` is a real compatibility marker and is independent of product/release naming.
 
+## Automatic versus manual protection
+
+| Task | What happens today |
+| --- | --- |
+| Scheduled local backup | Once daily at **03:15 server-local time**, plus up to 15 minutes of randomized delay, after `vaultwarden-oci.target` is enabled |
+| Local destination | `/var/lib/vaultwarden-oci/backups/` on the dedicated data volume (not protection against loss of that volume) |
+| Offsite backup | **Manual** through `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'`; enabling the timers does **not** upload backups |
+| Offline-key verification | **Manual** with `vwctl recovery verify` and the matching off-server private Age identity |
+| Retention | No automatic deletion; remote prune is an explicit preview/confirm action, and there is no supported local prune command |
+| Recovery-kit ZIP | Separate, password-protected credential handoff; the normal `.vwrec` backup timer does **not** create or upload it |
+
+Backup briefly pauses running application containers for a consistent copy, snapshots SQLite, resumes the containers, and checks their health. It checks the staged manifest, then encrypts to the **offline public Age recipient**. The matching **private key** stays off-server, so a successful scheduled backup does **not** itself prove that the off-server key can decrypt the resulting file. Run an independent `recovery verify` periodically.
+
+**Minimum practical plan:** make a first local backup; protect the credential recovery-kit ZIP and its separate passphrase off-server; publish a `.vwrec` offsite; verify decryption of the offsite copy with the offline identity; and practice restoring onto a disposable host. `vwctl doctor` reports the last recorded backup state but does not replace a real restore test.
+
 ## Create and verify without restoring
 
-**Prerequisite:** healthy dedicated storage and valid config/secrets. Verification also requires the offline Age private identity from secure operator custody.
+On a healthy installed server, make and list a local recovery point:
 
 ```bash
 sudo vwctl backup
 sudo vwctl recovery list
-sudo vwctl recovery verify \
-  --file /var/lib/vaultwarden-oci/backups/<artifact>.vwrec \
-  --identity /secure/offline-age-key.txt
 ```
 
-Configured offsite publication:
+Use the **actual** filename printed by the command:
 
 ```bash
-sudo vwctl backup --remote 'REMOTE:path'
-sudo vwctl recovery list --remote 'REMOTE:path'
 sudo vwctl recovery verify \
-  --from-remote 'REMOTE:path/<artifact>.vwrec' \
-  --identity /secure/offline-age-key.txt
+  --file /var/lib/vaultwarden-oci/backups/recovery-REPLACE_ME.vwrec
 ```
 
-Publication is create -> local verify -> rclone copy/copyto -> independent remote verify -> success. It never uses destructive `rclone sync` as normal publication.
+On an interactive terminal, verification offers secure paste of the matching offline Age private identity, selection of an identity file (such as removable media), or a local encrypted recovery-kit ZIP. For unattended use, provide an explicit `--identity /secure/offline-age-key.txt`. The regular operational key at `/etc/vaultwarden-oci/age-key.txt` is **not** a replacement for your offline key.
 
-**Expected success:** verification proves the Age envelope, manifest/member/checksum contract, and that the supplied offline identity decrypts the included SOPS document. **On failure:** no live state is promoted; preserve the artifact, fix custody/storage/tooling, and verify again.
+This verification decrypts the real `.vwrec`, checks the manifest/checksums and verifies the encrypted SOPS document, **without changing live application data**. A backup-created PASS and an rclone upload checksum are not substitutes for this key-based check.
+
+## Configure and publish offsite backups (rclone)
+
+Setup **installs rclone but does not configure a cloud storage provider**. The appliance's commands run as **root**, so configure a remote for root rather than only your normal Ubuntu account.
+
+1. Run `sudo rclone config` and follow your provider's authentication setup. For the examples below, name the remote `offsite`. Store the provider access details and rclone credentials separately off-host: neither `.vwrec` nor the recovery-kit ZIP includes your rclone configuration.
+2. Check root's remote connection:
+
+   ```bash
+   sudo rclone listremotes
+   sudo rclone lsf 'offsite:' --max-depth 1
+   ```
+
+3. Create **and upload** a new encrypted backup:
+
+   ```bash
+   sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'
+   sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'
+   ```
+
+   Replace the remote name/path with your own. The command uploads a local `.vwrec`, downloads it back, compares SHA-256, and reports offsite success only after that verification. No old remote file is removed.
+4. Pick a **real** remote filename from the listing and independently verify decryption using your offline identity:
+
+   ```bash
+   sudo vwctl recovery verify \
+     --from-remote 'offsite:Vaultwarden-OCI/recovery-REPLACE_ME.vwrec'
+   ```
+
+A `.vwrec` is already encrypted by Age; an optional rclone crypt wrapper does not replace offline-key custody. Keep enough information and credentials **off the failed server** to access the cloud account and download a backup after disaster.
+
+**Important:** the bundled systemd backup timer only runs `vwctl backup`, without `--remote`. To maintain offsite copies with the current interface, repeat the explicit offsite command yourself. There is **no built-in scheduled remote publication**. Do not replace this verified copy-and-read-back process with destructive `rclone sync`.
 
 ## Same-host restore
 
-Use this when the server is intact and the canonical dedicated storage identity still passes.
+Use this when the server is intact and the canonical dedicated storage identity still passes. **Restore replaces live application state and involves downtime.** Practice on a disposable host rather than risking your only production copy.
 
 **Prerequisites:** `/var/lib/vaultwarden-oci` is the expected dedicated mount, a verified `.vwrec` is available locally or remotely, and you have the offline Age private identity.
 
