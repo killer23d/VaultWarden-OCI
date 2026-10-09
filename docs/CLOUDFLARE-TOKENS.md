@@ -8,7 +8,7 @@ Cloudflare's current token-creation flow is **Cloudflare dashboard -> My Profile
 
 ## `cloudflare_api_token` - Caddy DNS-01
 
-This is the narrow token Caddy uses to create and remove the temporary DNS records required for ACME DNS-01 certificate issuance.
+This token has **two** narrow jobs: Caddy uses it for temporary ACME DNS-01 certificate challenge records, and the built-in Cloudflare DNS updater uses it to change the IPv4 content of **one existing Proxied A record** for the vault hostname. It does not create the site's A record or manage AAAA/IPv6 records.
 
 Create a separate user API token. You can start from Cloudflare's **Edit zone DNS** template or create a custom token. The current `caddy-dns/cloudflare` module recommends one token with:
 
@@ -19,7 +19,7 @@ Create a separate user API token. You can start from Cloudflare's **Edit zone DN
 
 Under **Zone Resources**, restrict the token to the specific DNS zone that contains the Vaultwarden hostname, for example `example.com`. Do not grant all-zone access unless the appliance genuinely manages certificates for all of those zones.
 
-A descriptive name such as `VaultWarden-OCI Caddy DNS` is recommended.
+A descriptive name such as `VaultWarden-OCI Certificates and DNS` is recommended.
 
 Store the resulting secret as:
 
@@ -27,7 +27,7 @@ Store the resulting secret as:
 cloudflare_api_token: "<token from Cloudflare>"
 ```
 
-Reference: [`caddy-dns/cloudflare`](https://github.com/caddy-dns/cloudflare) documents `Zone.Zone:Read` plus `Zone.DNS:Edit` for its recommended single-token configuration.
+Reference: [`caddy-dns/cloudflare`](https://github.com/caddy-dns/cloudflare) documents `Zone.Zone:Read` plus `Zone.DNS:Edit` for its recommended single-token configuration. First create exactly one Proxied (orange-cloud) A record for the vault hostname. Check it without writing using `sudo vwctl dns update --dry-run`; run the first live `sudo vwctl dns update` only after the new vault starts.
 
 ## `cloudflare_remediation_token` - CrowdSec Cloudflare remediation
 
