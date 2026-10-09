@@ -49,6 +49,21 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 | Check scheduled jobs | `sudo vwctl timers` |
 | Create an encrypted recovery point | `sudo vwctl backup` |
 
+## Backup and disaster-recovery essentials
+
+**The built-in daily backup is local only.** After timers are enabled, it writes an encrypted `.vwrec` to `/var/lib/vaultwarden-oci/backups/` at **03:15 server-local time** (with up to 15 minutes of random delay). Losing the data volume can also lose these local backups. Neither the timer nor the initial setup automatically uploads them.
+
+To get an **offsite** backup, first configure an rclone remote **as root** (`sudo rclone config`) and then run:
+
+```bash
+sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'
+sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'
+```
+
+Replace the example remote with yours. Offsite publication is currently a **manual action**, not an automatic schedule. Periodically use `sudo vwctl recovery verify` with your matching **off-server private Age identity** to confirm actual decryption. Keep the separate recovery-kit ZIP and passphrase safe off-host, monitor local disk usage, and practice a restore on a disposable machine.
+
+The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, guided restore, full server loss, and retention.
+
 ## Which guide should I read?
 
 | Guide | Purpose |
