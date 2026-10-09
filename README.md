@@ -1,112 +1,70 @@
 # VaultWarden-OCI
 
-VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. It requires a dedicated production data filesystem and assumes Cloudflare-proxied public access.
+VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarden), a self-hosted password manager for a small team, with HTTPS, Cloudflare protection, encrypted recovery, and an administrator dashboard.
 
-## What the appliance contains
+**Supported servers:** Ubuntu 24.04 LTS or 26.04 LTS, `amd64` or `arm64`. Ubuntu 24.04 has disposable real-host acceptance; Ubuntu 26.04 has code/CI compatibility checks, not a recorded real-host acceptance run. **Production data requires a separate ext4/xfs disk/filesystem**; the boot disk is not a supported fallback.
 
-| Component | Purpose |
+## New here? Follow this path
+
+1. Prepare a fresh Ubuntu server, attach a **separate data disk**, and make sure you know which disk is the boot disk.
+2. In Cloudflare, prepare **one Proxied (orange-cloud) A record** for your vault hostname (and no explicit AAAA record). Create **two separate API tokens** for DNS/certificates and CrowdSec. See [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md).
+3. Have an authenticated SMTP account ready for invitations and other Vaultwarden emails.
+4. Download the **source described by this guide**:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y git
+   git clone --branch v2 --single-branch https://github.com/killer23d/VaultWarden-OCI.git
+   cd VaultWarden-OCI
+   ```
+
+   The branch is explicit because the repository's default branch currently contains a different implementation.
+
+5. Run setup, replacing the example names and email:
+
+   ```bash
+   sudo ./setup.sh install \
+     --domain example.com \
+     --url https://vault.example.com \
+     --email admin@example.com
+   ```
+
+6. Follow setup's prompts to choose/confirm the disk, fill in SMTP and encrypted Cloudflare credentials, and hand off the verified **recovery-kit ZIP**. Keep that ZIP **off the server** and its passphrase separately.
+7. Continue with [the first-start checklist](docs/INSTALL.md#6-validate-and-activate-security) **before opening the vault**. In order: validate settings and DNS, prepare CrowdSec, set the Cloudflare Worker Routes to **Fail Open**, start, update DNS, make the first backup, run doctor, then enable automation. Do not enable timers before backup and post-start checks pass.
+
+**What changed?** The appliance can now keep the **existing Cloudflare-proxied IPv4 A record** in sync when your server's public IP changes. After timers are enabled, its DNS service runs alongside the five-minute health schedule. It never creates DNS records, disables the orange cloud, or updates IPv6.
+
+**Email is not the same as automatic alerts.** Required SMTP settings enable Vaultwarden email and a direct SMTP test. Automatic emails about failed systemd services need an **optional built-in HTTPS notification provider**, its API token and a recipient; SMTP fallback is only for eligible temporary API failures. See [Configuration](docs/CONFIGURATION.md#optional-automatic-failure-alerts).
+
+## Daily tasks
+
+| Task | Command |
 | --- | --- |
-| Vaultwarden | Password-manager application and persistent vault data. |
-| Custom Caddy | TLS, reverse proxying, Cloudflare real-client-IP trust, rate limiting, and the outer `/admin` authentication gate. |
-| Cloudflare | Supported public edge and the only allowed public source for origin TCP/443. |
-| CrowdSec | Detects abuse across Caddy, Vaultwarden, SSH/Linux, and kernel/firewall signals; locally generated proxied web decisions are remediated through Cloudflare while broad/community decisions can protect host INPUT through the nftables firewall bouncer. |
-| SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
-| rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
-| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers; the five-minute health timer starts independent local-health and DNS-synchronization services so external DNS failures cannot mask appliance health. |
-| Notifications | Shares the SMTP endpoint/sender/credentials used by Vaultwarden for direct-SMTP/fallback delivery; an optional built-in HTTPS provider remains available for operational events. The appliance direct SMTP path always keeps normal certificate/hostname validation. |
+| Open the dashboard | `sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh` |
+| Overall status | `sudo vwctl status` |
+| Find failed checks | `sudo vwctl doctor --json` |
+| Check Cloudflare DNS | `sudo vwctl dns status` |
+| Preview DNS change (no write) | `sudo vwctl dns update --dry-run` |
+| Test authenticated SMTP | `sudo vwctl notification test --smtp` |
+| Check scheduled jobs | `sudo vwctl timers` |
+| Create an encrypted recovery point | `sudo vwctl backup` |
 
-```text
-Internet
-   |
-   v
-Cloudflare  <----- local CrowdSec web decisions / Worker remediation
-   |
-   v
-host TCP/443 origin filter (Cloudflare sources only; fail closed)
-   |
-   v
-custom Caddy (real client IP, TLS, rate limits, /admin outer auth)
-   |
-   v
-internal Vaultwarden
+## Which guide should I read?
 
-Direct host services (for example SSH)
-   ^
-   |
-CrowdSec nftables bouncer (host INPUT only; broad/community decisions)
-```
+| Guide | Purpose |
+| --- | --- |
+| [Install](docs/INSTALL.md) | First install, first start, safe advanced options |
+| [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md) | Exact scopes for the two credentials |
+| [Configuration](docs/CONFIGURATION.md) | Editing settings, SMTP, optional notifications |
+| [Operations](docs/OPERATIONS.md) | Dashboard, DNS sync, timers, security and updates |
+| [Recovery](docs/RECOVERY.md) | `.vwrec` backups, offline identity, recovery kit and restore |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Diagnose a failed step safely |
+| [Security](docs/SECURITY.md) | Security boundaries and practices to avoid |
 
-Caddy's trusted-proxy logic, the host origin filter, CrowdSec host-input remediation, and Cloudflare Worker remediation are separate controls. The firewall bouncer never owns Docker `FORWARD` or `DOCKER-USER`; published container ingress stays under the single Cloudflare-origin filter. The dashboard is also separate from backend ownership: it is a supported human interface, but every mutation delegates to `vwctl` and the existing Python owners.
+Maintainers: [Project boundary](docs/PROJECT-BOUNDARY.md), [Decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), [Host acceptance](docs/HOST-ACCEPTANCE.md), and [Test strategy](reports/TEST-STRATEGY.md).
 
-## Start here
+## What is managed?
 
-Production installation requires a dedicated ext4/xfs filesystem separate from `/`. There is no boot-disk fallback.
+Vaultwarden and custom Caddy provide the application and HTTPS. Cloudflare and CrowdSec protect public traffic, with separate host-origin and web-client controls. SOPS + Age encrypts credentials and separates the server's normal key from your **off-server private recovery identity**. Encrypted `.vwrec` backups are **not** the same as the separate password-protected credential recovery-kit ZIP. systemd manages lifecycle, backup, maintenance, health/DNS and update checks; **applying** updates remains a manual decision.
 
-```bash
-sudo ./setup.sh install \
-  --domain example.com \
-  --url https://vault.example.com \
-  --email admin@example.com
-```
-
-Interactive setup can select a suitable non-boot data device and can generate the offline recovery identity only in root-owned volatile storage long enough to hand it off in a verified encrypted recovery kit. Terminal-driven `--auto` uses the same custody flow when no `--offline-recipient` is supplied: install steps remain automatic, while the recovery-kit passphrase and final custody acknowledgement remain interactive. Fully headless `--auto` must supply its storage decisions and an existing public `--offline-recipient`. An explicitly supplied recipient is authoritative and is never replaced by a generated identity. Read [Install](docs/INSTALL.md) before changing a production host.
-
-The setup-generated `config.toml` contains every appliance-supported small-team setting with an explicit default instead of a minimal skeleton. Common Vaultwarden controls such as invitations, Sends, organization creation, email 2FA, login/admin rate limits, SMTP controls, and the supported Caddy `/admin` limit are visible immediately. This remains a curated appliance contract rather than an unrestricted pass-through to every upstream experimental knob; see [Configuration](docs/CONFIGURATION.md).
-
-The standard production security baseline uses two separate Cloudflare credentials: `cloudflare_api_token` for Caddy DNS-01 and the appliance's bounded proxied-A DNS publication, and `cloudflare_remediation_token` for CrowdSec Worker remediation. Setup-generated recovery custody requires both before it publishes the initial credential kit; explicit `--offline-recipient` installs must populate the remediation token before `sudo vwctl crowdsec setup`.
-
-After setup and external credentials are complete, follow the displayed first-run actions in order. Full steady-state doctor acceptance is intentionally **after** `start`, because lifecycle startup materializes the runtime/Caddy state and the Cloudflare origin policy that those doctor checks inspect:
-
-```bash
-sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
-sudo vwctl secrets validate
-sudo vwctl dns update --dry-run
-sudo vwctl notification test --smtp
-sudo vwctl crowdsec setup
-sudo vwctl crowdsec remediation-start
-# Set every bouncer-created Worker Route to Fail Open in Cloudflare.
-sudo vwctl crowdsec confirm-fail-open
-sudo vwctl start
-sudo vwctl dns update
-sudo vwctl backup
-sudo vwctl doctor --json
-sudo systemctl enable --now vaultwarden-oci.target
-sudo vwctl timers
-sudo vwctl update check
-sudo vwctl status
-```
-
-A post-start doctor `FAIL` is not a successful installation. A `WARN` for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured. The first local `vwctl backup` establishes and verifies the initial application `.vwrec`; it is separate from the credential recovery-kit ZIP created during setup. The Cloudflare Worker remains intentionally boot-disabled, so a later Worker recreation/reboot may require a fresh `remediation-start` -> Worker Route Fail Open -> `confirm-fail-open` attestation rather than rerunning all of CrowdSec setup.
-
-For normal day-2 work:
-
-```bash
-sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh
-```
-
-From a source checkout, `sudo ./dashboard.sh` is equivalent.
-
-## Administrator manual
-
-- [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, terminal-generated versus pre-existing offline recovery custody, explicit `--use-latest`, config/secrets completion, and first start.
-- [Configuration](docs/CONFIGURATION.md) — the pre-populated operator setting catalog, bounded transition from an existing Vaultwarden Admin `config.json`, SMTP ownership/scope, Caddy `/admin` limit, optional notifications, and restart behavior after edits.
-- [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, and file locations.
-- [Recovery](docs/RECOVERY.md) — backup contents/exclusions, verification, same-host restore, lost-server disaster recovery, rclone, and the separate recovery-kit ZIP.
-- [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
-- [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md) — which token is used for DNS/certificates versus CrowdSec remediation, required permissions, scoping, and storage.
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — symptom-oriented diagnostics, supported corrections, verification steps, and the evidence to collect when something fails.
-- [Host acceptance](docs/HOST-ACCEPTANCE.md) — Ubuntu 24.04 retains the disposable real-host release gate; Ubuntu 26.04 is covered by code/CI compatibility validation in this workstream and real OCI host acceptance is `NOT RUN`.
-
-If an install or day-2 action fails, start with [Troubleshooting](docs/TROUBLESHOOTING.md) rather than searching the source tree or trying broad Docker/system repairs.
-
-Maintainer/product authorities are [Project boundary](docs/PROJECT-BOUNDARY.md), [Durable decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), and [Test strategy](reports/TEST-STRATEGY.md). The prompt archives under `reports/` are historical execution/review records, not competing product authority.
-
-## Product boundaries worth remembering
-
-Production state is dedicated-storage-only. There is one operator config, one encrypted SOPS secret authority, and one exact version manifest. Normal application recovery is one encrypted `.vwrec` format; the credential recovery-kit ZIP is a separate artifact. The offline recovery private identity is never persistent server state. Application updates are explicit and recovery-gated. Ubuntu package updates are separate and the appliance never auto-reboots.
-
-For recovery, there is no default persistent path to the offline private identity. Interactive `vwctl restore`, `vwctl recovery verify`, and `vwctl recovery-kit export` can securely accept a pasted `AGE-SECRET-KEY`, an operator-selected identity file, or a local encrypted recovery-kit ZIP (normally under `/root/vaultwarden-recovery/`, containing `offline-recovery-identity.txt`). The configured public `age1...` recipient is displayed so the administrator can identify the correct custody material. Explicit file-based invocation remains available with `--identity` or `--offline-identity`; recovery-kit export still keeps its independent ZIP passphrase interactive. `/etc/vaultwarden-oci/age-key.txt` is the separate operational identity and cannot substitute for the offline recovery identity.
-
-Configuration follows the same single-owner rule: `config.toml` exposes the curated small-team controls, SOPS owns secret values, and runtime rendering applies them. A fresh/fully reconciled appliance keeps Vaultwarden Admin persistence on container tmpfs so web changes cannot become a competing durable authority. When upgrading an installation that already has `/data/config.json`, the appliance first keeps that exact file effective and requires an explicit bounded reconciliation so existing policy is not silently replaced. After reconciliation and restart, `config.toml`/SOPS become the sole durable authority. Successful interactive `vwctl config edit` or `vwctl secrets edit` operations then offer the normal immediate restart when the stack is running.
-
-There is intentionally no Postfix/local queue, public backup-tier matrix, compatibility reader for an earlier archive format, generic plugin/storage/update framework, broad repair command, HA layer, Kubernetes/Swarm layer, or second dashboard backend.
+If something fails, consult [Troubleshooting](docs/TROUBLESHOOTING.md). Never bypass the separate-disk guard, Cloudflare origin firewall, or recovery checks to make a status indicator green.
