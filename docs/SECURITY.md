@@ -24,6 +24,10 @@ CrowdSec is separate again. It ingests the appliance-owned Caddy and Vaultwarden
 
 The CrowdSec nftables firewall bouncer may consume broader CrowdSec/community/list decisions for host services, but it is constrained to the host `input` hook and must not claim Docker `forward` or `DOCKER-USER` ownership.
 
+## Automatic Cloudflare DNS safety
+
+DNS synchronization reuses the encrypted Cloudflare certificate/DNS token and configured vault hostname. It can update **only one existing Proxied IPv4 A record**, after checking that no explicit AAAA exists; it cannot create a record, disable proxying or manage IPv6. The initial DNS write belongs **after** healthy application startup. Timed DNS failures are independent of local health and transient external failures are debounced.
+
 ## `/admin`
 
 When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The high-entropy `vaultwarden_admin_token` value in SOPS remains the operator's recoverable `/admin` login secret; at start/restart the appliance uses the exact pinned Vaultwarden image to derive an Argon2id PHC and materializes only that PHC into the Vaultwarden runtime boundary. The source Basic Auth password is likewise encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
@@ -32,7 +36,7 @@ The rate limits are intentionally layered rather than duplicated at the same bou
 
 ## Notification and SMTP security
 
-Operational HTTPS providers are defined only in immutable `email-providers.toml`. Operator config can select supported IDs/options but cannot inject arbitrary endpoints, auth headers/modes, request templates, success rules, or retry rules. Authorization-bearing HTTPS requests retain TLS validation and do not silently follow unsafe credential-bearing redirects.
+Automatic systemd failure emails are **disabled until** an administrator selects a supported `[notifications]` HTTPS provider, recipient and encrypted `email_api_token`. SMTP for Vaultwarden invitations alone does **not** enable failure alerting. Operational HTTPS providers are defined only in immutable `email-providers.toml`. Operator config can select supported IDs/options but cannot inject arbitrary endpoints, auth headers/modes, request templates, success rules, or retry rules. Authorization-bearing HTTPS requests retain TLS validation and do not silently follow unsafe credential-bearing redirects.
 
 Vaultwarden application mail and the appliance direct-SMTP path share the common `[smtp]` host/port/security/sender/timeout values and SOPS `smtp_username`/`smtp_password`; Vaultwarden does not receive a separate credential set. `smtp.embed_images`, `smtp.accept_invalid_certs`, and `smtp.accept_invalid_hostnames` are Vaultwarden application-mail controls, not appliance-direct-SMTP controls. The direct operational SMTP implementation always creates a normal validating TLS context and intentionally ignores Vaultwarden's invalid-certificate/hostname exceptions. Do not weaken that boundary merely to make an application-specific exception behave the same everywhere. Operational SMTP fallback follows only an eligible transient API/network result. Permanent/authentication/TLS/ambiguous delivery failures remain visible; there is no local MTA, durable spool, queue, or dead-letter service.
 
