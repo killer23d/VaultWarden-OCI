@@ -584,8 +584,14 @@ def create_recovery(
             ) from exc
         _record_local(paths, verified)
         if remote:
-            remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
-            _record_offsite(paths, remote_object=remote_object, verified=verified)
+            try:
+                remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
+                _record_offsite(paths, remote_object=remote_object, verified=verified)
+            except (RecoveryError, OSError) as exc:
+                raise RecoveryError(
+                    f"offsite publication failed; verified local backup is retained at "
+                    f"{verified.artifact} (sha256={verified.sha256}): {exc}"
+                ) from exc
         return verified
 
 
@@ -640,7 +646,9 @@ def publish_offsite(
     if not ok:
         raise RecoveryError(message)
     destination = _remote_object(remote, verified.artifact.name)
-    upload = runner(["rclone", "copyto", str(verified.artifact), destination])
+    # Refuse to replace an existing object with changed bytes. Recovery history
+    # is append-only during routine publication; deletion is retention's job.
+    upload = runner(["rclone", "copyto", str(verified.artifact), destination, "--immutable"])
     if not upload.ok:
         raise _safe_error("rclone publication", upload)
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-verify-", dir=str(paths.backups)) as directory:
@@ -1110,6 +1118,69 @@ def pruning_decision(entries: Iterable[Mapping[str, object]], keep_last: int) ->
         reverse=True,
     )
     return PruneDecision(tuple(names[:keep_last]), tuple(names[keep_last:]))
+
+
+def _recovery_name_time(name: str) -> datetime | None:
+    match = re.fullmatch(r"recovery-(\d{8}T\d{6}Z)-[^/]+\.vwrec", name)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _older_than_days(name: str, days: int, *, now: datetime) -> bool:
+    created = _recovery_name_time(name)
+    return created is not None and created < now - timedelta(days=days)
+
+
+def prune_local_by_age(
+    days: int,
+    *,
+    paths: RecoveryPaths = RecoveryPaths(),
+    preserve: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    if days <= 0:
+        return ()
+    cutoff_now = now or datetime.now(timezone.utc)
+    deleted: list[str] = []
+    preserve_resolved = preserve.resolve() if preserve is not None else None
+    for artifact in sorted(paths.backups.glob("recovery-*.vwrec")):
+        _ensure_regular(artifact, "local recovery artifact", nonempty=True)
+        if preserve_resolved is not None and artifact.resolve() == preserve_resolved:
+            continue
+        if not _older_than_days(artifact.name, days, now=cutoff_now):
+            continue
+        durability.unlink(artifact)
+        deleted.append(artifact.name)
+    return tuple(deleted)
+
+
+def prune_remote_by_age(
+    remote: str,
+    days: int,
+    *,
+    preserve_name: str | None = None,
+    runner: Runner = run_command,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    if days <= 0:
+        return ()
+    cutoff_now = now or datetime.now(timezone.utc)
+    deleted: list[str] = []
+    for item in list_remote(remote, runner=runner):
+        name = item.get("Name")
+        if not isinstance(name, str) or name == preserve_name:
+            continue
+        if not _older_than_days(name, days, now=cutoff_now):
+            continue
+        result = runner(["rclone", "deletefile", _remote_object(remote, name)])
+        if not result.ok:
+            raise _safe_error(f"rclone retention prune {name}", result)
+        deleted.append(name)
+    return tuple(deleted)
 
 
 def prune_remote(
