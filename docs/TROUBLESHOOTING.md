@@ -451,7 +451,7 @@ sudo vwctl backup
 - If the daily timer produces only local backups, run `sudo vwctl recovery offsite status`. Local-only is the default until you save an offsite destination with `sudo vwctl recovery offsite configure`; after configuration, the next daily job uploads and verifies automatically.
 - If `sudo rclone listremotes` has no remote but your Ubuntu user's `rclone listremotes` does, you configured the **user's** remote rather than **root's**. Run `sudo rclone config` before `sudo vwctl recovery offsite configure`. The timer runs as root and must be able to refresh its root rclone credentials.
 - If the remote copy uploads successfully but Age verification fails, copying was successful but **recoverability is not proven**. Use the matching offline recovery private key; the server's operational key cannot substitute.
-- Local `.vwrec` files are not automatically deleted. Monitor the dedicated storage volume; there is no supported local-prune command. Remote pruning is explicit and separate.
+- Automatic pruning is disabled when `local_retention_days = 0` / `remote_retention_days = 0`. With a positive value, age pruning runs only after the current backup has fully succeeded; remote pruning additionally waits for upload and read-back verification. A failed publication does not trigger retention. Check `[backup]` in `/etc/vaultwarden-oci/config.toml` if storage use differs from your expectation.
 
 ## A recovery artifact cannot be verified
 
