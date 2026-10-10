@@ -85,6 +85,11 @@ from_email = "vaultwarden@vault.invalid"
 from_name = "Vaultwarden"
 timeout_seconds = 15
 
+[backup]
+# Empty means verified local backups only. Use 'vwctl recovery offsite configure'
+# after root's rclone remote is available to enable scheduled offsite copies.
+remote = ""
+
 # Optional operational notifications. Uncomment this table as a unit after configuring SOPS email_api_token.
 # [notifications]
 # provider = "cyberpersons"

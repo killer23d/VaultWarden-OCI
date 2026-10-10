@@ -1,7 +1,8 @@
 [Unit]
 Description=VaultWarden-OCI encrypted recovery backup
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-After=vaultwarden-oci.service
+After=vaultwarden-oci.service network-online.target
+Wants=network-online.target
 OnFailure=vaultwarden-oci-notify@%n.service
 
 [Service]
@@ -16,6 +17,8 @@ PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci
+# Allow root rclone to refresh OAuth tokens while keeping other home paths read-only.
+ReadWritePaths=-/root/.config/rclone
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vaultwarden-oci-backup

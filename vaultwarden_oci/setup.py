@@ -168,6 +168,11 @@ accept_invalid_hostnames = false
 admin_rate_limit_events = 60
 admin_rate_limit_window = "1m"
 
+[backup]
+# Optional scheduled offsite copy. Empty = local-only; configure with
+# 'sudo vwctl recovery offsite configure' after setting up root's rclone remote.
+remote = ""
+
 # Operational HTTPS notifications remain optional because setup cannot invent a
 # provider/account. Add [notifications] with `sudo vwctl config edit` only when
 # needed. Provider secrets remain in SOPS as email_api_token.
