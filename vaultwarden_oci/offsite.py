@@ -19,7 +19,12 @@ def destination() -> str | None:
 
 
 def status() -> None:
-    remote = destination()
+    config = runtime.load_config()
+    remote = config.offsite_remote
+    local_policy = "keep indefinitely" if config.local_retention_days == 0 else f"prune older than {config.local_retention_days} days"
+    remote_policy = "keep indefinitely" if config.remote_retention_days == 0 else f"prune older than {config.remote_retention_days} days"
+    print(f"Local retention: {local_policy}")
+    print(f"Remote retention: {remote_policy}")
     if remote is None:
         print("INFO: scheduled offsite backup disabled; daily encrypted local backups remain active")
         print("ACTION: sudo vwctl recovery offsite configure")
