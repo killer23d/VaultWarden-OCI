@@ -223,7 +223,7 @@ Enter the passphrase interactively when prompted.
 
 **Expected success:** exactly the documented members extract. **On failure:** after repeated passphrase/integrity failure, retrieve another verified custody copy; do not weaken or convert the archive in place.
 
-## Retention is separate
+## Retention and explicit cleanup
 
 Plan deletion first:
 
