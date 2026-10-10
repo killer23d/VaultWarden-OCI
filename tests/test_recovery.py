@@ -223,6 +223,10 @@ class FakeRunner:
             return result(argv, "offsite:\n")
         if call[:3] == ("rclone", "lsf", "offsite:"):
             return result(argv)
+        if call[:2] == ("rclone", "mkdir"):
+            return result(argv)
+        if call[:3] == ("rclone", "lsf", "offsite:recovery"):
+            return result(argv)
         if call[:2] == ("rclone", "copyto"):
             source, destination = call[2], call[3]
             if ":" not in source and destination.startswith("offsite:"):
@@ -527,6 +531,13 @@ class RcloneTests(unittest.TestCase):
             state = json.loads(paths.state_file.read_text(encoding="utf-8"))
             self.assertIn("local", state)
             self.assertNotIn("offsite", state)
+
+    def test_destination_diagnostics_checks_selected_path_and_prepare_creates_it(self) -> None:
+        runner = FakeRunner()
+        ok, message = recovery.prepare_rclone_destination("offsite:recovery", runner=runner)
+        self.assertTrue(ok, message)
+        self.assertIn(("rclone", "mkdir", "offsite:recovery"), runner.calls)
+        self.assertIn(("rclone", "lsf", "offsite:recovery", "--max-depth", "1"), runner.calls)
 
     def test_age_pruning_uses_recovery_names_only_and_preserves_current(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
