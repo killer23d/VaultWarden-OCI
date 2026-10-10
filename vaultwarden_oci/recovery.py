@@ -628,6 +628,33 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
     return True, f"rclone remote {name!r} is reachable"
 
 
+def rclone_destination_diagnostics(
+    remote: str,
+    *,
+    runner: Runner = run_command,
+) -> tuple[bool, str]:
+    ok, message = rclone_diagnostics(remote, runner=runner)
+    if not ok:
+        return False, message
+    if not runner(["rclone", "lsf", remote, "--max-depth", "1"]).ok:
+        return False, f"rclone destination {remote!r} is not accessible"
+    return True, f"rclone destination {remote!r} is accessible"
+
+
+def prepare_rclone_destination(
+    remote: str,
+    *,
+    runner: Runner = run_command,
+) -> tuple[bool, str]:
+    ok, message = rclone_diagnostics(remote, runner=runner)
+    if not ok:
+        return False, message
+    created = runner(["rclone", "mkdir", remote])
+    if not created.ok:
+        return False, f"rclone destination {remote!r} cannot be created or prepared"
+    return rclone_destination_diagnostics(remote, runner=runner)
+
+
 def _remote_object(remote: str, filename: str) -> str:
     name, path = _remote_parts(remote)
     return f"{name}:{path + '/' if path else ''}{filename}"
@@ -1184,21 +1211,53 @@ def prune_remote_by_age(
     return tuple(deleted)
 
 
+def apply_retention(
+    local_days: int,
+    *,
+    remote: str | None,
+    remote_days: int,
+    preserve: VerifiedRecovery,
+    paths: RecoveryPaths = RecoveryPaths(),
+    runner: Runner = run_command,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if local_days <= 0 and (not remote or remote_days <= 0):
+        return (), ()
+    with mutation_lock(paths.lock):
+        local_deleted = prune_local_by_age(
+            local_days,
+            paths=paths,
+            preserve=preserve.artifact,
+        )
+        remote_deleted = (
+            prune_remote_by_age(
+                remote,
+                remote_days,
+                preserve_name=preserve.artifact.name,
+                runner=runner,
+            )
+            if remote and remote_days > 0
+            else ()
+        )
+    return local_deleted, remote_deleted
+
+
 def prune_remote(
     remote: str,
     keep_last: int,
     *,
     confirm: bool,
     runner: Runner = run_command,
+    lock_path: Path = runtime.LOCK,
 ) -> PruneDecision:
-    decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
-    if not confirm:
+    with mutation_lock(lock_path):
+        decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
+        if not confirm:
+            return decision
+        for name in decision.delete:
+            result = runner(["rclone", "deletefile", _remote_object(remote, name)])
+            if not result.ok:
+                raise _safe_error(f"rclone prune {name}", result)
         return decision
-    for name in decision.delete:
-        result = runner(["rclone", "deletefile", _remote_object(remote, name)])
-        if not result.ok:
-            raise _safe_error(f"rclone prune {name}", result)
-    return decision
 
 
 def status_rows(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, str]]:
