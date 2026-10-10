@@ -39,8 +39,14 @@ class OffsiteSettingsTests(unittest.TestCase):
     def test_backward_compatible_local_only_default_and_strict_destination_validation(self) -> None:
         cfg = runtime.parse_config(tomllib.loads(sample_config()))
         self.assertIsNone(cfg.offsite_remote)
-        good = sample_config() + '\n[backup]\nremote = "cloud:Vaultwarden-OCI"\n'
-        self.assertEqual(runtime.parse_config(tomllib.loads(good)).offsite_remote, "cloud:Vaultwarden-OCI")
+        good = sample_config() + '\n[backup]\nremote = "cloud:Vaultwarden-OCI"\nlocal_retention_days = 30\nremote_retention_days = 90\n'
+        parsed = runtime.parse_config(tomllib.loads(good))
+        self.assertEqual(parsed.offsite_remote, "cloud:Vaultwarden-OCI")
+        self.assertEqual(parsed.local_retention_days, 30)
+        self.assertEqual(parsed.remote_retention_days, 90)
+        defaults = runtime.parse_config(tomllib.loads(sample_config()))
+        self.assertEqual(defaults.local_retention_days, 0)
+        self.assertEqual(defaults.remote_retention_days, 0)
         for value in ("cloud:", "cloud:/absolute", "cloud:../outside", "cloud:a/../b",
                       "cloud:a//b", "cloud:a/./b", "cloud:a\\b", "../cloud:path",
                       "cloud:a\nb", "cloud:a\r", "cloud:a\x00b"):
@@ -51,6 +57,13 @@ class OffsiteSettingsTests(unittest.TestCase):
             runtime.parse_config(tomllib.loads(sample_config() + "\n[backup]\nremote = 3\n"))
         with self.assertRaises(runtime.RuntimeConfigError):
             runtime.parse_config(tomllib.loads(sample_config() + "\n[backup]\nremote = \"x:folder\"\npassword = \"secret\"\n"))
+        for value in (-1, 36501, True, "30"):
+            with self.subTest(retention=value):
+                raw = repr(value).lower() if isinstance(value, bool) else repr(value)
+                with self.assertRaises(runtime.RuntimeConfigError):
+                    runtime.parse_config(tomllib.loads(
+                        sample_config() + f"\n[backup]\nlocal_retention_days = {raw}\n"
+                    ))
 
     def test_atomic_config_write_preserves_unrelated_settings_and_disable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +94,7 @@ class OffsiteSettingsTests(unittest.TestCase):
 
 class OffsiteWorkflowTests(unittest.TestCase):
     def test_scheduled_and_manual_backup_reuse_owner_without_unsafe_sync(self) -> None:
-        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote="cloud:backups")
+        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote="cloud:backups", local_retention_days=0, remote_retention_days=0)
         verified = SimpleNamespace(artifact=Path("/test/recovery.vwrec"), sha256="a" * 64)
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
@@ -94,7 +107,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
             self.assertEqual(create.call_args.kwargs["remote"], "other:folder")
 
     def test_unconfigured_backup_keeps_local_only_behavior(self) -> None:
-        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote=None)
+        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote=None, local_retention_days=0, remote_retention_days=0)
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
             mock.patch.object(offsite.recovery, "create_recovery", return_value=SimpleNamespace(artifact=Path("/tmp/test.vwrec"), sha256="a" * 64)) as create,
@@ -104,13 +117,67 @@ class OffsiteWorkflowTests(unittest.TestCase):
         create.assert_called_once_with(OFFLINE, remote=None)
 
     def test_failed_remote_publication_propagates_failure(self) -> None:
-        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote="cloud:backup")
+        cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote="cloud:backup", local_retention_days=30, remote_retention_days=90)
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
             mock.patch.object(offsite.recovery, "create_recovery", side_effect=recovery.RecoveryError("rclone failed")),
         ):
             with self.assertRaisesRegex(recovery.RecoveryError, "rclone failed"):
                 offsite.backup()
+
+    def test_retention_runs_after_success_and_preserves_current_artifact(self) -> None:
+        cfg = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE,
+            offsite_remote="cloud:backups",
+            local_retention_days=30,
+            remote_retention_days=90,
+        )
+        verified = SimpleNamespace(artifact=Path("/test/current.vwrec"), sha256="a" * 64)
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
+            mock.patch.object(offsite.recovery, "create_recovery", return_value=verified),
+            mock.patch.object(offsite.recovery, "prune_local_by_age", return_value=("old-local.vwrec",)) as local,
+            mock.patch.object(offsite.recovery, "prune_remote_by_age", return_value=("old-remote.vwrec",)) as remote,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(offsite.backup(), 0)
+        local.assert_called_once_with(30, preserve=verified.artifact)
+        remote.assert_called_once_with("cloud:backups", 90, preserve_name=verified.artifact.name)
+
+    def test_one_time_remote_override_never_auto_prunes_alternate_remote(self) -> None:
+        cfg = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE,
+            offsite_remote="cloud:configured",
+            local_retention_days=0,
+            remote_retention_days=90,
+        )
+        verified = SimpleNamespace(artifact=Path("/test/current.vwrec"), sha256="a" * 64)
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
+            mock.patch.object(offsite.recovery, "create_recovery", return_value=verified),
+            mock.patch.object(offsite.recovery, "prune_remote_by_age") as prune,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(offsite.backup(override="other:folder"), 0)
+        prune.assert_not_called()
+
+    def test_failed_publication_never_reaches_retention(self) -> None:
+        cfg = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE,
+            offsite_remote="cloud:backup",
+            local_retention_days=30,
+            remote_retention_days=90,
+        )
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
+            mock.patch.object(offsite.recovery, "create_recovery", side_effect=recovery.RecoveryError("rclone failed")),
+            mock.patch.object(offsite.recovery, "prune_local_by_age") as local,
+            mock.patch.object(offsite.recovery, "prune_remote_by_age") as remote,
+        ):
+            with self.assertRaisesRegex(recovery.RecoveryError, "rclone failed"):
+                offsite.backup()
+        local.assert_not_called()
+        remote.assert_not_called()
 
     def test_configure_refuses_unreachable_remote_without_persisting(self) -> None:
         with (
