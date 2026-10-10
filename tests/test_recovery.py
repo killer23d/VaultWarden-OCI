@@ -580,6 +580,29 @@ class RcloneTests(unittest.TestCase):
         )
         self.assertFalse(any(call[-1].endswith("other.vwrec") for call in runner.calls if call[:2] == ("rclone", "deletefile")))
 
+    def test_apply_retention_uses_mutation_lock(self) -> None:
+        verified = recovery.VerifiedRecovery(
+            artifact=Path("/test/current.vwrec"),
+            sha256="a" * 64,
+            size=1,
+            created_at="2026-10-10T00:00:00Z",
+        )
+        paths = recovery.RecoveryPaths(lock=Path("/test/recovery.lock"))
+        with (
+            mock.patch.object(recovery, "mutation_lock") as lock,
+            mock.patch.object(recovery, "prune_local_by_age", return_value=("local.vwrec",)),
+            mock.patch.object(recovery, "prune_remote_by_age", return_value=("remote.vwrec",)),
+        ):
+            deleted = recovery.apply_retention(
+                30,
+                remote="offsite:recovery",
+                remote_days=90,
+                preserve=verified,
+                paths=paths,
+            )
+        lock.assert_called_once_with(paths.lock)
+        self.assertEqual(deleted, (("local.vwrec",), ("remote.vwrec",)))
+
     def test_explicit_pruning_plan_and_delete_argv(self) -> None:
         runner = FakeRunner()
         plan = recovery.prune_remote("offsite:recovery", 2, confirm=False, runner=runner)
