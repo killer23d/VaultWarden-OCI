@@ -1141,6 +1141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         secrets.SecretsError,
         sevenzip_secure.SevenZipError,
         storage.StorageError,
+        RuntimeError,
         OSError,
     ) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
