@@ -73,6 +73,8 @@ class RuntimeConfig:
     notification_to_email: str | None = None
     notification_options: tuple[tuple[str, str], ...] = ()
     offsite_remote: str | None = None
+    local_retention_days: int = 0
+    remote_retention_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,12 @@ def _email(value: str, label: str) -> str:
     return value
 
 
+def _retention_days(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 36500:
+        raise RuntimeConfigError(f"{label} must be an integer from 0 to 36500 days")
+    return value
+
+
 def backup_remote_destination(value: object) -> str | None:
     """Validate one explicit non-secret rclone publication prefix."""
     if value == "":
@@ -206,8 +214,16 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
     backup_raw = data.get("backup", {})
     if not isinstance(backup_raw, dict):
         raise RuntimeConfigError("config [backup] must be a table")
-    _unknown(backup_raw, {"remote"}, "backup")
+    _unknown(backup_raw, {"remote", "local_retention_days", "remote_retention_days"}, "backup")
     offsite_remote = backup_remote_destination(backup_raw.get("remote", ""))
+    local_retention_days = _retention_days(
+        backup_raw.get("local_retention_days", 0),
+        "backup.local_retention_days",
+    )
+    remote_retention_days = _retention_days(
+        backup_raw.get("remote_retention_days", 0),
+        "backup.remote_retention_days",
+    )
 
     caddy_raw = data.get("caddy", {})
     if not isinstance(caddy_raw, dict):
@@ -315,6 +331,8 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         notification_to_email=notification_to_email,
         notification_options=notification_options,
         offsite_remote=offsite_remote,
+        local_retention_days=local_retention_days,
+        remote_retention_days=remote_retention_days,
     )
 
 
