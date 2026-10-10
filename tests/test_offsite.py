@@ -136,13 +136,20 @@ class OffsiteWorkflowTests(unittest.TestCase):
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
             mock.patch.object(offsite.recovery, "create_recovery", return_value=verified),
-            mock.patch.object(offsite.recovery, "prune_local_by_age", return_value=("old-local.vwrec",)) as local,
-            mock.patch.object(offsite.recovery, "prune_remote_by_age", return_value=("old-remote.vwrec",)) as remote,
+            mock.patch.object(
+                offsite.recovery,
+                "apply_retention",
+                return_value=(("old-local.vwrec",), ("old-remote.vwrec",)),
+            ) as retention,
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(offsite.backup(), 0)
-        local.assert_called_once_with(30, preserve=verified.artifact)
-        remote.assert_called_once_with("cloud:backups", 90, preserve_name=verified.artifact.name)
+        retention.assert_called_once_with(
+            30,
+            remote="cloud:backups",
+            remote_days=90,
+            preserve=verified,
+        )
 
     def test_one_time_remote_override_never_auto_prunes_alternate_remote(self) -> None:
         cfg = SimpleNamespace(
@@ -155,11 +162,16 @@ class OffsiteWorkflowTests(unittest.TestCase):
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
             mock.patch.object(offsite.recovery, "create_recovery", return_value=verified),
-            mock.patch.object(offsite.recovery, "prune_remote_by_age") as prune,
+            mock.patch.object(offsite.recovery, "apply_retention", return_value=((), ())) as retention,
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(offsite.backup(override="other:folder"), 0)
-        prune.assert_not_called()
+        retention.assert_called_once_with(
+            0,
+            remote=None,
+            remote_days=90,
+            preserve=verified,
+        )
 
     def test_failed_publication_never_reaches_retention(self) -> None:
         cfg = SimpleNamespace(
@@ -171,18 +183,16 @@ class OffsiteWorkflowTests(unittest.TestCase):
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
             mock.patch.object(offsite.recovery, "create_recovery", side_effect=recovery.RecoveryError("rclone failed")),
-            mock.patch.object(offsite.recovery, "prune_local_by_age") as local,
-            mock.patch.object(offsite.recovery, "prune_remote_by_age") as remote,
+            mock.patch.object(offsite.recovery, "apply_retention") as retention,
         ):
             with self.assertRaisesRegex(recovery.RecoveryError, "rclone failed"):
                 offsite.backup()
-        local.assert_not_called()
-        remote.assert_not_called()
+        retention.assert_not_called()
 
     def test_configure_refuses_unreachable_remote_without_persisting(self) -> None:
         with (
             mock.patch.object(offsite.os, "geteuid", return_value=0),
-            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(False, "remote is unavailable")),
+            mock.patch.object(offsite.recovery, "prepare_rclone_destination", return_value=(False, "remote is unavailable")),
             mock.patch.object(offsite.runtime, "set_backup_remote") as save,
         ):
             with self.assertRaisesRegex(offsite.OffsiteError, "unavailable"):
@@ -205,7 +215,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
     def test_explicit_configure_saves_only_after_connectivity_validation(self) -> None:
         with (
             mock.patch.object(offsite.os, "geteuid", return_value=0),
-            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(True, "reachable")),
+            mock.patch.object(offsite.recovery, "prepare_rclone_destination", return_value=(True, "reachable")),
             mock.patch.object(offsite.runtime, "set_backup_remote") as save,
             redirect_stdout(io.StringIO()),
         ):
@@ -224,7 +234,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
         self.assertIn("keep indefinitely", output.getvalue())
         with (
             mock.patch.object(offsite.runtime, "load_config", return_value=configured),
-            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(False, "unreachable")),
+            mock.patch.object(offsite.recovery, "rclone_destination_diagnostics", return_value=(False, "unreachable")),
             redirect_stdout(io.StringIO()) as output,
         ):
             with self.assertRaises(offsite.OffsiteError):
