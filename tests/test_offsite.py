@@ -213,19 +213,23 @@ class OffsiteWorkflowTests(unittest.TestCase):
         save.assert_called_once_with("cloud:backups")
 
     def test_status_distinguishes_optional_and_configured_failure(self) -> None:
+        disabled = SimpleNamespace(offsite_remote=None, local_retention_days=0, remote_retention_days=0)
+        configured = SimpleNamespace(offsite_remote="cloud:backups", local_retention_days=30, remote_retention_days=90)
         with (
-            mock.patch.object(offsite, "destination", return_value=None),
+            mock.patch.object(offsite.runtime, "load_config", return_value=disabled),
             redirect_stdout(io.StringIO()) as output,
         ):
             offsite.status()
         self.assertIn("disabled", output.getvalue())
+        self.assertIn("keep indefinitely", output.getvalue())
         with (
-            mock.patch.object(offsite, "destination", return_value="cloud:backups"),
+            mock.patch.object(offsite.runtime, "load_config", return_value=configured),
             mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(False, "unreachable")),
-            redirect_stdout(io.StringIO()),
+            redirect_stdout(io.StringIO()) as output,
         ):
             with self.assertRaises(offsite.OffsiteError):
                 offsite.status()
+        self.assertIn("prune older than 30 days", output.getvalue())
 
 
 if __name__ == "__main__":
