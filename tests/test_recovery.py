@@ -9,6 +9,7 @@ import sqlite3
 import tarfile
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -526,6 +527,47 @@ class RcloneTests(unittest.TestCase):
             state = json.loads(paths.state_file.read_text(encoding="utf-8"))
             self.assertIn("local", state)
             self.assertNotIn("offsite", state)
+
+    def test_age_pruning_uses_recovery_names_only_and_preserves_current(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            old = paths.backups / "recovery-20260101T000000Z-old.vwrec"
+            current = paths.backups / "recovery-20261001T000000Z-current.vwrec"
+            unrelated = paths.backups / "notes.vwrec"
+            for item in (old, current, unrelated):
+                item.write_bytes(AGE_HEADER + b"x")
+            deleted = recovery.prune_local_by_age(
+                30,
+                paths=paths,
+                preserve=current,
+                now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            )
+            self.assertEqual(deleted, (old.name,))
+            self.assertFalse(old.exists())
+            self.assertTrue(current.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_remote_age_pruning_deletes_only_expired_named_recovery_points(self) -> None:
+        runner = FakeRunner()
+        runner.remote_entries = [
+            {"Name": "recovery-20260101T000000Z-old.vwrec", "Size": 1},
+            {"Name": "recovery-20261001T000000Z-current.vwrec", "Size": 1},
+            {"Name": "other.vwrec", "Size": 1},
+        ]
+        deleted = recovery.prune_remote_by_age(
+            "offsite:recovery",
+            30,
+            preserve_name="recovery-20261001T000000Z-current.vwrec",
+            runner=runner,
+            now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+        )
+        self.assertEqual(deleted, ("recovery-20260101T000000Z-old.vwrec",))
+        self.assertIn(
+            ("rclone", "deletefile", "offsite:recovery/recovery-20260101T000000Z-old.vwrec"),
+            runner.calls,
+        )
+        self.assertFalse(any(call[-1].endswith("other.vwrec") for call in runner.calls if call[:2] == ("rclone", "deletefile")))
 
     def test_explicit_pruning_plan_and_delete_argv(self) -> None:
         runner = FakeRunner()
