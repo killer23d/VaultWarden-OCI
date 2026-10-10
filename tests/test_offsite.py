@@ -192,7 +192,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
     def test_configure_refuses_unreachable_remote_without_persisting(self) -> None:
         with (
             mock.patch.object(offsite.os, "geteuid", return_value=0),
-            mock.patch.object(offsite.recovery, "prepare_rclone_destination", return_value=(False, "remote is unavailable")),
+            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(False, "remote is unavailable")),
             mock.patch.object(offsite.runtime, "set_backup_remote") as save,
         ):
             with self.assertRaisesRegex(offsite.OffsiteError, "unavailable"):
@@ -215,12 +215,29 @@ class OffsiteWorkflowTests(unittest.TestCase):
     def test_explicit_configure_saves_only_after_connectivity_validation(self) -> None:
         with (
             mock.patch.object(offsite.os, "geteuid", return_value=0),
-            mock.patch.object(offsite.recovery, "prepare_rclone_destination", return_value=(True, "reachable")),
+            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(True, "remote reachable")),
+            mock.patch.object(offsite.recovery, "prepare_rclone_destination", return_value=(True, "destination ready")) as prepare,
             mock.patch.object(offsite.runtime, "set_backup_remote") as save,
             redirect_stdout(io.StringIO()),
         ):
             offsite.configure("cloud:backups", interactive=False)
+        prepare.assert_called_once_with("cloud:backups")
         save.assert_called_once_with("cloud:backups")
+
+    def test_interactive_cancel_does_not_prepare_or_mutate_remote(self) -> None:
+        with (
+            mock.patch.object(offsite.os, "geteuid", return_value=0),
+            mock.patch.object(offsite.recovery, "rclone_diagnostics", return_value=(True, "reachable")),
+            mock.patch.object(offsite.recovery, "prepare_rclone_destination") as prepare,
+            mock.patch.object(offsite.runtime, "set_backup_remote") as save,
+            mock.patch.object(offsite.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(offsite.sys.stdout, "isatty", return_value=True),
+            mock.patch("builtins.input", return_value="CANCEL"),
+            redirect_stdout(io.StringIO()),
+        ):
+            offsite.configure("cloud:backups", interactive=True)
+        prepare.assert_not_called()
+        save.assert_not_called()
 
     def test_status_distinguishes_optional_and_configured_failure(self) -> None:
         disabled = SimpleNamespace(offsite_remote=None, local_retention_days=0, remote_retention_days=0)
