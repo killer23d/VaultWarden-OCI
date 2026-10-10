@@ -108,4 +108,31 @@ def backup(*, override: str | None = None) -> int:
     print(f"PASS: verified local recovery {verified.artifact} sha256={verified.sha256}")
     if remote:
         print("PASS: offsite publication was remotely re-downloaded and checksum-verified")
+
+    # Retention is deliberately last. A failed backup/publication never deletes
+    # older recovery points, and the just-created verified point is protected.
+    if config.local_retention_days > 0:
+        deleted = recovery.prune_local_by_age(
+            config.local_retention_days,
+            preserve=verified.artifact,
+        )
+        print(
+            f"PASS: local retention ({config.local_retention_days} days) removed "
+            f"{len(deleted)} expired recovery point(s)"
+        )
+    if (
+        remote
+        and override is None
+        and remote == config.offsite_remote
+        and config.remote_retention_days > 0
+    ):
+        deleted = recovery.prune_remote_by_age(
+            remote,
+            config.remote_retention_days,
+            preserve_name=verified.artifact.name,
+        )
+        print(
+            f"PASS: remote retention ({config.remote_retention_days} days) removed "
+            f"{len(deleted)} expired recovery point(s)"
+        )
     return 0
