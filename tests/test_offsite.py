@@ -233,7 +233,6 @@ class OffsiteWorkflowTests(unittest.TestCase):
             mock.patch.object(offsite.sys.stdin, "isatty", return_value=True),
             mock.patch.object(offsite.sys.stdout, "isatty", return_value=True),
             mock.patch("builtins.input", return_value="CANCEL"),
-            redirect_stdout(io.StringIO()),
         ):
             offsite.configure("cloud:backups", interactive=True)
         prepare.assert_not_called()
