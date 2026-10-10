@@ -612,7 +612,14 @@ class RcloneTests(unittest.TestCase):
         )
         self.assertEqual(plan.delete, ("recovery-20260820T010000Z-a.vwrec",))
         self.assertFalse(any(call[:2] == ("rclone", "deletefile") for call in runner.calls))
-        recovery.prune_remote("offsite:recovery", 2, confirm=True, runner=runner)
+        with tempfile.TemporaryDirectory() as directory:
+            recovery.prune_remote(
+                "offsite:recovery",
+                2,
+                confirm=True,
+                runner=runner,
+                lock_path=Path(directory) / "lock",
+            )
         deletes = [call for call in runner.calls if call[:2] == ("rclone", "deletefile")]
         self.assertEqual(
             deletes[-1],
