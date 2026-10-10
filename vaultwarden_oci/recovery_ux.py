@@ -587,7 +587,7 @@ def guided_restore(
         if not points:
             raise RecoveryUXError("no local .vwrec recovery points are available")
     else:
-        configured = runtime.load_config(paths.config).offsite_remote
+        configured = runtime.load_config(paths.config).offsite_remote if paths.config.is_file() else None
         remote = configured
         if configured:
             ui.info(f"Configured offsite destination: {configured}")
@@ -625,7 +625,7 @@ def guided_restore(
 
         if point.source == "local":
             artifact = Path(point.location)
-            verified = verify_local(artifact, identity, paths=paths, runner=runner)
+            verified = verify_local(artifact, identity, paths=paths, runner=runner, record=False)
             _restore_summary(point, verified, ui)
             if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
                 ui.info("restore cancelled after preflight; no live state was changed")
@@ -641,7 +641,7 @@ def guided_restore(
                     paths=paths,
                     runner=runner,
                     state_location=point.location,
-                    record=True,
+                    record=False,
                 )
                 _restore_summary(point, verified, ui)
                 if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
@@ -1067,7 +1067,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.recovery_command == "list":
                 ui.header("Local recovery points (newest first)")
                 print_inventory(list_local())
-                selected_remote = args.remote or runtime.load_config().offsite_remote
+                selected_remote = args.remote
+                if selected_remote is None and recovery.CONFIG.is_file():
+                    selected_remote = runtime.load_config().offsite_remote
                 if selected_remote:
                     ui.header("Remote recovery points (newest first)")
                     print_inventory(list_remote_points(selected_remote))
