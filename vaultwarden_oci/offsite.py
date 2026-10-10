@@ -75,15 +75,18 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
         raise OffsiteError(str(exc)) from exc
     if remote is None:
         raise OffsiteError("configure requires a remote; use 'offsite disable' for local-only mode")
-    ok, message = recovery.prepare_rclone_destination(remote)
+    ok, message = recovery.rclone_diagnostics(remote)
     if not ok:
         raise OffsiteError(message)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         print(f"Destination: {remote}")
         print("Only new encrypted .vwrec files are published; no remote objects are deleted.")
         if input("Type ENABLE to activate scheduled offsite backups: ").strip() != "ENABLE":
-            print("INFO: offsite setup cancelled; existing configuration unchanged")
+            print("INFO: offsite setup cancelled; existing configuration and remote are unchanged")
             return
+    ok, message = recovery.prepare_rclone_destination(remote)
+    if not ok:
+        raise OffsiteError(message)
     runtime.set_backup_remote(remote)
     print(f"PASS: daily scheduled offsite publication enabled: {remote}")
     print("ACTION: run 'sudo vwctl backup' to create and verify the first offsite recovery point")
