@@ -51,16 +51,20 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 
 ## Backup and disaster-recovery essentials
 
-**The built-in daily backup is local only.** After timers are enabled, it writes an encrypted `.vwrec` to `/var/lib/vaultwarden-oci/backups/` at **03:15 server-local time** (with up to 15 minutes of random delay). Losing the data volume can also lose these local backups. Neither the timer nor the initial setup automatically uploads them.
+**The daily backup runs automatically** at 03:15 server-local time (plus up to 15 minutes random delay) after timers are enabled. It always creates a local encrypted `.vwrec` in `/var/lib/vaultwarden-oci/backups/`.
 
-To get an **offsite** backup, first configure an rclone remote **as root** (`sudo rclone config`) and then run:
+To also send **every scheduled backup offsite**, configure your cloud provider in root's rclone, then select and save the destination:
 
 ```bash
-sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'
-sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'
+sudo rclone config
+sudo vwctl recovery offsite configure
+sudo vwctl backup
+sudo vwctl recovery offsite status
 ```
 
-Replace the example remote with yours. Offsite publication is currently a **manual action**, not an automatic schedule. Periodically use `sudo vwctl recovery verify` with your matching **off-server private Age identity** to confirm actual decryption. Keep the separate recovery-kit ZIP and passphrase safe off-host, monitor local disk usage, and practice a restore on a disposable machine.
+The guided setup lists root's existing rclone remotes, asks for a destination folder, checks access, and requires an explicit ENABLE confirmation. Once configured, **the same daily backup timer** produces and uploads a new encrypted backup, then downloads it and checks SHA-256. A failed upload or remote verification fails the scheduled job; the local recovery point remains intact. Without a saved destination, scheduled backups remain local-only. For automated configuration, use `sudo vwctl recovery offsite configure --remote 'offsite:Vaultwarden-OCI'`.
+
+For disaster recovery, `sudo vwctl restore` lists numbered local or remote backup choices and reuses the saved remote destination. Independent offline-private-key verification, recovery-kit custody, and a disposable-host restore drill are still required. This feature does not automatically delete old backups. The rclone configuration is not contained in a `.vwrec` or recovery-kit ZIP.
 
 The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, guided restore, full server loss, and retention.
 

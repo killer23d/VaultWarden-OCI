@@ -23,6 +23,12 @@ Answering `y` performs the normal supported `vwctl restart` lifecycle immediatel
 
 An upgraded installation can have one additional bounded transition before that normal restart offer. If an existing Vaultwarden Admin `config.json` is present, see [Existing Vaultwarden Admin configuration](#existing-vaultwarden-admin-configuration) below; the appliance keeps that file effective until the operator explicitly reconciles it instead of silently changing existing policy.
 
+## Scheduled offsite backups
+
+The optional `[backup]` table provides a single, non-secret setting: `remote = ""` (default local-only) or `remote = "offsite:Vaultwarden-OCI"` to upload every daily verified `.vwrec`. The saved destination must be a named rclone remote plus a safe relative folder. Configure it with `sudo vwctl recovery offsite configure` rather than editing systemd units. The command checks root's rclone setup/reachability and commits a validated config change. `sudo vwctl recovery offsite status` checks readiness; `sudo vwctl recovery offsite disable` restores local-only behavior without deleting any backup.
+
+The provider OAuth tokens and other secrets belong only in root's protected rclone configuration, not here or in SOPS. The cloud access setup must also be kept separately off-host for lost-server recovery. Remote configuration is independent of Vaultwarden/Caddy restart; it affects the next backup invocation.
+
 ## Vaultwarden settings
 
 Fresh setup writes the following supported `[vaultwarden]` keys. Existing valid minimal configurations remain compatible: omitted catalog keys receive these defaults when rendered.
