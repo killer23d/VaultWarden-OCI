@@ -25,7 +25,18 @@ An upgraded installation can have one additional bounded transition before that 
 
 ## Scheduled offsite backups
 
-The optional `[backup]` table provides a single, non-secret setting: `remote = ""` (default local-only) or `remote = "offsite:Vaultwarden-OCI"` to upload every daily verified `.vwrec`. The saved destination must be a named rclone remote plus a safe relative folder. Configure it with `sudo vwctl recovery offsite configure` rather than editing systemd units. The command checks root's rclone setup/reachability and commits a validated config change. `sudo vwctl recovery offsite status` checks readiness; `sudo vwctl recovery offsite disable` restores local-only behavior without deleting any backup.
+The optional `[backup]` table controls the non-secret backup policy. `remote = ""` is local-only; `remote = "offsite:Vaultwarden-OCI"` publishes every verified backup. `local_retention_days = 0` and `remote_retention_days = 0` keep recovery points indefinitely. Set either retention value to a positive whole number to delete only `.vwrec` files older than that many days **after a fully successful backup**. A failed backup or failed remote publication performs no automatic pruning. Remote retention applies only to the saved destination, not a one-time `vwctl backup --remote` override. The current verified backup is always protected from the retention pass. The saved destination must be a named rclone remote plus a safe relative folder. Configure it with `sudo vwctl recovery offsite configure` rather than editing systemd units. The command checks root's rclone setup/reachability and commits a validated config change. `sudo vwctl recovery offsite status` checks readiness; `sudo vwctl recovery offsite disable` restores local-only behavior without deleting any backup.
+
+Example:
+
+```toml
+[backup]
+remote = "offsite:Vaultwarden-OCI"
+local_retention_days = 30
+remote_retention_days = 90
+```
+
+Use `0` when you do not want automatic deletion. Retention accepts 0 through 36500 days.
 
 The provider OAuth tokens and other secrets belong only in root's protected rclone configuration, not here or in SOPS. The cloud access setup must also be kept separately off-host for lost-server recovery. Remote configuration is independent of Vaultwarden/Caddy restart; it affects the next backup invocation.
 
