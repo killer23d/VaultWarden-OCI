@@ -27,7 +27,7 @@ The `.vwrec` envelope uses Age. Its manifest `format_version = 2` is a real comp
 | Local destination | `/var/lib/vaultwarden-oci/backups/` on the dedicated data volume (not protection against loss of that volume) |
 | Offsite backup | **Optional automatic** daily verified publication through the same backup timer, enabled with `sudo vwctl recovery offsite configure`; local-only until configured |
 | Offline-key verification | **Manual** with `vwctl recovery verify` and the matching off-server private Age identity |
-| Retention | No automatic deletion; remote prune is an explicit preview/confirm action, and there is no supported local prune command |
+| Retention | Opt-in age policy in `[backup]`: `local_retention_days` and `remote_retention_days`; `0` keeps indefinitely. Automatic pruning runs only after a successful backup/publication |
 | Recovery-kit ZIP | Separate, password-protected credential handoff; the normal `.vwrec` backup timer does **not** create or upload it |
 
 Backup briefly pauses running application containers for a consistent copy, snapshots SQLite, resumes the containers, and checks their health. It checks the staged manifest, then encrypts to the **offline public Age recipient**. The matching **private key** stays off-server, so a successful scheduled backup does **not** itself prove that the off-server key can decrypt the resulting file. Run an independent `recovery verify` periodically.
@@ -84,7 +84,7 @@ sudo vwctl recovery offsite status
 
 The explicit `--remote` passed to `sudo vwctl backup --remote 'another:folder'` overrides the saved destination **for that run only**. Do not change the scheduled unit or add a second timer. If you deliberately want local-only scheduled backups again, use `sudo vwctl recovery offsite disable` (or add `--confirm` for a headless invocation). Disabling does **not** delete local/remote backup files.
 
-The rclone connection/credentials must separately survive total server loss; they are **not** in the application `.vwrec` or credential-recovery ZIP. An optional rclone crypt remote is compatible but does not replace offline Age private-key custody. There is **no automatic local or remote pruning**, so monitor free space and apply explicit reviewed retention. A successful remote checksum roundtrip alone does not prove that the **offline recovery key** can decrypt a backup.
+The rclone connection/credentials must separately survive total server loss; they are **not** in the application `.vwrec` or credential-recovery ZIP. An optional rclone crypt remote is compatible but does not replace offline Age private-key custody. Automatic pruning is disabled by default. To opt in, set `local_retention_days` and/or `remote_retention_days` in `[backup]`; positive values delete only recovery files older than the configured age after the new backup has completely succeeded. Remote publication failure therefore retains both the new local backup and all older history. A successful remote checksum roundtrip alone does not prove that the **offline recovery key** can decrypt a backup.
 
 ## Same-host restore
 
@@ -237,9 +237,18 @@ Execute only after review:
 sudo vwctl recovery prune --remote 'REMOTE:path' --keep-last 7 --confirm
 ```
 
-Creating/publishing a recovery point **never implicitly prunes** older offsite material. The prune command affects only `.vwrec` files under the **specified remote path**; review the Keep/Delete plan and independently verify the retained recovery points and matching Age private identity before confirming.
+The explicit prune command affects only `.vwrec` files under the **specified remote path**; review the Keep/Delete plan and independently verify the retained recovery points and matching Age private identity before confirming.
 
-**Local backup files accumulate daily, too.** There is currently **no supported local `vwctl recovery prune` subcommand** or automatic local-retention setting. Monitor free space with `df -h /var/lib/vaultwarden-oci`. Do not delete the only working recovery point to free space; first verify an independent offsite copy and agree on a retention policy. Neither local nor remote backup jobs automatically refresh the credential recovery-kit ZIP, so refresh its secure off-server custody after credential rotation.
+For routine age-based retention, configure the operator TOML:
+
+```toml
+[backup]
+remote = "offsite:Vaultwarden-OCI"
+local_retention_days = 30
+remote_retention_days = 90
+```
+
+`0` means keep indefinitely. A positive value prunes files older than that many days only after the current backup has succeeded; configured remote retention waits for upload **and read-back checksum verification**. The just-created recovery point is protected. A one-time `--remote` override never causes automatic deletion on that alternate remote. If pruning itself fails, the backup service reports failure, but the newly verified recovery point remains. Neither local nor remote backup jobs automatically refresh the credential recovery-kit ZIP, so refresh its secure off-server custody after credential rotation.
 
 ## Update recovery boundary
 
