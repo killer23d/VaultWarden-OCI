@@ -29,7 +29,7 @@ def status() -> None:
         print("INFO: scheduled offsite backup disabled; daily encrypted local backups remain active")
         print("ACTION: sudo vwctl recovery offsite configure")
         return
-    ok, message = recovery.rclone_diagnostics(remote)
+    ok, message = recovery.rclone_destination_diagnostics(remote)
     print(f"Configured destination: {remote}")
     print(f"{'PASS' if ok else 'FAIL'}: {message}")
     print("Daily backup timer: creates a new local .vwrec, then publishes and re-download-verifies it")
@@ -75,7 +75,7 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
         raise OffsiteError(str(exc)) from exc
     if remote is None:
         raise OffsiteError("configure requires a remote; use 'offsite disable' for local-only mode")
-    ok, message = recovery.rclone_diagnostics(remote)
+    ok, message = recovery.prepare_rclone_destination(remote)
     if not ok:
         raise OffsiteError(message)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
@@ -116,28 +116,25 @@ def backup(*, override: str | None = None) -> int:
 
     # Retention is deliberately last. A failed backup/publication never deletes
     # older recovery points, and the just-created verified point is protected.
+    retention_remote = (
+        remote
+        if remote and override is None and remote == config.offsite_remote
+        else None
+    )
+    local_deleted, remote_deleted = recovery.apply_retention(
+        config.local_retention_days,
+        remote=retention_remote,
+        remote_days=config.remote_retention_days,
+        preserve=verified,
+    )
     if config.local_retention_days > 0:
-        deleted = recovery.prune_local_by_age(
-            config.local_retention_days,
-            preserve=verified.artifact,
-        )
         print(
             f"PASS: local retention ({config.local_retention_days} days) removed "
-            f"{len(deleted)} expired recovery point(s)"
+            f"{len(local_deleted)} expired recovery point(s)"
         )
-    if (
-        remote
-        and override is None
-        and remote == config.offsite_remote
-        and config.remote_retention_days > 0
-    ):
-        deleted = recovery.prune_remote_by_age(
-            remote,
-            config.remote_retention_days,
-            preserve_name=verified.artifact.name,
-        )
+    if retention_remote and config.remote_retention_days > 0:
         print(
             f"PASS: remote retention ({config.remote_retention_days} days) removed "
-            f"{len(deleted)} expired recovery point(s)"
+            f"{len(remote_deleted)} expired recovery point(s)"
         )
     return 0
