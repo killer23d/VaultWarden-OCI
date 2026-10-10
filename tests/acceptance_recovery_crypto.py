@@ -187,7 +187,7 @@ def main() -> int:
             text=True,
             capture_output=True,
         )
-        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner)
+        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner, lock_path=paths.lock)
         if stale_name not in decision.delete or (remote_dir / stale_name).exists():
             raise AssertionError("explicit rclone prune did not delete the stale recovery object")
         if verified.artifact.name not in decision.keep:
