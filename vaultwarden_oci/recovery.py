@@ -1249,15 +1249,18 @@ def prune_remote(
     runner: Runner = run_command,
     lock_path: Path = runtime.LOCK,
 ) -> PruneDecision:
+    decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
+    if not confirm:
+        return decision
     with mutation_lock(lock_path):
+        # Re-list under the mutation lock so the confirmed deletion plan cannot
+        # be based on a stale view taken before another recovery operation.
         decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
-        if not confirm:
-            return decision
         for name in decision.delete:
             result = runner(["rclone", "deletefile", _remote_object(remote, name)])
             if not result.ok:
                 raise _safe_error(f"rclone prune {name}", result)
-        return decision
+    return decision
 
 
 def status_rows(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, str]]:
