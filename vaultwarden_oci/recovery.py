@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -12,11 +13,11 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from . import runtime, runtime_health, secrets
+from . import durability, runtime, runtime_health, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 
 FORMAT_VERSION = 2
@@ -584,8 +585,14 @@ def create_recovery(
             ) from exc
         _record_local(paths, verified)
         if remote:
-            remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
-            _record_offsite(paths, remote_object=remote_object, verified=verified)
+            try:
+                remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
+                _record_offsite(paths, remote_object=remote_object, verified=verified)
+            except (RecoveryError, OSError) as exc:
+                raise RecoveryError(
+                    f"offsite publication failed; verified local backup is retained at "
+                    f"{verified.artifact} (sha256={verified.sha256}): {exc}"
+                ) from exc
         return verified
 
 
@@ -621,6 +628,33 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
     return True, f"rclone remote {name!r} is reachable"
 
 
+def rclone_destination_diagnostics(
+    remote: str,
+    *,
+    runner: Runner = run_command,
+) -> tuple[bool, str]:
+    ok, message = rclone_diagnostics(remote, runner=runner)
+    if not ok:
+        return False, message
+    if not runner(["rclone", "lsf", remote, "--max-depth", "1"]).ok:
+        return False, f"rclone destination {remote!r} is not accessible"
+    return True, f"rclone destination {remote!r} is accessible"
+
+
+def prepare_rclone_destination(
+    remote: str,
+    *,
+    runner: Runner = run_command,
+) -> tuple[bool, str]:
+    ok, message = rclone_diagnostics(remote, runner=runner)
+    if not ok:
+        return False, message
+    created = runner(["rclone", "mkdir", remote])
+    if not created.ok:
+        return False, f"rclone destination {remote!r} cannot be created or prepared"
+    return rclone_destination_diagnostics(remote, runner=runner)
+
+
 def _remote_object(remote: str, filename: str) -> str:
     name, path = _remote_parts(remote)
     return f"{name}:{path + '/' if path else ''}{filename}"
@@ -636,11 +670,28 @@ def publish_offsite(
     _verify_age_artifact(verified.artifact)
     if verified.artifact.stat().st_size != verified.size or _sha256(verified.artifact) != verified.sha256:
         raise RecoveryError("local recovery artifact changed before offsite publication")
-    ok, message = rclone_diagnostics(remote, runner=runner)
-    if not ok:
-        raise RecoveryError(message)
+    # The backend's --immutable handling alone is insufficient as a safety
+    # boundary: some older rclone/backend combinations can overwrite an object
+    # despite that flag. Enumerate the exact destination folder first and
+    # refuse an existing name, even when its content appears identical.
+    # A failed listing must fail closed before any upload.
+    existing = list_remote(remote, runner=runner)
+    if any(
+        str(item["Name"]).casefold() == verified.artifact.name.casefold()
+        for item in existing
+    ):
+        raise RecoveryError(
+            "offsite recovery object already exists; refusing to overwrite "
+            f"{verified.artifact.name}"
+        )
     destination = _remote_object(remote, verified.artifact.name)
-    upload = runner(["rclone", "copyto", str(verified.artifact), destination])
+    # The additional ignore-existing flag prevents updates if an object
+    # appears between the listing and the transfer on a compliant backend.
+    # Neither flag replaces the independent download/sha256 verification.
+    upload = runner([
+        "rclone", "copyto", str(verified.artifact), destination,
+        "--immutable", "--ignore-existing",
+    ])
     if not upload.ok:
         raise _safe_error("rclone publication", upload)
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-verify-", dir=str(paths.backups)) as directory:
@@ -1094,7 +1145,7 @@ def list_remote(remote: str, *, runner: Runner = run_command) -> list[dict[str, 
         for item in payload
         if isinstance(item, dict)
         and isinstance(item.get("Name"), str)
-        and item["Name"].endswith(".vwrec")
+        and item["Name"].casefold().endswith(".vwrec")
     ]
 
 
@@ -1112,20 +1163,118 @@ def pruning_decision(entries: Iterable[Mapping[str, object]], keep_last: int) ->
     return PruneDecision(tuple(names[:keep_last]), tuple(names[keep_last:]))
 
 
+def _recovery_name_time(name: str) -> datetime | None:
+    match = re.fullmatch(r"recovery-(\d{8}T\d{6}Z)-[^/]+\.vwrec", name)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _older_than_days(name: str, days: int, *, now: datetime) -> bool:
+    created = _recovery_name_time(name)
+    return created is not None and created < now - timedelta(days=days)
+
+
+def prune_local_by_age(
+    days: int,
+    *,
+    paths: RecoveryPaths = RecoveryPaths(),
+    preserve: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    if days <= 0:
+        return ()
+    cutoff_now = now or datetime.now(timezone.utc)
+    deleted: list[str] = []
+    preserve_resolved = preserve.resolve() if preserve is not None else None
+    for artifact in sorted(paths.backups.glob("recovery-*.vwrec")):
+        _ensure_regular(artifact, "local recovery artifact", nonempty=True)
+        if preserve_resolved is not None and artifact.resolve() == preserve_resolved:
+            continue
+        if not _older_than_days(artifact.name, days, now=cutoff_now):
+            continue
+        durability.unlink(artifact)
+        deleted.append(artifact.name)
+    return tuple(deleted)
+
+
+def prune_remote_by_age(
+    remote: str,
+    days: int,
+    *,
+    preserve_name: str | None = None,
+    runner: Runner = run_command,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    if days <= 0:
+        return ()
+    cutoff_now = now or datetime.now(timezone.utc)
+    deleted: list[str] = []
+    for item in list_remote(remote, runner=runner):
+        name = item.get("Name")
+        if not isinstance(name, str) or name == preserve_name:
+            continue
+        if not _older_than_days(name, days, now=cutoff_now):
+            continue
+        result = runner(["rclone", "deletefile", _remote_object(remote, name)])
+        if not result.ok:
+            raise _safe_error(f"rclone retention prune {name}", result)
+        deleted.append(name)
+    return tuple(deleted)
+
+
+def apply_retention(
+    local_days: int,
+    *,
+    remote: str | None,
+    remote_days: int,
+    preserve: VerifiedRecovery,
+    paths: RecoveryPaths = RecoveryPaths(),
+    runner: Runner = run_command,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if local_days <= 0 and (not remote or remote_days <= 0):
+        return (), ()
+    with mutation_lock(paths.lock):
+        local_deleted = prune_local_by_age(
+            local_days,
+            paths=paths,
+            preserve=preserve.artifact,
+        )
+        remote_deleted = (
+            prune_remote_by_age(
+                remote,
+                remote_days,
+                preserve_name=preserve.artifact.name,
+                runner=runner,
+            )
+            if remote and remote_days > 0
+            else ()
+        )
+    return local_deleted, remote_deleted
+
+
 def prune_remote(
     remote: str,
     keep_last: int,
     *,
     confirm: bool,
     runner: Runner = run_command,
+    lock_path: Path = runtime.LOCK,
 ) -> PruneDecision:
     decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
     if not confirm:
         return decision
-    for name in decision.delete:
-        result = runner(["rclone", "deletefile", _remote_object(remote, name)])
-        if not result.ok:
-            raise _safe_error(f"rclone prune {name}", result)
+    with mutation_lock(lock_path):
+        # Re-list under the mutation lock so the confirmed deletion plan cannot
+        # be based on a stale view taken before another recovery operation.
+        decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
+        for name in decision.delete:
+            result = runner(["rclone", "deletefile", _remote_object(remote, name)])
+            if not result.ok:
+                raise _safe_error(f"rclone prune {name}", result)
     return decision
 
 

@@ -180,6 +180,30 @@ def main() -> int:
         if "offsite" not in state:
             raise AssertionError("offsite verification state was not recorded after real rclone verification")
 
+        # Production may have older rclone versions where --immutable alone
+        # does not protect an existing remote name. The application must
+        # reject a same-name collision *before* invoking rclone copyto.
+        original_bytes = (remote_dir / verified.artifact.name).read_bytes()
+        collision_dir = root / "collision"
+        collision_dir.mkdir()
+        collision_file = collision_dir / verified.artifact.name
+        collision_file.write_bytes(original_bytes + b"unauthorized replacement bytes")
+        collision = recovery.VerifiedRecovery(
+            artifact=collision_file,
+            sha256=recovery._sha256(collision_file),
+            size=collision_file.stat().st_size,
+            created_at=verified.created_at,
+        )
+        try:
+            recovery.publish_offsite(collision, remote, paths=paths, runner=runner)
+        except recovery.RecoveryError as exc:
+            if "already exists" not in str(exc):
+                raise AssertionError(f"collision failed for an unexpected reason: {exc}") from exc
+        else:
+            raise AssertionError("existing remote recovery point was not rejected")
+        if (remote_dir / verified.artifact.name).read_bytes() != original_bytes:
+            raise AssertionError("remote recovery point changed after a refused collision")
+
         stale_name = "recovery-20000101T000000Z-stale.vwrec"
         subprocess.run(
             ["rclone", "copyto", str(verified.artifact), f"{remote}/{stale_name}"],
@@ -187,7 +211,7 @@ def main() -> int:
             text=True,
             capture_output=True,
         )
-        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner)
+        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner, lock_path=paths.lock)
         if stale_name not in decision.delete or (remote_dir / stale_name).exists():
             raise AssertionError("explicit rclone prune did not delete the stale recovery object")
         if verified.artifact.name not in decision.keep:

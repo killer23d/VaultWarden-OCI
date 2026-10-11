@@ -187,24 +187,23 @@ Vaultwarden-only `smtp.embed_images` and `smtp.accept_invalid_*` do not weaken t
 
 ## Backups, offsite copies, and restore
 
-The backup timer in `vaultwarden-oci.target` runs **`vwctl backup` with no `--remote`**. It schedules a daily local encrypted `.vwrec` for **03:15 server-local time** plus up to 15 minutes of randomized delay. These files reside at `/var/lib/vaultwarden-oci/backups/` on the dedicated volume. The backup briefly pauses/resumes running containers for a consistent database snapshot and verifies their health afterward. **A local backup is not an offsite copy.**
+The enabled `vaultwarden-oci.target` schedules a daily `.vwrec` at **03:15 server-local time** plus up to 15 minutes random delay. A local encrypted recovery point is always created on the dedicated data volume at `/var/lib/vaultwarden-oci/backups/`. **If** the optional `[backup] remote` is configured, that **same** job then uploads to rclone and independently re-downloads/compares SHA-256 before recording offsite success. Unconfigured systems continue to run local-only. A configured unreachable remote fails the job, without discarding the local artifact; the normal failure-notification rules apply.
 
-| Task | Command or action |
+| Task | Command |
 | --- | --- |
-| List local recovery points | `sudo vwctl recovery list` |
-| Create local backup now | `sudo vwctl backup` |
-| Configure root's cloud rclone remote | `sudo rclone config`, then `sudo rclone listremotes` |
-| Create and verify a new offsite copy | `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'` |
-| List offsite recovery points | `sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'` |
-| Verify actual decryption | `sudo vwctl recovery verify --file /path/to/recovery.vwrec` or `--from-remote 'offsite:path/file.vwrec'`, then supply matching offline identity |
-| Begin guided restore | `sudo vwctl restore` (changes live state **only after** final confirmation) |
-| Check local schedule/failures | `sudo vwctl timers` and `journalctl -u vaultwarden-oci-backup.service --no-pager --lines=100` |
+| Set up root's cloud remote | `sudo rclone config` |
+| Guided saved offsite setup | `sudo vwctl recovery offsite configure` |
+| Headless saved offsite setup | `sudo vwctl recovery offsite configure --remote 'offsite:Vaultwarden-OCI'` |
+| Check saved destination and connectivity | `sudo vwctl recovery offsite status` |
+| Disable scheduled publication without deleting backups | `sudo vwctl recovery offsite disable` |
+| Create backup now (uses saved destination if enabled) | `sudo vwctl backup` |
+| Override remote for one backup only | `sudo vwctl backup --remote 'another:folder'` |
+| List local and configured remote recovery points | `sudo vwctl recovery list` |
+| Verify a chosen recovery point with the offline key | `sudo vwctl recovery verify --from-remote 'offsite:folder/recovery-REPLACE_ME.vwrec'` |
+| Guided local/remote restore | `sudo vwctl restore` |
+| Check scheduled jobs and failures | `sudo vwctl timers` and `journalctl -u vaultwarden-oci-backup.service --no-pager --lines=100` |
 
-Replace example rclone remote and backup paths. **The current built-in timers do not automate offsite publication.** Normal offsite publication uses rclone copy/round-trip checksum verification, not destructive sync. An uploaded-file checksum does not prove offline-key decryption: use the separate `recovery verify` flow. The root-owned rclone configuration itself is **not** included in the application archive or credential recovery kit.
-
-There is **no automatic local or remote retention**, and no supported `vwctl` local-prune subcommand. Remote-only pruning requires a reviewed `sudo vwctl recovery prune --remote 'offsite:Vaultwarden-OCI' --keep-last 7` plan followed, if appropriate, by the **same command with `--confirm`**. Choose your own retention policy and verify the kept copies before deleting anything. Monitor local disk space with `df -h /var/lib/vaultwarden-oci`.
-
-For step-by-step root rclone setup, recovery-key custody, restoration and replacing a lost server, see [Recovery](RECOVERY.md). Do not use a real production restore merely to test the procedure; use a disposable host.
+The recovery picker lists the available backups and offers the configured destination, so operators do not need to remember rclone paths. The encrypted `.vwrec` and separate encrypted recovery-kit ZIP remain distinct. Remote publication first refuses an already-existing object filename, then uses rclone copy with `--ignore-existing` and `--immutable`, followed by independent checksum verification; it **never syncs**. An existing-name collision fails the backup job while retaining its new verified local archive. These protections are not a substitute for provider-enforced object locking against other writers. Automatic retention is disabled by default: `local_retention_days = 0` and `remote_retention_days = 0`. Positive values in the `[backup]` table prune only expired `.vwrec` files after the current backup has fully succeeded; remote retention waits for read-back verification and does not run for a one-time alternate `--remote`. Credential-kit upload or recovery-key verification is not implied. The root rclone configuration is **not** in the recovery archive. The explicit preview-and-confirm `vwctl recovery prune` remains available for deliberate remote count-based cleanup. See [Recovery](RECOVERY.md) and [Troubleshooting](TROUBLESHOOTING.md).
 
 ## Timers and automation
 

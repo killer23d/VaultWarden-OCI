@@ -141,7 +141,11 @@ jobs:
               except UnicodeDecodeError:
                   continue
               for number, line in enumerate(text.splitlines(), 1):
-                  if generation_pattern.search(line) and not technical_version_pattern.search(line):
+                  is_required_checkout = (
+                      path.as_posix() in {'README.md', 'docs/INSTALL.md'}
+                      and line.strip() == 'git clone --branch v2 --single-branch https://github.com/killer23d/VaultWarden-OCI.git'
+                  )
+                  if generation_pattern.search(line) and not technical_version_pattern.search(line) and not is_required_checkout:
                       violations.append(f'{path}:{number}:{line.strip()}')
                       continue
                   if any(pattern.search(line) for pattern in other_patterns):

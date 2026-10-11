@@ -885,5 +885,39 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             self.assertTrue(identity.exists())
 
 
+class RecoveryCLIContentionTests(unittest.TestCase):
+    def test_confirmed_prune_reports_lock_contention_without_traceback(self) -> None:
+        with (
+            mock.patch.object(
+                recovery_ux.recovery,
+                "prune_remote",
+                side_effect=RuntimeError("another mutating vwctl operation holds the lock"),
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = recovery_ux.main(
+                ["recovery", "prune", "--remote", "cloud:backups", "--keep-last", "1", "--confirm"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL: another mutating vwctl operation", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_offsite_configure_reports_lock_contention_without_traceback(self) -> None:
+        with (
+            mock.patch.object(
+                recovery_ux.offsite,
+                "configure",
+                side_effect=RuntimeError("another mutating vwctl operation holds the lock"),
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = recovery_ux.main(
+                ["recovery", "offsite", "configure", "--remote", "cloud:backups"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL: another mutating vwctl operation", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

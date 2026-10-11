@@ -9,6 +9,7 @@ import sqlite3
 import tarfile
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -221,6 +222,10 @@ class FakeRunner:
         if call == ("rclone", "listremotes"):
             return result(argv, "offsite:\n")
         if call[:3] == ("rclone", "lsf", "offsite:"):
+            return result(argv)
+        if call[:2] == ("rclone", "mkdir"):
+            return result(argv)
+        if call[:3] == ("rclone", "lsf", "offsite:recovery"):
             return result(argv)
         if call[:2] == ("rclone", "copyto"):
             source, destination = call[2], call[3]
@@ -510,11 +515,65 @@ class RcloneTests(unittest.TestCase):
             self.assertEqual(len(copy_calls), 2)
             self.assertEqual(copy_calls[0][2], str(artifact))
             self.assertEqual(copy_calls[1][2], destination)
+            self.assertIn("--immutable", copy_calls[0])
+            self.assertIn("--ignore-existing", copy_calls[0])
+            listing = ("rclone", "lsjson", "offsite:recovery", "--files-only")
+            self.assertIn(listing, runner.calls)
+            self.assertLess(runner.calls.index(listing), runner.calls.index(copy_calls[0]))
             self.assertFalse(any("sync" in call for call in runner.calls))
 
             bad_runner = FakeRunner(remote_download_fails=True)
             with self.assertRaisesRegex(recovery.RecoveryError, "remote verification"):
                 recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=bad_runner)
+
+    def test_publish_existing_object_refuses_before_any_transfer_even_with_broken_rclone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20261010T000000Z-collision.vwrec"
+            artifact.write_bytes(AGE_HEADER + b"new-and-different" * 8)
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                recovery._sha256(artifact),
+                artifact.stat().st_size,
+                "2026-10-10T00:00:00Z",
+            )
+            runner = FakeRunner()
+            original = AGE_HEADER + b"original-remote-backup" * 5
+            destination = "offsite:recovery/" + artifact.name
+            runner.remote[destination] = original
+            # This fake runner's copyto would overwrite existing objects
+            # unconditionally, matching the observed real older-rclone bug.
+            runner.remote_entries.append({"Name": artifact.name.upper()})
+            with self.assertRaisesRegex(recovery.RecoveryError, "already exists"):
+                recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=runner)
+            self.assertEqual(runner.remote[destination], original)
+            self.assertFalse(any(call[:2] == ("rclone", "copyto") for call in runner.calls))
+
+    def test_publish_fails_closed_when_existing_object_listing_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20261010T000000Z-safety.vwrec"
+            artifact.write_bytes(AGE_HEADER + b"x" * 128)
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                recovery._sha256(artifact),
+                artifact.stat().st_size,
+                "2026-10-10T00:00:00Z",
+            )
+            runner = FakeRunner()
+
+            def unavailable_listing(argv, *, env=None, cwd=None):
+                if argv[:2] == ["rclone", "lsjson"]:
+                    return result(argv, stderr="remote listing failed", code=1)
+                return runner(argv, env=env, cwd=cwd)
+
+            with self.assertRaisesRegex(recovery.RecoveryError, "remote listing"):
+                recovery.publish_offsite(
+                    verified, "offsite:recovery", paths=paths, runner=unavailable_listing,
+                )
+            self.assertFalse(any(call[:2] == ("rclone", "copyto") for call in runner.calls))
 
     def test_offsite_state_requires_remote_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -527,6 +586,77 @@ class RcloneTests(unittest.TestCase):
             self.assertIn("local", state)
             self.assertNotIn("offsite", state)
 
+    def test_destination_diagnostics_checks_selected_path_and_prepare_creates_it(self) -> None:
+        runner = FakeRunner()
+        ok, message = recovery.prepare_rclone_destination("offsite:recovery", runner=runner)
+        self.assertTrue(ok, message)
+        self.assertIn(("rclone", "mkdir", "offsite:recovery"), runner.calls)
+        self.assertIn(("rclone", "lsf", "offsite:recovery", "--max-depth", "1"), runner.calls)
+
+    def test_age_pruning_uses_recovery_names_only_and_preserves_current(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            old = paths.backups / "recovery-20260101T000000Z-old.vwrec"
+            current = paths.backups / "recovery-20261001T000000Z-current.vwrec"
+            unrelated = paths.backups / "notes.vwrec"
+            for item in (old, current, unrelated):
+                item.write_bytes(AGE_HEADER + b"x")
+            deleted = recovery.prune_local_by_age(
+                30,
+                paths=paths,
+                preserve=current,
+                now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            )
+            self.assertEqual(deleted, (old.name,))
+            self.assertFalse(old.exists())
+            self.assertTrue(current.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_remote_age_pruning_deletes_only_expired_named_recovery_points(self) -> None:
+        runner = FakeRunner()
+        runner.remote_entries = [
+            {"Name": "recovery-20260101T000000Z-old.vwrec", "Size": 1},
+            {"Name": "recovery-20261001T000000Z-current.vwrec", "Size": 1},
+            {"Name": "other.vwrec", "Size": 1},
+        ]
+        deleted = recovery.prune_remote_by_age(
+            "offsite:recovery",
+            30,
+            preserve_name="recovery-20261001T000000Z-current.vwrec",
+            runner=runner,
+            now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+        )
+        self.assertEqual(deleted, ("recovery-20260101T000000Z-old.vwrec",))
+        self.assertIn(
+            ("rclone", "deletefile", "offsite:recovery/recovery-20260101T000000Z-old.vwrec"),
+            runner.calls,
+        )
+        self.assertFalse(any(call[-1].endswith("other.vwrec") for call in runner.calls if call[:2] == ("rclone", "deletefile")))
+
+    def test_apply_retention_uses_mutation_lock(self) -> None:
+        verified = recovery.VerifiedRecovery(
+            artifact=Path("/test/current.vwrec"),
+            sha256="a" * 64,
+            size=1,
+            created_at="2026-10-10T00:00:00Z",
+        )
+        paths = recovery.RecoveryPaths(lock=Path("/test/recovery.lock"))
+        with (
+            mock.patch.object(recovery, "mutation_lock") as lock,
+            mock.patch.object(recovery, "prune_local_by_age", return_value=("local.vwrec",)),
+            mock.patch.object(recovery, "prune_remote_by_age", return_value=("remote.vwrec",)),
+        ):
+            deleted = recovery.apply_retention(
+                30,
+                remote="offsite:recovery",
+                remote_days=90,
+                preserve=verified,
+                paths=paths,
+            )
+        lock.assert_called_once_with(paths.lock)
+        self.assertEqual(deleted, (("local.vwrec",), ("remote.vwrec",)))
+
     def test_explicit_pruning_plan_and_delete_argv(self) -> None:
         runner = FakeRunner()
         plan = recovery.prune_remote("offsite:recovery", 2, confirm=False, runner=runner)
@@ -536,7 +666,14 @@ class RcloneTests(unittest.TestCase):
         )
         self.assertEqual(plan.delete, ("recovery-20260820T010000Z-a.vwrec",))
         self.assertFalse(any(call[:2] == ("rclone", "deletefile") for call in runner.calls))
-        recovery.prune_remote("offsite:recovery", 2, confirm=True, runner=runner)
+        with tempfile.TemporaryDirectory() as directory:
+            recovery.prune_remote(
+                "offsite:recovery",
+                2,
+                confirm=True,
+                runner=runner,
+                lock_path=Path(directory) / "lock",
+            )
         deletes = [call for call in runner.calls if call[:2] == ("rclone", "deletefile")]
         self.assertEqual(
             deletes[-1],

@@ -32,6 +32,7 @@ NAMES = {"vaultwarden": "vaultwarden-oci-vaultwarden", "caddy": "vaultwarden-oci
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _OPTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CADDY_WINDOW = re.compile(r"^[1-9][0-9]*(?:s|m|h)$")
+_BACKUP_REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class RuntimeConfigError(ValueError):
@@ -71,6 +72,9 @@ class RuntimeConfig:
     notification_provider: str | None = None
     notification_to_email: str | None = None
     notification_options: tuple[tuple[str, str], ...] = ()
+    offsite_remote: str | None = None
+    local_retention_days: int = 0
+    remote_retention_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -171,10 +175,35 @@ def _email(value: str, label: str) -> str:
     return value
 
 
+def _retention_days(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 36500:
+        raise RuntimeConfigError(f"{label} must be an integer from 0 to 36500 days")
+    return value
+
+
+def backup_remote_destination(value: object) -> str | None:
+    """Validate one explicit non-secret rclone publication prefix."""
+    if value == "":
+        return None
+    if not isinstance(value, str) or value.strip() != value or ":" not in value:
+        raise RuntimeConfigError("backup.remote must be REMOTE:folder or empty to disable offsite publication")
+    name, prefix = value.split(":", 1)
+    if not _BACKUP_REMOTE_NAME.fullmatch(name):
+        raise RuntimeConfigError("backup.remote has an invalid rclone remote name")
+    if (
+        not prefix or prefix.startswith(("/", "\\"))
+        or "\\" in prefix
+        or any(part in {"", ".", ".."} for part in prefix.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in prefix)
+    ):
+        raise RuntimeConfigError("backup.remote requires a safe relative folder, such as offsite:Vaultwarden-OCI")
+    return value
+
+
 def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
     _unknown(
         data,
-        {"schema_version", "site", "secrets", "vaultwarden", "smtp", "caddy", "notifications"},
+        {"schema_version", "site", "secrets", "vaultwarden", "smtp", "caddy", "notifications", "backup"},
         "top-level",
     )
     if data.get("schema_version") != 1:
@@ -182,6 +211,20 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
     site, secret_cfg, vw, smtp = (
         _mapping(data, key) for key in ("site", "secrets", "vaultwarden", "smtp")
     )
+    backup_raw = data.get("backup", {})
+    if not isinstance(backup_raw, dict):
+        raise RuntimeConfigError("config [backup] must be a table")
+    _unknown(backup_raw, {"remote", "local_retention_days", "remote_retention_days"}, "backup")
+    offsite_remote = backup_remote_destination(backup_raw.get("remote", ""))
+    local_retention_days = _retention_days(
+        backup_raw.get("local_retention_days", 0),
+        "backup.local_retention_days",
+    )
+    remote_retention_days = _retention_days(
+        backup_raw.get("remote_retention_days", 0),
+        "backup.remote_retention_days",
+    )
+
     caddy_raw = data.get("caddy", {})
     if not isinstance(caddy_raw, dict):
         raise RuntimeConfigError("config [caddy] must be a table")
@@ -287,6 +330,9 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         notification_provider=notification_provider,
         notification_to_email=notification_to_email,
         notification_options=notification_options,
+        offsite_remote=offsite_remote,
+        local_retention_days=local_retention_days,
+        remote_retention_days=remote_retention_days,
     )
 
 
@@ -298,6 +344,58 @@ def load_config(path: Path = CONFIG) -> RuntimeConfig:
         raise
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise RuntimeConfigError(f"cannot load config {path}: {exc}") from exc
+
+
+def set_backup_remote(
+    remote: str,
+    *,
+    path: Path = CONFIG,
+    lock_path: Path = LOCK,
+) -> None:
+    """Atomically commit a validated destination in the sole operator TOML."""
+    selected = backup_remote_destination(remote)
+    if path == CONFIG and os.geteuid() != 0:
+        raise RuntimeConfigError("offsite configuration must run as root")
+    with mutation_lock(lock_path):
+        if path.is_symlink() or not path.is_file() or path.lstat().st_uid != os.geteuid():
+            raise RuntimeConfigError(f"operator config must be a regular owned file: {path}")
+        load_config(path)
+        original = path.read_text(encoding="utf-8")
+        lines = original.splitlines(keepends=True)
+        header = next(
+            (i for i, line in enumerate(lines) if line.strip() == "[backup]"),
+            None,
+        )
+        entry = "remote = " + json.dumps(selected or "") + "\n"
+        if header is None:
+            candidate_text = original.rstrip("\n") + "\n\n[backup]\n" + entry
+        else:
+            end = next(
+                (i for i in range(header + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+                len(lines),
+            )
+            index = next(
+                (i for i in range(header + 1, end) if re.match(r"\s*remote\s*=", lines[i])),
+                None,
+            )
+            if index is None:
+                lines.insert(header + 1, entry)
+            else:
+                lines[index] = entry
+            candidate_text = "".join(lines)
+        descriptor, name = tempfile.mkstemp(prefix=".backup-config-", suffix=".toml", dir=str(path.parent))
+        os.close(descriptor)
+        candidate = Path(name)
+        try:
+            candidate.write_text(candidate_text, encoding="utf-8")
+            os.chmod(candidate, 0o600)
+            load_config(candidate)
+            durability.fsync_file(candidate)
+            durability.replace(candidate, path)
+            os.chmod(path, 0o600)
+            durability.fsync_file_and_parent(path)
+        finally:
+            candidate.unlink(missing_ok=True)
 
 
 def _editor_command() -> list[str]:
