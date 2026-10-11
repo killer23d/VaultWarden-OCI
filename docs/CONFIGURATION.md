@@ -38,6 +38,8 @@ remote_retention_days = 90
 
 Use `0` when you do not want automatic deletion. Retention accepts 0 through 36500 days.
 
+Before publishing, the appliance lists the selected remote folder and refuses a filename already present, even if it appears to contain identical bytes. Transfer also requests rclone's `--ignore-existing` and `--immutable` protections; successful publication still requires an independent download/SHA-256 match. A refused collision leaves the new verified local backup untouched and fails the scheduled job. This is application-level append-only behavior, not a guarantee of provider-enforced object locking against other clients or external concurrent writes.
+
 The provider OAuth tokens and other secrets belong only in root's protected rclone configuration, not here or in SOPS. The cloud access setup must also be kept separately off-host for lost-server recovery. Remote configuration is independent of Vaultwarden/Caddy restart; it affects the next backup invocation.
 
 ## Vaultwarden settings
