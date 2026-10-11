@@ -515,11 +515,65 @@ class RcloneTests(unittest.TestCase):
             self.assertEqual(len(copy_calls), 2)
             self.assertEqual(copy_calls[0][2], str(artifact))
             self.assertEqual(copy_calls[1][2], destination)
+            self.assertIn("--immutable", copy_calls[0])
+            self.assertIn("--ignore-existing", copy_calls[0])
+            listing = ("rclone", "lsjson", "offsite:recovery", "--files-only")
+            self.assertIn(listing, runner.calls)
+            self.assertLess(runner.calls.index(listing), runner.calls.index(copy_calls[0]))
             self.assertFalse(any("sync" in call for call in runner.calls))
 
             bad_runner = FakeRunner(remote_download_fails=True)
             with self.assertRaisesRegex(recovery.RecoveryError, "remote verification"):
                 recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=bad_runner)
+
+    def test_publish_existing_object_refuses_before_any_transfer_even_with_broken_rclone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20261010T000000Z-collision.vwrec"
+            artifact.write_bytes(AGE_HEADER + b"new-and-different" * 8)
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                recovery._sha256(artifact),
+                artifact.stat().st_size,
+                "2026-10-10T00:00:00Z",
+            )
+            runner = FakeRunner()
+            original = AGE_HEADER + b"original-remote-backup" * 5
+            destination = "offsite:recovery/" + artifact.name
+            runner.remote[destination] = original
+            # This fake runner's copyto would overwrite existing objects
+            # unconditionally, matching the observed real older-rclone bug.
+            runner.remote_entries.append({"Name": artifact.name.upper()})
+            with self.assertRaisesRegex(recovery.RecoveryError, "already exists"):
+                recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=runner)
+            self.assertEqual(runner.remote[destination], original)
+            self.assertFalse(any(call[:2] == ("rclone", "copyto") for call in runner.calls))
+
+    def test_publish_fails_closed_when_existing_object_listing_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20261010T000000Z-safety.vwrec"
+            artifact.write_bytes(AGE_HEADER + b"x" * 128)
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                recovery._sha256(artifact),
+                artifact.stat().st_size,
+                "2026-10-10T00:00:00Z",
+            )
+            runner = FakeRunner()
+
+            def unavailable_listing(argv, *, env=None, cwd=None):
+                if argv[:2] == ["rclone", "lsjson"]:
+                    return result(argv, stderr="remote listing failed", code=1)
+                return runner(argv, env=env, cwd=cwd)
+
+            with self.assertRaisesRegex(recovery.RecoveryError, "remote listing"):
+                recovery.publish_offsite(
+                    verified, "offsite:recovery", paths=paths, runner=unavailable_listing,
+                )
+            self.assertFalse(any(call[:2] == ("rclone", "copyto") for call in runner.calls))
 
     def test_offsite_state_requires_remote_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
