@@ -446,6 +446,8 @@ sudo vwctl doctor --json
 sudo vwctl backup
 ```
 
+If an offsite backup fails with **`offsite recovery object already exists`**, the appliance intentionally did **not** overwrite the existing cloud object. Keep both the existing remote object and the new local `.vwrec`; investigate unexpected filename reuse or external storage changes before choosing a new destination. Do **not** use a raw `rclone copyto --immutable` overwrite test against a recovery point you intend to restore: some older provider/rclone combinations have been observed to replace it. Exercise collision handling only through the appliance on a disposable test prefix.
+
 ### Common offsite-backup misunderstandings
 
 - If the daily timer produces only local backups, run `sudo vwctl recovery offsite status`. Local-only is the default until you save an offsite destination with `sudo vwctl recovery offsite configure`; after configuration, the next daily job uploads and verifies automatically.
