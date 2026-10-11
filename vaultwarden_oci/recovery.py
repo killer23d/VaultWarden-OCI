@@ -1145,7 +1145,7 @@ def list_remote(remote: str, *, runner: Runner = run_command) -> list[dict[str, 
         for item in payload
         if isinstance(item, dict)
         and isinstance(item.get("Name"), str)
-        and item["Name"].endswith(".vwrec")
+        and item["Name"].casefold().endswith(".vwrec")
     ]
 
 
