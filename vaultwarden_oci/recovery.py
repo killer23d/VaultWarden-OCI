@@ -670,13 +670,28 @@ def publish_offsite(
     _verify_age_artifact(verified.artifact)
     if verified.artifact.stat().st_size != verified.size or _sha256(verified.artifact) != verified.sha256:
         raise RecoveryError("local recovery artifact changed before offsite publication")
-    ok, message = rclone_diagnostics(remote, runner=runner)
-    if not ok:
-        raise RecoveryError(message)
+    # The backend's --immutable handling alone is insufficient as a safety
+    # boundary: some older rclone/backend combinations can overwrite an object
+    # despite that flag. Enumerate the exact destination folder first and
+    # refuse an existing name, even when its content appears identical.
+    # A failed listing must fail closed before any upload.
+    existing = list_remote(remote, runner=runner)
+    if any(
+        str(item["Name"]).casefold() == verified.artifact.name.casefold()
+        for item in existing
+    ):
+        raise RecoveryError(
+            "offsite recovery object already exists; refusing to overwrite "
+            f"{verified.artifact.name}"
+        )
     destination = _remote_object(remote, verified.artifact.name)
-    # Refuse to replace an existing object with changed bytes. Recovery history
-    # is append-only during routine publication; deletion is retention's job.
-    upload = runner(["rclone", "copyto", str(verified.artifact), destination, "--immutable"])
+    # The additional ignore-existing flag prevents updates if an object
+    # appears between the listing and the transfer on a compliant backend.
+    # Neither flag replaces the independent download/sha256 verification.
+    upload = runner([
+        "rclone", "copyto", str(verified.artifact), destination,
+        "--immutable", "--ignore-existing",
+    ])
     if not upload.ok:
         raise _safe_error("rclone publication", upload)
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-verify-", dir=str(paths.backups)) as directory:
