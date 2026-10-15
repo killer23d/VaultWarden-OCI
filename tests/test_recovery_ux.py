@@ -152,17 +152,71 @@ class RecoveryInventoryTests(unittest.TestCase):
 
     def test_mocked_remote_inventory_newest_first_and_size(self) -> None:
         entries = [
-            {"Name": "recovery-20260820T010000Z-a.vwrec", "Size": 100},
-            {"Name": "ignore.txt", "Size": 2},
-            {"Name": "recovery-20260820T030000Z-c.vwrec", "Size": 300},
+            {"Name": "recovery-20260820T010000Z-a.vwrec", "Path": "recovery-20260820T010000Z-a.vwrec", "Size": 100},
+            {"Name": "ignore.txt", "Path": "ignore.txt", "Size": 2},
+            {"Name": "recovery-20260820T030000Z-c.vwrec", "Path": "recovery-20260820T030000Z-c.vwrec", "Size": 300},
         ]
         with tempfile.TemporaryDirectory() as directory:
             paths = paths_for(Path(directory))
-            with mock.patch.object(recovery, "list_remote", return_value=entries):
+            with mock.patch.object(recovery, "list_remote", return_value=entries) as listing:
                 points = recovery_ux.list_remote_points("offsite:recovery", paths=paths)
+        listing.assert_called_once_with("offsite:recovery", recursive=True, runner=recovery.run_command)
         self.assertEqual([point.name for point in points], [entries[2]["Name"], entries[0]["Name"]])
         self.assertEqual([point.size for point in points], [300, 100])
         self.assertTrue(all(point.source == "remote" for point in points))
+
+    def test_parent_folder_finds_nested_backups_and_distinguishes_duplicate_filenames(self) -> None:
+        older = "recovery-20261011T002612Z-1111.vwrec"
+        newer = "recovery-20261015T221732Z-2222.vwrec"
+        entries = [
+            {"Name": older, "Path": f"pr372-old/{older}", "Size": 222},
+            {"Name": newer, "Path": f"pr372-a/{newer}", "Size": 300},
+            {"Name": newer, "Path": f"pr372-b/deep/{newer}", "Size": 301},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            paths.state_file.parent.mkdir(parents=True)
+            nested_object = "bw-backup:bw-backup/pr372-b/deep/" + newer
+            paths.state_file.write_text(
+                json.dumps({"verified_objects": {nested_object: {"verified_at": "2026-10-15T23:00:00Z", "size": 301}}}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(recovery, "list_remote", return_value=entries):
+                points = recovery_ux.list_remote_points("bw-backup:bw-backup", paths=paths)
+        self.assertEqual(len(points), 3)
+        self.assertEqual(points[-1].name, older)
+        self.assertEqual(
+            {p.location for p in points},
+            {
+                "bw-backup:bw-backup/pr372-old/" + older,
+                "bw-backup:bw-backup/pr372-a/" + newer,
+                "bw-backup:bw-backup/pr372-b/deep/" + newer,
+            },
+        )
+        self.assertEqual(next(p for p in points if p.location == nested_object).verification, "previously-verified")
+
+    def test_recursive_remote_listing_rejects_missing_unsafe_or_inconsistent_paths(self) -> None:
+        name = "recovery-20261015T221732Z-2222.vwrec"
+        invalid = (
+            {"Name": name},
+            {"Name": name, "Path": "../" + name},
+            {"Name": name, "Path": "/" + name},
+            {"Name": name, "Path": "folder//" + name},
+            {"Name": name, "Path": "folder/./" + name},
+            {"Name": name, "Path": "folder/../" + name},
+            {"Name": name, "Path": "folder\\" + name},
+            {"Name": name, "Path": "folder/\x1b" + name},
+            {"Name": "different.vwrec", "Path": "folder/" + name},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            for entry in invalid:
+                with self.subTest(entry=entry):
+                    with (
+                        mock.patch.object(recovery, "list_remote", return_value=[entry]),
+                        self.assertRaisesRegex(recovery_ux.RecoveryUXError, "rclone"),
+                    ):
+                        recovery_ux.list_remote_points("offsite:backups", paths=paths)
 
     def test_verify_is_nondestructive_and_records_existing_recovery_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -539,6 +593,93 @@ class GuidedRestoreTests(unittest.TestCase):
         ):
             self.assertEqual(recovery_ux.guided_restore(ui=recovery_ux.UI(color=False)), 0)
         restore.assert_not_called()
+
+    def test_guided_remote_nested_point_cancel_preserves_live_state(self) -> None:
+        point = recovery_ux.RecoveryPoint(
+            "remote",
+            "recovery-20261015T221732Z-2222.vwrec",
+            "bw-backup:bw-backup/deep/test/recovery-20261015T221732Z-2222.vwrec",
+            70,
+            "2026-10-15T22:17:32Z",
+            "unknown",
+        )
+        answers = iter(["2", "bw-backup:bw-backup", "1", "CANCEL"])
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            paths.backups.mkdir(parents=True)
+            def download(selected, destination, *, runner=None):
+                self.assertEqual(selected, point.location)
+                destination.write_bytes(b"verified encrypted fixture")
+                return destination
+            verified = recovery.VerifiedRecovery(
+                Path("/temporary/verified.vwrec"), "b" * 64, 70, point.created_at,
+            )
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux, "list_remote_points", return_value=[point]) as listing,
+                mock.patch.object(
+                    recovery_ux, "_offline_identity_for_command",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(Path("/tmp/offline.age")),
+                ),
+                mock.patch.object(recovery_ux.storage, "verify"),
+                mock.patch.object(recovery, "download_remote", side_effect=download) as downloaded,
+                mock.patch.object(recovery_ux, "verify_local", return_value=verified) as verify,
+                mock.patch.object(recovery, "restore_recovery") as restore,
+            ):
+                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False)), 0)
+            listing.assert_called_once_with(
+                "bw-backup:bw-backup", paths=paths, runner=recovery.run_command,
+            )
+            downloaded.assert_called_once()
+            self.assertFalse(verify.call_args.kwargs["record"])
+            restore.assert_not_called()
+            self.assertFalse(paths.state_file.exists())
+
+    def test_guided_remote_nested_point_restores_exact_selected_download(self) -> None:
+        point = recovery_ux.RecoveryPoint(
+            "remote",
+            "recovery-20261015T221732Z-2222.vwrec",
+            "bw-backup:bw-backup/test/deeper/recovery-20261015T221732Z-2222.vwrec",
+            80,
+            "2026-10-15T22:17:32Z",
+            "unknown",
+        )
+        answers = iter(["2", "bw-backup:bw-backup", "1", "RESTORE"])
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            paths.backups.mkdir(parents=True)
+            def download(selected, destination, *, runner=None):
+                self.assertEqual(selected, point.location)
+                destination.write_bytes(b"selected nested remote recovery point")
+                return destination
+            def verify(artifact, identity, **kwargs):
+                self.assertEqual(artifact.read_bytes(), b"selected nested remote recovery point")
+                self.assertFalse(kwargs["record"])
+                self.assertEqual(kwargs["state_location"], point.location)
+                return recovery.VerifiedRecovery(artifact, "c" * 64, artifact.stat().st_size, point.created_at)
+            def restore_exact(artifact, identity, **kwargs):
+                self.assertEqual(artifact.read_bytes(), b"selected nested remote recovery point")
+                return {"created_at": point.created_at}
+            with (
+                mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch.object(recovery_ux, "list_remote_points", return_value=[point]),
+                mock.patch.object(
+                    recovery_ux, "_offline_identity_for_command",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(Path("/tmp/offline.age")),
+                ),
+                mock.patch.object(recovery_ux.storage, "verify"),
+                mock.patch.object(recovery, "download_remote", side_effect=download) as downloaded,
+                mock.patch.object(recovery_ux, "verify_local", side_effect=verify) as verified,
+                mock.patch.object(recovery, "restore_recovery", side_effect=restore_exact) as restored,
+            ):
+                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False)), 0)
+            downloaded.assert_called_once()
+            verified.assert_called_once()
+            restored.assert_called_once()
 
     def test_dedicated_storage_preflight_blocks_before_recovery_verification(self) -> None:
         with (
