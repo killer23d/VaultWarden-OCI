@@ -1127,11 +1127,20 @@ def restore_from_remote(
         return restore_recovery(local, identity, paths=paths, runner=runner, start=start)
 
 
-def list_remote(remote: str, *, runner: Runner = run_command) -> list[dict[str, object]]:
+def list_remote(
+    remote: str,
+    *,
+    recursive: bool = False,
+    runner: Runner = run_command,
+) -> list[dict[str, object]]:
+    """List recovery objects. Recursive discovery is read-only; pruning stays flat."""
     ok, message = rclone_diagnostics(remote, runner=runner)
     if not ok:
         raise RecoveryError(message)
-    result = runner(["rclone", "lsjson", remote, "--files-only"])
+    command = ["rclone", "lsjson", remote, "--files-only"]
+    if recursive:
+        command.append("--recursive")
+    result = runner(command)
     if not result.ok:
         raise _safe_error("rclone remote listing", result)
     try:
