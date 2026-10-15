@@ -18,7 +18,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Mapping, Sequence
 
 from . import notification, offsite, recovery, runtime, secrets, sevenzip_secure, storage
@@ -105,8 +105,8 @@ def _created_from_name(name: str, fallback: datetime | None = None) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _sort_key(point: RecoveryPoint) -> tuple[str, str]:
-    return point.created_at, point.name
+def _sort_key(point: RecoveryPoint) -> tuple[str, str, str]:
+    return point.created_at, point.name, point.location
 
 
 def _known_verifications(paths: recovery.RecoveryPaths) -> dict[str, Mapping[str, object]]:
@@ -173,11 +173,25 @@ def list_remote_points(
 ) -> list[RecoveryPoint]:
     known = _known_verifications(paths)
     points: list[RecoveryPoint] = []
-    for item in recovery.list_remote(remote, runner=runner):
-        raw_name = item.get("Path") if isinstance(item.get("Path"), str) else item.get("Name")
-        if not isinstance(raw_name, str) or not raw_name.endswith(".vwrec"):
-            continue
-        name = Path(raw_name).name
+    # rclone lsjson --recursive returns Path relative to the chosen folder,
+    # and Name as its basename. Never rebuild a nested object from Name alone:
+    # different subfolders can contain recovery points with the same name.
+    for item in recovery.list_remote(remote, recursive=True, runner=runner):
+        relative = item.get("Path")
+        if not isinstance(relative, str):
+            raise RecoveryUXError("rclone recursive recovery listing is missing a relative object path")
+        pure = PurePosixPath(relative)
+        if (
+            not relative
+            or pure.is_absolute()
+            or pure.as_posix() != relative
+            or any(part in {".", ".."} for part in pure.parts)
+            or "\\" in relative
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+            or item.get("Name") != pure.name
+        ):
+            raise RecoveryUXError("rclone returned an unsafe or inconsistent recovery object path")
+        name = pure.name
         size = item.get("Size", 0)
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             size = 0
@@ -185,7 +199,7 @@ def list_remote_points(
         created = _created_from_name(name)
         if not _RECOVERY_NAME.search(name) and isinstance(modtime, str):
             created = modtime
-        location = recovery._remote_object(remote, raw_name)
+        location = recovery._remote_object(remote, relative)
         points.append(
             RecoveryPoint(
                 "remote",
@@ -573,7 +587,7 @@ def guided_restore(
     ui = ui or UI()
     ui.header("Guided restore")
     print("  1) Local recovery points")
-    print("  2) Remote recovery points (rclone)")
+    print("  2) Remote recovery points (rclone, including subfolders)")
     print("  q) Cancel")
     source_choice = _choice("Choose recovery source: ", 2)
     if source_choice is None:
@@ -592,16 +606,17 @@ def guided_restore(
         if configured:
             ui.info(f"Configured offsite destination: {configured}")
             if input("Use configured destination? [Y/n]: ").strip().lower() in {"n", "no"}:
-                remote = input("Other rclone REMOTE:path: ").strip()
+                remote = input("Other rclone REMOTE:folder (searches subfolders): ").strip()
         else:
-            remote = input("rclone REMOTE:path containing recovery points: ").strip()
+            remote = input("rclone REMOTE:folder to search (including subfolders): ").strip()
         if not remote:
             raise RecoveryUXError("remote recovery source is required")
+        ui.info(f"Searching recovery points under {remote}, including subfolders...")
         points = list_remote_points(remote, paths=paths, runner=runner)
         ui.header("Remote recovery points (newest first)")
         print_inventory(points)
         if not points:
-            raise RecoveryUXError("no remote .vwrec recovery points are available")
+            raise RecoveryUXError(f"no remote .vwrec recovery points found under {remote} or its subfolders")
 
     selected_index = _choice("Choose recovery point number (or q to cancel): ", len(points))
     if selected_index is None:
