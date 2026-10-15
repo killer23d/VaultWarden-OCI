@@ -86,6 +86,8 @@ The explicit `--remote` passed to `sudo vwctl backup --remote 'another:folder'` 
 
 The rclone connection/credentials must separately survive total server loss; they are **not** in the application `.vwrec` or credential-recovery ZIP. An optional rclone crypt remote is compatible but does not replace offline Age private-key custody. Automatic pruning is disabled by default. To opt in, set `local_retention_days` and/or `remote_retention_days` in `[backup]`; positive values delete only recovery files older than the configured age after the new backup has completely succeeded. Remote publication failure therefore retains both the new local backup and all older history. A successful remote checksum roundtrip alone does not prove that the **offline recovery key** can decrypt a backup.
 
+For recursive discovery under an existing Box backup folder, run `sudo vwctl recovery list --remote 'bw-backup:bw-backup'`. This includes recovery points in child directories and shows their full object locations. Explicit `--from-remote` verification or restoration still requires the selected **full object path**.
+
 ## Same-host restore
 
 Use this when the server is intact and the canonical dedicated storage identity still passes. **Restore replaces live application state and involves downtime.** Practice on a disposable host rather than risking your only production copy.
@@ -99,7 +101,7 @@ sudo vwctl restore
 ```
 
 1. Choose local or remote.
-2. If you choose remote, accept the saved offsite destination or enter another remote path. Select a recovery point from the newest-first numbered inventory.
+2. If you choose remote, accept the saved offsite destination or enter a **parent folder** using `REMOTE:folder` syntax. The picker searches that folder **and all subfolders** for encrypted `.vwrec` recovery files, displays the exact object path for each, and lets you choose a numbered recovery point (newest first). **You do not need the exact recovery filename or its nested directory.** For example, with Box backups under `bw-backup:bw-backup/pr372-...`, enter only `bw-backup:bw-backup`. The recovery listing is read-only and does not prune any nested files.
 3. Supply the matching offline Age private identity through the interactive chooser:
    - press Enter to paste an `AGE-SECRET-KEY` with input echo disabled;
    - select an existing identity file from removable media or another secure path; or
