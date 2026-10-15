@@ -66,7 +66,7 @@ The guided setup lists root's existing rclone remotes, asks for a destination fo
 
 For disaster recovery, `sudo vwctl restore` lists numbered local or remote backup choices and reuses the saved remote destination. Independent offline-private-key verification, recovery-kit custody, and a disposable-host restore drill are still required. Automatic deletion remains disabled unless an administrator explicitly sets a positive retention-days value. The rclone configuration is not contained in a `.vwrec` or recovery-kit ZIP.
 
-The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, guided restore, full server loss, and retention.
+The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, guided restore, full server loss, and retention. Guided remote restore now searches all recovery subfolders under an entered rclone folder (for example, `bw-backup:bw-backup`) and lists each nested `.vwrec` with its exact location; the operator does not have to know the leaf folder or filename. Recursive discovery is read-only and does not broaden the automatic prune scope.
 
 ## Which guide should I read?
 
