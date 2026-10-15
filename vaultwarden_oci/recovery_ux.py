@@ -177,6 +177,8 @@ def list_remote_points(
     # and Name as its basename. Never rebuild a nested object from Name alone:
     # different subfolders can contain recovery points with the same name.
     for item in recovery.list_remote(remote, recursive=True, runner=runner):
+        if not isinstance(item.get("Name"), str) or not item["Name"].casefold().endswith(".vwrec"):
+            continue
         relative = item.get("Path")
         if not isinstance(relative, str):
             raise RecoveryUXError("rclone recursive recovery listing is missing a relative object path")
