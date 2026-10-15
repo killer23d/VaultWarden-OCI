@@ -448,6 +448,8 @@ sudo vwctl backup
 
 If an offsite backup fails with **`offsite recovery object already exists`**, the appliance intentionally did **not** overwrite the existing cloud object. Keep both the existing remote object and the new local `.vwrec`; investigate unexpected filename reuse or external storage changes before choosing a new destination. Do **not** use a raw `rclone copyto --immutable` overwrite test against a recovery point you intend to restore: some older provider/rclone combinations have been observed to replace it. Exercise collision handling only through the appliance on a disposable test prefix.
 
+**Remote restore shows no recovery points?** Enter the configured root **folder**, not just the remote name: `bw-backup:bw-backup` rather than `bw-backup`. Guided `sudo vwctl restore` and `sudo vwctl recovery list --remote 'bw-backup:bw-backup'` search that folder recursively, including `pr372-*` subdirectories. Verify root's access and the selected scope with `sudo rclone lsf 'bw-backup:bw-backup' --recursive --files-only`. The inventory lists backup candidates but does **not** decrypt them; the chosen recovery still requires full Age/SOPS verification and an exact `RESTORE` confirmation. Explicit `--from-remote` continues to expect an individual full object path. A listing failure is an error, not an empty recovery history. This broader **read-only** discovery never expands retention/prune deletion into subfolders.
+
 ### Common offsite-backup misunderstandings
 
 - If the daily timer produces only local backups, run `sudo vwctl recovery offsite status`. Local-only is the default until you save an offsite destination with `sudo vwctl recovery offsite configure`; after configuration, the next daily job uploads and verifies automatically.
