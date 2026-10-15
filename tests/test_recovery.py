@@ -495,6 +495,21 @@ class RecoveryIntegrationTests(unittest.TestCase):
 
 
 class RcloneTests(unittest.TestCase):
+    def test_recursive_listing_is_opt_in_and_retention_listing_remains_flat(self) -> None:
+        runner = FakeRunner()
+        root = "offsite:recovery"
+        flat = recovery.list_remote(root, runner=runner)
+        nested = recovery.list_remote(root, recursive=True, runner=runner)
+        self.assertEqual(flat, nested)
+        listings = [call for call in runner.calls if call[:2] == ("rclone", "lsjson")]
+        self.assertEqual(
+            listings,
+            [
+                ("rclone", "lsjson", root, "--files-only"),
+                ("rclone", "lsjson", root, "--files-only", "--recursive"),
+            ],
+        )
+
     def test_publish_is_copyto_then_remote_verify_and_never_sync(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
