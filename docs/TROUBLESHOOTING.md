@@ -431,7 +431,8 @@ The new local recovery point should be present and recorded as verified.
 **Diagnose:** use the same explicit remote you configured/selected for the operation:
 
 ```bash
-sudo vwctl recovery list --remote 'REMOTE:path'
+sudo vwctl recovery offsite status
+sudo vwctl recovery list
 sudo vwctl doctor --json
 ```
 
@@ -442,15 +443,21 @@ sudo vwctl doctor --json
 **Verify:** after the remote is healthy, explicitly publish a new verified point:
 
 ```bash
-sudo vwctl backup --remote 'REMOTE:path'
+sudo vwctl backup
 ```
+
+If an offsite backup fails with **`offsite recovery object already exists`**, the appliance intentionally did **not** overwrite the existing cloud object. Keep both the existing remote object and the new local `.vwrec`; investigate unexpected filename reuse or external storage changes before choosing a new destination. Do **not** use a raw `rclone copyto --immutable` overwrite test against a recovery point you intend to restore: some older provider/rclone combinations have been observed to replace it. Exercise collision handling only through the appliance on a disposable test prefix.
+
+**Restore cancelled or unexpectedly attempted to restore?** The final prompt is an authorization boundary: type `CANCEL` (or anything other than uppercase `RESTORE`) to keep live Vaultwarden, Caddy, configuration, and database unchanged. Typing `RESTORE` deliberately begins the restore transaction for the **selected exact object**, so confirm the complete path displayed in the preflight summary first. An acceptance harness may deliberately hold the global mutation lock to prevent an accidental `RESTORE`; a reported `another mutating vwctl operation holds /run/vaultwarden-oci/lock` in that special test means the restore was blocked. Explicit interactive `--file`/`--from-remote` commands now require the same typed confirmation; unattended explicit restores require `--identity` plus `--confirm RESTORE`. Recovery verification and cancellation can create and remove protected temporary staging files but must not replace live state or stop containers.
+
+**Remote restore shows no recovery points?** Enter the configured root **folder**, not just the remote name: `bw-backup:bw-backup` rather than `bw-backup`. Guided `sudo vwctl restore` and `sudo vwctl recovery list --remote 'bw-backup:bw-backup'` search that folder recursively, including `pr372-*` subdirectories. Verify root's access and the selected scope with `sudo rclone lsf 'bw-backup:bw-backup' --recursive --files-only`. The inventory lists backup candidates but does **not** decrypt them; the chosen recovery still requires full Age/SOPS verification and an exact `RESTORE` confirmation. Explicit `--from-remote` continues to expect an individual full object path. A listing failure is an error, not an empty recovery history. This broader **read-only** discovery never expands retention/prune deletion into subfolders.
 
 ### Common offsite-backup misunderstandings
 
-- If `sudo vwctl backup` passes but no object appears in cloud storage, that is **expected**: the daily timer runs local-only. To publish remotely, run `sudo vwctl backup --remote 'REMOTE:path'` explicitly.
-- If `sudo rclone listremotes` has no remote but your Ubuntu user's `rclone listremotes` does, you configured the **user's** remote rather than **root's**. Use `sudo rclone config` to configure the account used by `vwctl`; keep credentials safe.
+- If the daily timer produces only local backups, run `sudo vwctl recovery offsite status`. Local-only is the default until you save an offsite destination with `sudo vwctl recovery offsite configure`; after configuration, the next daily job uploads and verifies automatically.
+- If `sudo rclone listremotes` has no remote but your Ubuntu user's `rclone listremotes` does, you configured the **user's** remote rather than **root's**. Run `sudo rclone config` before `sudo vwctl recovery offsite configure`. The timer runs as root and must be able to refresh its root rclone credentials.
 - If the remote copy uploads successfully but Age verification fails, copying was successful but **recoverability is not proven**. Use the matching offline recovery private key; the server's operational key cannot substitute.
-- Local `.vwrec` files are not automatically deleted. Monitor the dedicated storage volume; there is no supported local-prune command. Remote pruning is explicit and separate.
+- Automatic pruning is disabled when `local_retention_days = 0` / `remote_retention_days = 0`. With a positive value, age pruning runs only after the current backup has fully succeeded; remote pruning additionally waits for upload and read-back verification. A failed publication does not trigger retention. Check `[backup]` in `/etc/vaultwarden-oci/config.toml` if storage use differs from your expectation.
 
 ## A recovery artifact cannot be verified
 

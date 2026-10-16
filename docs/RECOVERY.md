@@ -25,9 +25,9 @@ The `.vwrec` envelope uses Age. Its manifest `format_version = 2` is a real comp
 | --- | --- |
 | Scheduled local backup | Once daily at **03:15 server-local time**, plus up to 15 minutes of randomized delay, after `vaultwarden-oci.target` is enabled |
 | Local destination | `/var/lib/vaultwarden-oci/backups/` on the dedicated data volume (not protection against loss of that volume) |
-| Offsite backup | **Manual** through `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'`; enabling the timers does **not** upload backups |
+| Offsite backup | **Optional automatic** daily verified publication through the same backup timer, enabled with `sudo vwctl recovery offsite configure`; local-only until configured |
 | Offline-key verification | **Manual** with `vwctl recovery verify` and the matching off-server private Age identity |
-| Retention | No automatic deletion; remote prune is an explicit preview/confirm action, and there is no supported local prune command |
+| Retention | Opt-in age policy in `[backup]`: `local_retention_days` and `remote_retention_days`; `0` keeps indefinitely. Automatic pruning runs only after a successful backup/publication |
 | Recovery-kit ZIP | Separate, password-protected credential handoff; the normal `.vwrec` backup timer does **not** create or upload it |
 
 Backup briefly pauses running application containers for a consistent copy, snapshots SQLite, resumes the containers, and checks their health. It checks the staged manifest, then encrypts to the **offline public Age recipient**. The matching **private key** stays off-server, so a successful scheduled backup does **not** itself prove that the off-server key can decrypt the resulting file. Run an independent `recovery verify` periodically.
@@ -54,36 +54,39 @@ On an interactive terminal, verification offers secure paste of the matching off
 
 This verification decrypts the real `.vwrec`, checks the manifest/checksums and verifies the encrypted SOPS document, **without changing live application data**. A backup-created PASS and an rclone upload checksum are not substitutes for this key-based check.
 
-## Configure and publish offsite backups (rclone)
+## Configure automatic offsite backups (rclone)
 
-Setup **installs rclone but does not configure a cloud storage provider**. The appliance's commands run as **root**, so configure a remote for root rather than only your normal Ubuntu account.
+**Offsite copies are optional and off by default.** Once enabled, the existing daily backup timer creates a local encrypted recovery point, uploads it through rclone, re-downloads the uploaded bytes, and checks SHA-256. Local recovery points are retained if publication fails, but the service returns failure and reports the offsite problem. No new background scheduler or destructive `rclone sync` is used. To protect recovery history, publication checks the destination folder and refuses an existing filename before invoking rclone, also using `--ignore-existing` and `--immutable`. A collision is reported as a failed offsite job; the verified local `.vwrec` remains available. These precautions do not constitute provider-level WORM/object locking against unrelated external writers.
 
-1. Run `sudo rclone config` and follow your provider's authentication setup. For the examples below, name the remote `offsite`. Store the provider access details and rclone credentials separately off-host: neither `.vwrec` nor the recovery-kit ZIP includes your rclone configuration.
-2. Check root's remote connection:
-
-   ```bash
-   sudo rclone listremotes
-   sudo rclone lsf 'offsite:' --max-depth 1
-   ```
-
-3. Create **and upload** a new encrypted backup:
+1. Set up a cloud provider with `sudo rclone config`. The scheduled service uses **root's** rclone configuration, not the Ubuntu login user's configuration. Do not store provider tokens, passwords, or the offline Age private identity in `config.toml`.
+2. Run `sudo vwctl recovery offsite configure`. Choose a numbered rclone remote, provide a destination folder (default `Vaultwarden-OCI`), and type `ENABLE` to save it. This validates root's rclone remote before modifying the protected operator configuration.
+3. Run a first manual backup and inspect the results:
 
    ```bash
-   sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'
-   sudo vwctl recovery list --remote 'offsite:Vaultwarden-OCI'
+   sudo vwctl backup
+   sudo vwctl recovery offsite status
+   sudo vwctl recovery list
+   sudo vwctl timers
    ```
 
-   Replace the remote name/path with your own. The command uploads a local `.vwrec`, downloads it back, compares SHA-256, and reports offsite success only after that verification. No old remote file is removed.
-4. Pick a **real** remote filename from the listing and independently verify decryption using your offline identity:
+4. Verify actual Age/SOPS decryption periodically using the **separate offline private identity**, for example by choosing a remote filename from `recovery list`:
 
    ```bash
-   sudo vwctl recovery verify \
-     --from-remote 'offsite:Vaultwarden-OCI/recovery-REPLACE_ME.vwrec'
+   sudo vwctl recovery verify --from-remote 'offsite:Vaultwarden-OCI/recovery-REPLACE_ME.vwrec'
    ```
 
-A `.vwrec` is already encrypted by Age; an optional rclone crypt wrapper does not replace offline-key custody. Keep enough information and credentials **off the failed server** to access the cloud account and download a backup after disaster.
+For a headless administrator, configure the destination explicitly:
 
-**Important:** the bundled systemd backup timer only runs `vwctl backup`, without `--remote`. To maintain offsite copies with the current interface, repeat the explicit offsite command yourself. There is **no built-in scheduled remote publication**. Do not replace this verified copy-and-read-back process with destructive `rclone sync`.
+```bash
+sudo vwctl recovery offsite configure --remote 'offsite:Vaultwarden-OCI'
+sudo vwctl recovery offsite status
+```
+
+The explicit `--remote` passed to `sudo vwctl backup --remote 'another:folder'` overrides the saved destination **for that run only**. Do not change the scheduled unit or add a second timer. If you deliberately want local-only scheduled backups again, use `sudo vwctl recovery offsite disable` (or add `--confirm` for a headless invocation). Disabling does **not** delete local/remote backup files.
+
+The rclone connection/credentials must separately survive total server loss; they are **not** in the application `.vwrec` or credential-recovery ZIP. An optional rclone crypt remote is compatible but does not replace offline Age private-key custody. Automatic pruning is disabled by default. To opt in, set `local_retention_days` and/or `remote_retention_days` in `[backup]`; positive values delete only recovery files older than the configured age after the new backup has completely succeeded. Remote publication failure therefore retains both the new local backup and all older history. A successful remote checksum roundtrip alone does not prove that the **offline recovery key** can decrypt a backup.
+
+For recursive discovery under an existing Box backup folder, run `sudo vwctl recovery list --remote 'bw-backup:bw-backup'`. This includes recovery points in child directories and shows their full object locations. Explicit `--from-remote` verification or restoration still requires the selected **full object path**.
 
 ## Same-host restore
 
@@ -98,14 +101,14 @@ sudo vwctl restore
 ```
 
 1. Choose local or remote.
-2. Select the recovery point from the newest-first inventory.
+2. If you choose remote, accept the saved offsite destination or enter a **parent folder** using `REMOTE:folder` syntax. The picker searches that folder **and all subfolders** for encrypted `.vwrec` recovery files, displays the exact object path for each, and lets you choose a numbered recovery point (newest first). **You do not need the exact recovery filename or its nested directory.** For example, with Box backups under `bw-backup:bw-backup/pr372-...`, enter only `bw-backup:bw-backup`. The recovery listing is read-only and does not prune any nested files.
 3. Supply the matching offline Age private identity through the interactive chooser:
    - press Enter to paste an `AGE-SECRET-KEY` with input echo disabled;
    - select an existing identity file from removable media or another secure path; or
    - select a local encrypted recovery-kit ZIP discovered under `/root/vaultwarden-recovery/`.
-4. Review storage/decryption/manifest/SOPS/free-space/SQLite preflight.
-5. Review the live state that will be replaced.
-6. Type the exact `RESTORE` confirmation.
+4. Review the dedicated-storage gate, downloaded backup, decryption, manifest/checksums, and SOPS custody preflight. The remaining free-space, ownership, SQLite, and staged promotion checks run **after** your final authorization but **before** the application is stopped.
+5. Review the **full exact source path** and the live state that would be replaced. If you selected the wrong recovery point, type `CANCEL`; `RESTORE` is an authorization to replace live data from the selected point.
+6. Type the exact uppercase `RESTORE` confirmation **only when you intend to replace live state**. Any other text cancels without stopping services or replacing live data.
 7. After promotion, start when ready if you did not request automatic start.
 
 Explicit local form:
@@ -125,7 +128,16 @@ sudo vwctl restore \
   --start
 ```
 
-A remote object is downloaded once into protected staging; that exact download is verified and restored. All knowable checks run before the mutation boundary/service stop.
+Both explicit forms display the verified source and then require you to type `RESTORE` on a terminal. To perform an **unattended** explicit restore, supply the full chosen file/object path, the offline identity, and intentional consent in the command itself:
+
+```bash
+sudo vwctl restore --file /secure/recovery.vwrec \
+  --identity /secure/offline-age-key.txt --confirm RESTORE
+```
+
+Do not pass `--confirm RESTORE` when your purpose is to preview or cancel a restore. It is only accepted with an explicit `--file` or `--from-remote` source, not the guided picker.
+
+A remote object is downloaded once into protected, automatically cleaned staging; that **same download** is verified and, **only after confirmation**, restored. Interactive explicit `--file` and `--from-remote` commands require the same final typed `RESTORE` confirmation as the guided picker. A **noninteractive** explicit restore fails closed unless both `--identity` and the deliberate `--confirm RESTORE` argument are supplied. Read-only discovery and pre-confirm verification do **not** stop containers, disable timers, replace live state, or update recovery verification metadata. The preflight may create temporary files in protected staging (and rclone may refresh its authentication token). After consent, the engine stages the candidate, checks free space/SQLite/ownership, and finally stops containers and promotes the restored state under the global mutation lock.
 
 Interactive restore and verification display the configured public offline recovery recipient before asking for the matching private identity. The offline private key is **not stored on the appliance by default**. Pasted identities and identities extracted from a recovery-kit ZIP exist only in root-owned protected volatile storage under `/run/vaultwarden-oci`, mode `0600`, and are removed when the command completes, fails, is cancelled, or is interrupted. The operational key at `/etc/vaultwarden-oci/age-key.txt` is a different identity and is not a substitute for offline recovery.
 
@@ -168,6 +180,8 @@ This is intentionally a different procedure from same-host restore.
    sudo vwctl dns update --dry-run
    ```
 
+   On an interactive terminal, review the verified source and type `RESTORE` at the final confirmation. In headless automation, add `--identity /secure/offline-age-key.txt --confirm RESTORE` explicitly.
+
    Restore replaces the Vaultwarden data/SQLite database, Caddy persistent state, config, and encrypted secrets. It retains or regenerates/rekeys the new host's **operational** Age identity as needed, while the **offline private key stays in your separate custody**. It does not restore Ubuntu, packages, firewall service setup, or root's rclone configuration.
 
    Complete the standard Cloudflare/CrowdSec security activation and the **Worker Route Fail Open** confirmation in [Install, Step 6](INSTALL.md#6-validate-and-activate-security) **before** starting. Then follow [Install, Step 7](INSTALL.md#7-start-update-dns-and-create-the-first-backup): start the recovered app, check status/doctor, **only then** update the existing Cloudflare A record to the new host, create a verified backup, and enable timers. If the old host is still active, plan the DNS cutover deliberately rather than blindly overriding live traffic.
@@ -206,7 +220,7 @@ The command proves the supplied offline identity matches config, proves both ope
 
 **Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP. Interactive recovery-kit selection also supplies this passphrase with echo disabled and the secure 7-Zip stdin transport; it is never placed in argv or the environment.
 
-For non-TTY restore/verify callers, omission of `--identity` is an immediate error. For non-TTY recovery-kit export, omission of `--offline-identity` is an immediate error. Noninteractive workflows never read `/dev/tty`, choose a local recovery kit automatically, or attempt to recover a private identity on their own.
+For non-TTY explicit restore callers, both `--identity` and `--confirm RESTORE` are required; missing confirmation fails before recovery staging or live mutation. For non-TTY recovery verification callers, omission of `--identity` is an immediate error. For non-TTY recovery-kit export, omission of `--offline-identity` is an immediate error. Noninteractive workflows never read `/dev/tty`, choose a local recovery kit automatically, or attempt to recover a private identity on their own.
 
 **Transient-key custody:** after successful first-run handoff, the setup-generated offline private identity must no longer exist on the appliance. If setup reports a failed handoff and says that the transient identity remains in `/run`, secure that exact identity before reboot; losing it can strand recovery material already addressed to its public recipient.
 
@@ -222,7 +236,7 @@ Enter the passphrase interactively when prompted.
 
 **Expected success:** exactly the documented members extract. **On failure:** after repeated passphrase/integrity failure, retrieve another verified custody copy; do not weaken or convert the archive in place.
 
-## Retention is separate
+## Retention and explicit cleanup
 
 Plan deletion first:
 
@@ -236,9 +250,18 @@ Execute only after review:
 sudo vwctl recovery prune --remote 'REMOTE:path' --keep-last 7 --confirm
 ```
 
-Creating/publishing a recovery point **never implicitly prunes** older offsite material. The prune command affects only `.vwrec` files under the **specified remote path**; review the Keep/Delete plan and independently verify the retained recovery points and matching Age private identity before confirming.
+The explicit prune command affects only `.vwrec` files under the **specified remote path**; review the Keep/Delete plan and independently verify the retained recovery points and matching Age private identity before confirming.
 
-**Local backup files accumulate daily, too.** There is currently **no supported local `vwctl recovery prune` subcommand** or automatic local-retention setting. Monitor free space with `df -h /var/lib/vaultwarden-oci`. Do not delete the only working recovery point to free space; first verify an independent offsite copy and agree on a retention policy. Neither local nor remote backup jobs automatically refresh the credential recovery-kit ZIP, so refresh its secure off-server custody after credential rotation.
+For routine age-based retention, configure the operator TOML:
+
+```toml
+[backup]
+remote = "offsite:Vaultwarden-OCI"
+local_retention_days = 30
+remote_retention_days = 90
+```
+
+`0` means keep indefinitely. A positive value prunes files older than that many days only after the current backup has succeeded; configured remote retention waits for upload **and read-back checksum verification**. The just-created recovery point is protected. A one-time `--remote` override never causes automatic deletion on that alternate remote. If pruning itself fails, the backup service reports failure, but the newly verified recovery point remains. Neither local nor remote backup jobs automatically refresh the credential recovery-kit ZIP, so refresh its secure off-server custody after credential rotation.
 
 ## Update recovery boundary
 

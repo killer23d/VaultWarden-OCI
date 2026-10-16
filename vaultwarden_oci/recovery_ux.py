@@ -18,10 +18,10 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Mapping, Sequence
 
-from . import notification, recovery, runtime, secrets, sevenzip_secure, storage
+from . import notification, offsite, recovery, runtime, secrets, sevenzip_secure, storage
 
 PUBLICATION_DIR = Path("/root/vaultwarden-recovery")
 SENSITIVE_RUN = Path("/run/vaultwarden-oci")
@@ -105,8 +105,8 @@ def _created_from_name(name: str, fallback: datetime | None = None) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _sort_key(point: RecoveryPoint) -> tuple[str, str]:
-    return point.created_at, point.name
+def _sort_key(point: RecoveryPoint) -> tuple[str, str, str]:
+    return point.created_at, point.name, point.location
 
 
 def _known_verifications(paths: recovery.RecoveryPaths) -> dict[str, Mapping[str, object]]:
@@ -141,7 +141,10 @@ def _verification_for(location: str, size: int, known: Mapping[str, Mapping[str,
 
 
 def list_local(paths: recovery.RecoveryPaths = recovery.RecoveryPaths()) -> list[RecoveryPoint]:
-    paths.backups.mkdir(parents=True, exist_ok=True)
+    # Inventory must remain read-only, even on a fresh appliance without a
+    # backups directory. Never create recovery storage before user approval.
+    if not paths.backups.is_dir():
+        return []
     known = _known_verifications(paths)
     points: list[RecoveryPoint] = []
     for artifact in paths.backups.glob("*.vwrec"):
@@ -173,11 +176,27 @@ def list_remote_points(
 ) -> list[RecoveryPoint]:
     known = _known_verifications(paths)
     points: list[RecoveryPoint] = []
-    for item in recovery.list_remote(remote, runner=runner):
-        raw_name = item.get("Path") if isinstance(item.get("Path"), str) else item.get("Name")
-        if not isinstance(raw_name, str) or not raw_name.endswith(".vwrec"):
+    # rclone lsjson --recursive returns Path relative to the chosen folder,
+    # and Name as its basename. Never rebuild a nested object from Name alone:
+    # different subfolders can contain recovery points with the same name.
+    for item in recovery.list_remote(remote, recursive=True, runner=runner):
+        if not isinstance(item.get("Name"), str) or not item["Name"].casefold().endswith(".vwrec"):
             continue
-        name = Path(raw_name).name
+        relative = item.get("Path")
+        if not isinstance(relative, str):
+            raise RecoveryUXError("rclone recursive recovery listing is missing a relative object path")
+        pure = PurePosixPath(relative)
+        if (
+            not relative
+            or pure.is_absolute()
+            or pure.as_posix() != relative
+            or any(part in {".", ".."} for part in pure.parts)
+            or "\\" in relative
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+            or item.get("Name") != pure.name
+        ):
+            raise RecoveryUXError("rclone returned an unsafe or inconsistent recovery object path")
+        name = pure.name
         size = item.get("Size", 0)
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             size = 0
@@ -185,7 +204,7 @@ def list_remote_points(
         created = _created_from_name(name)
         if not _RECOVERY_NAME.search(name) and isinstance(modtime, str):
             created = modtime
-        location = recovery._remote_object(remote, raw_name)
+        location = recovery._remote_object(remote, relative)
         points.append(
             RecoveryPoint(
                 "remote",
@@ -249,7 +268,9 @@ def verify_local(
     state_location: str | None = None,
     record: bool = True,
 ) -> recovery.VerifiedRecovery:
-    paths.backups.mkdir(parents=True, exist_ok=True)
+    # Verification is pre-consent and must never initialize persistent storage.
+    if not paths.backups.is_dir():
+        raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
     recovery._ensure_regular(artifact, "encrypted recovery artifact", nonempty=True)
     with tempfile.TemporaryDirectory(prefix="vwrec-inspect-", dir=str(paths.backups)) as directory:
         staging = Path(directory) / "extracted"
@@ -300,22 +321,31 @@ def restore_remote_once(
     remote_object: str,
     identity: Path,
     *,
+    approve: Callable[[recovery.VerifiedRecovery], bool],
     paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
     runner: recovery.Runner = recovery.run_command,
     start: bool = False,
-) -> Mapping[str, object]:
-    """Download one remote object, verify it, then restore those exact bytes."""
-    paths.backups.mkdir(parents=True, exist_ok=True)
+) -> Mapping[str, object] | None:
+    """Verify one remote download, then restore its exact bytes only if approved.
+
+    The approval callback runs after complete cryptographic preflight and must
+    return True before the recovery engine can touch live application state.
+    No verification metadata is recorded for a cancelled restore.
+    """
+    if not paths.backups.is_dir():
+        raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-restore-", dir=str(paths.backups)) as directory:
         local = recovery.download_remote(remote_object, Path(directory) / "remote.vwrec", runner=runner)
-        verify_local(
+        verified = verify_local(
             local,
             identity,
             paths=paths,
             runner=runner,
             state_location=remote_object,
-            record=True,
+            record=False,
         )
+        if not approve(verified):
+            return None
         return recovery.restore_recovery(local, identity, paths=paths, runner=runner, start=start)
 
 
@@ -561,6 +591,28 @@ def _restore_summary(point: RecoveryPoint, verified: recovery.VerifiedRecovery, 
     ui.info("Services are not stopped until the restore engine finishes staging, free-space, ownership, SQLite, and custody preflight.")
 
 
+def _restore_approved(
+    point: RecoveryPoint,
+    verified: recovery.VerifiedRecovery,
+    ui: UI,
+    *,
+    explicit_confirmation: bool = False,
+) -> bool:
+    """Require a final, deliberate authorization after selected-point preflight."""
+    _restore_summary(point, verified, ui)
+    if explicit_confirmation:
+        ui.info("explicit --confirm RESTORE supplied; proceeding with the verified recovery point")
+        return True
+    if not _interactive_tty():
+        raise RecoveryUXError(
+            "non-interactive explicit restore requires --confirm RESTORE; no live state was changed"
+        )
+    if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
+        ui.info("restore cancelled after preflight; no live state was changed")
+        return False
+    return True
+
+
 def guided_restore(
     *,
     start: bool = False,
@@ -573,7 +625,7 @@ def guided_restore(
     ui = ui or UI()
     ui.header("Guided restore")
     print("  1) Local recovery points")
-    print("  2) Remote recovery points (rclone)")
+    print("  2) Remote recovery points (rclone, including subfolders)")
     print("  q) Cancel")
     source_choice = _choice("Choose recovery source: ", 2)
     if source_choice is None:
@@ -587,14 +639,22 @@ def guided_restore(
         if not points:
             raise RecoveryUXError("no local .vwrec recovery points are available")
     else:
-        remote = input("rclone REMOTE:path containing recovery points: ").strip()
+        configured = runtime.load_config(paths.config).offsite_remote if paths.config.is_file() else None
+        remote = configured
+        if configured:
+            ui.info(f"Configured offsite destination: {configured}")
+            if input("Use configured destination? [Y/n]: ").strip().lower() in {"n", "no"}:
+                remote = input("Other rclone REMOTE:folder (searches subfolders): ").strip()
+        else:
+            remote = input("rclone REMOTE:folder to search (including subfolders): ").strip()
         if not remote:
             raise RecoveryUXError("remote recovery source is required")
+        ui.info(f"Searching recovery points under {remote}, including subfolders...")
         points = list_remote_points(remote, paths=paths, runner=runner)
         ui.header("Remote recovery points (newest first)")
         print_inventory(points)
         if not points:
-            raise RecoveryUXError("no remote .vwrec recovery points are available")
+            raise RecoveryUXError(f"no remote .vwrec recovery points found under {remote} or its subfolders")
 
     selected_index = _choice("Choose recovery point number (or q to cancel): ", len(points))
     if selected_index is None:
@@ -618,14 +678,13 @@ def guided_restore(
 
         if point.source == "local":
             artifact = Path(point.location)
-            verified = verify_local(artifact, identity, paths=paths, runner=runner)
-            _restore_summary(point, verified, ui)
-            if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
-                ui.info("restore cancelled after preflight; no live state was changed")
+            verified = verify_local(artifact, identity, paths=paths, runner=runner, record=False)
+            if not _restore_approved(point, verified, ui):
                 return 0
             manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
         else:
-            paths.backups.mkdir(parents=True, exist_ok=True)
+            if not paths.backups.is_dir():
+                raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
             with tempfile.TemporaryDirectory(prefix="vwrec-guided-remote-", dir=str(paths.backups)) as directory:
                 artifact = recovery.download_remote(point.location, Path(directory) / point.name, runner=runner)
                 verified = verify_local(
@@ -634,11 +693,9 @@ def guided_restore(
                     paths=paths,
                     runner=runner,
                     state_location=point.location,
-                    record=True,
+                    record=False,
                 )
-                _restore_summary(point, verified, ui)
-                if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
-                    ui.info("restore cancelled after preflight; no live state was changed")
+                if not _restore_approved(point, verified, ui):
                     return 0
                 manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
 
@@ -982,6 +1039,12 @@ def _parser() -> argparse.ArgumentParser:
         help="offline Age private identity file; interactive omission opens the secure source chooser",
     )
     restore.add_argument("--start", action="store_true")
+    restore.add_argument(
+        "--confirm",
+        choices=("RESTORE",),
+        metavar="RESTORE",
+        help="explicitly authorize an --file/--from-remote restore without a TTY prompt (required for headless use)",
+    )
 
     recovery_cmd = commands.add_parser("recovery", help="recovery inventory, verification, and retention")
     recovery_commands = recovery_cmd.add_subparsers(dest="recovery_command", required=True)
@@ -996,6 +1059,13 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="offline Age private identity file; interactive omission opens the secure source chooser",
     )
+    offsite_cmd = recovery_commands.add_parser("offsite", help="configure or inspect scheduled rclone publication")
+    offsite_actions = offsite_cmd.add_subparsers(dest="offsite_action", required=True)
+    configure = offsite_actions.add_parser("configure", help="choose root rclone remote and enable daily offsite backups")
+    configure.add_argument("--remote", help="explicit REMOTE:folder, required for headless use")
+    offsite_actions.add_parser("status", help="check configured destination and root rclone readiness")
+    disable = offsite_actions.add_parser("disable", help="turn off offsite publishing without removing backups")
+    disable.add_argument("--confirm", action="store_true", help="required for headless disabling")
     prune = recovery_commands.add_parser("prune", help="plan or execute explicit remote recovery pruning")
     prune.add_argument("--remote", required=True)
     prune.add_argument("--keep-last", required=True, type=int)
@@ -1021,6 +1091,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.file is None and args.from_remote is None:
                 if args.identity is not None:
                     raise RecoveryUXError("--identity requires an explicit --file/--from-remote source, or omit it for guided restore")
+                if args.confirm is not None:
+                    raise RecoveryUXError("--confirm RESTORE is allowed only with --file or --from-remote")
                 return guided_restore(start=args.start, ui=ui)
             with _offline_identity_for_command(
                 args.identity,
@@ -1030,24 +1102,60 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if identity is None:
                     ui.info("restore cancelled; no live state was changed")
                     return 0
+                # Refuse unattended mutation before downloading or staging anything.
+                if args.confirm is None and not _interactive_tty():
+                    raise RecoveryUXError(
+                        "non-interactive explicit restore requires --confirm RESTORE; no live state was changed"
+                    )
                 storage.verify()
+                confirmed = args.confirm == "RESTORE"
                 if args.file is not None:
-                    verify_local(args.file, identity)
+                    verified = verify_local(args.file, identity, record=False)
+                    point = RecoveryPoint(
+                        "local", args.file.name, str(args.file), verified.size,
+                        verified.created_at, "unknown",
+                    )
+                    if not _restore_approved(point, verified, ui, explicit_confirmation=confirmed):
+                        return 0
                     manifest = recovery.restore_recovery(args.file, identity, start=args.start)
                 else:
-                    manifest = restore_remote_once(args.from_remote, identity, start=args.start)
+                    remote_object = args.from_remote
+                    point = RecoveryPoint(
+                        "remote", Path(remote_object).name, remote_object, 0, "", "unknown",
+                    )
+                    manifest = restore_remote_once(
+                        remote_object,
+                        identity,
+                        approve=lambda verified: _restore_approved(
+                            point, verified, ui, explicit_confirmation=confirmed,
+                        ),
+                        start=args.start,
+                    )
+                    if manifest is None:
+                        return 0
                 ui.ok(f"restored recovery point created {manifest['created_at']}")
                 if not args.start:
                     ui.action("services remain stopped; run 'vwctl start' when ready")
                 return 0
 
         if args.command == "recovery":
+            if args.recovery_command == "offsite":
+                if args.offsite_action == "status":
+                    offsite.status()
+                elif args.offsite_action == "configure":
+                    offsite.configure(args.remote)
+                else:
+                    offsite.disable(confirmed=args.confirm)
+                return 0
             if args.recovery_command == "list":
                 ui.header("Local recovery points (newest first)")
                 print_inventory(list_local())
-                if args.remote:
+                selected_remote = args.remote
+                if selected_remote is None and recovery.CONFIG.is_file():
+                    selected_remote = runtime.load_config().offsite_remote
+                if selected_remote:
                     ui.header("Remote recovery points (newest first)")
-                    print_inventory(list_remote_points(args.remote))
+                    print_inventory(list_remote_points(selected_remote))
                 return 0
             if args.recovery_command == "verify":
                 with _offline_identity_for_command(
@@ -1109,12 +1217,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
     except (
         RecoveryUXError,
+        offsite.OffsiteError,
         notification.NotificationError,
         recovery.RecoveryError,
         runtime.RuntimeConfigError,
         secrets.SecretsError,
         sevenzip_secure.SevenZipError,
         storage.StorageError,
+        RuntimeError,
         OSError,
     ) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
