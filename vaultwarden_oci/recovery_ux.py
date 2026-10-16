@@ -268,7 +268,9 @@ def verify_local(
     state_location: str | None = None,
     record: bool = True,
 ) -> recovery.VerifiedRecovery:
-    paths.backups.mkdir(parents=True, exist_ok=True)
+    # Verification is pre-consent and must never initialize persistent storage.
+    if not paths.backups.is_dir():
+        raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
     recovery._ensure_regular(artifact, "encrypted recovery artifact", nonempty=True)
     with tempfile.TemporaryDirectory(prefix="vwrec-inspect-", dir=str(paths.backups)) as directory:
         staging = Path(directory) / "extracted"
@@ -330,7 +332,8 @@ def restore_remote_once(
     return True before the recovery engine can touch live application state.
     No verification metadata is recorded for a cancelled restore.
     """
-    paths.backups.mkdir(parents=True, exist_ok=True)
+    if not paths.backups.is_dir():
+        raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-restore-", dir=str(paths.backups)) as directory:
         local = recovery.download_remote(remote_object, Path(directory) / "remote.vwrec", runner=runner)
         verified = verify_local(
@@ -680,7 +683,8 @@ def guided_restore(
                 return 0
             manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
         else:
-            paths.backups.mkdir(parents=True, exist_ok=True)
+            if not paths.backups.is_dir():
+                raise RecoveryUXError("recovery staging directory is unavailable; no live state was changed")
             with tempfile.TemporaryDirectory(prefix="vwrec-guided-remote-", dir=str(paths.backups)) as directory:
                 artifact = recovery.download_remote(point.location, Path(directory) / point.name, runner=runner)
                 verified = verify_local(
