@@ -141,7 +141,10 @@ def _verification_for(location: str, size: int, known: Mapping[str, Mapping[str,
 
 
 def list_local(paths: recovery.RecoveryPaths = recovery.RecoveryPaths()) -> list[RecoveryPoint]:
-    paths.backups.mkdir(parents=True, exist_ok=True)
+    # Inventory must remain read-only, even on a fresh appliance without a
+    # backups directory. Never create recovery storage before user approval.
+    if not paths.backups.is_dir():
+        return []
     known = _known_verifications(paths)
     points: list[RecoveryPoint] = []
     for artifact in paths.backups.glob("*.vwrec"):
@@ -316,22 +319,30 @@ def restore_remote_once(
     remote_object: str,
     identity: Path,
     *,
+    approve: Callable[[recovery.VerifiedRecovery], bool],
     paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
     runner: recovery.Runner = recovery.run_command,
     start: bool = False,
-) -> Mapping[str, object]:
-    """Download one remote object, verify it, then restore those exact bytes."""
+) -> Mapping[str, object] | None:
+    """Verify one remote download, then restore its exact bytes only if approved.
+
+    The approval callback runs after complete cryptographic preflight and must
+    return True before the recovery engine can touch live application state.
+    No verification metadata is recorded for a cancelled restore.
+    """
     paths.backups.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vwrec-remote-restore-", dir=str(paths.backups)) as directory:
         local = recovery.download_remote(remote_object, Path(directory) / "remote.vwrec", runner=runner)
-        verify_local(
+        verified = verify_local(
             local,
             identity,
             paths=paths,
             runner=runner,
             state_location=remote_object,
-            record=True,
+            record=False,
         )
+        if not approve(verified):
+            return None
         return recovery.restore_recovery(local, identity, paths=paths, runner=runner, start=start)
 
 
@@ -577,6 +588,28 @@ def _restore_summary(point: RecoveryPoint, verified: recovery.VerifiedRecovery, 
     ui.info("Services are not stopped until the restore engine finishes staging, free-space, ownership, SQLite, and custody preflight.")
 
 
+def _restore_approved(
+    point: RecoveryPoint,
+    verified: recovery.VerifiedRecovery,
+    ui: UI,
+    *,
+    explicit_confirmation: bool = False,
+) -> bool:
+    """Require a final, deliberate authorization after selected-point preflight."""
+    _restore_summary(point, verified, ui)
+    if explicit_confirmation:
+        ui.info("explicit --confirm RESTORE supplied; proceeding with the verified recovery point")
+        return True
+    if not _interactive_tty():
+        raise RecoveryUXError(
+            "non-interactive explicit restore requires --confirm RESTORE; no live state was changed"
+        )
+    if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
+        ui.info("restore cancelled after preflight; no live state was changed")
+        return False
+    return True
+
+
 def guided_restore(
     *,
     start: bool = False,
@@ -643,9 +676,7 @@ def guided_restore(
         if point.source == "local":
             artifact = Path(point.location)
             verified = verify_local(artifact, identity, paths=paths, runner=runner, record=False)
-            _restore_summary(point, verified, ui)
-            if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
-                ui.info("restore cancelled after preflight; no live state was changed")
+            if not _restore_approved(point, verified, ui):
                 return 0
             manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
         else:
@@ -660,9 +691,7 @@ def guided_restore(
                     state_location=point.location,
                     record=False,
                 )
-                _restore_summary(point, verified, ui)
-                if input("Type RESTORE to replace the live state, or anything else to cancel: ").strip() != "RESTORE":
-                    ui.info("restore cancelled after preflight; no live state was changed")
+                if not _restore_approved(point, verified, ui):
                     return 0
                 manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
 
@@ -1006,6 +1035,12 @@ def _parser() -> argparse.ArgumentParser:
         help="offline Age private identity file; interactive omission opens the secure source chooser",
     )
     restore.add_argument("--start", action="store_true")
+    restore.add_argument(
+        "--confirm",
+        choices=("RESTORE",),
+        metavar="RESTORE",
+        help="explicitly authorize an --file/--from-remote restore without a TTY prompt (required for headless use)",
+    )
 
     recovery_cmd = commands.add_parser("recovery", help="recovery inventory, verification, and retention")
     recovery_commands = recovery_cmd.add_subparsers(dest="recovery_command", required=True)
@@ -1052,6 +1087,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.file is None and args.from_remote is None:
                 if args.identity is not None:
                     raise RecoveryUXError("--identity requires an explicit --file/--from-remote source, or omit it for guided restore")
+                if args.confirm is not None:
+                    raise RecoveryUXError("--confirm RESTORE is allowed only with --file or --from-remote")
                 return guided_restore(start=args.start, ui=ui)
             with _offline_identity_for_command(
                 args.identity,
@@ -1061,12 +1098,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if identity is None:
                     ui.info("restore cancelled; no live state was changed")
                     return 0
+                # Refuse unattended mutation before downloading or staging anything.
+                if args.confirm is None and not _interactive_tty():
+                    raise RecoveryUXError(
+                        "non-interactive explicit restore requires --confirm RESTORE; no live state was changed"
+                    )
                 storage.verify()
+                confirmed = args.confirm == "RESTORE"
                 if args.file is not None:
-                    verify_local(args.file, identity)
+                    verified = verify_local(args.file, identity, record=False)
+                    point = RecoveryPoint(
+                        "local", args.file.name, str(args.file), verified.size,
+                        verified.created_at, "unknown",
+                    )
+                    if not _restore_approved(point, verified, ui, explicit_confirmation=confirmed):
+                        return 0
                     manifest = recovery.restore_recovery(args.file, identity, start=args.start)
                 else:
-                    manifest = restore_remote_once(args.from_remote, identity, start=args.start)
+                    remote_object = args.from_remote
+                    point = RecoveryPoint(
+                        "remote", Path(remote_object).name, remote_object, 0, "", "unknown",
+                    )
+                    manifest = restore_remote_once(
+                        remote_object,
+                        identity,
+                        approve=lambda verified: _restore_approved(
+                            point, verified, ui, explicit_confirmation=confirmed,
+                        ),
+                        start=args.start,
+                    )
+                    if manifest is None:
+                        return 0
                 ui.ok(f"restored recovery point created {manifest['created_at']}")
                 if not args.start:
                     ui.action("services remain stopped; run 'vwctl start' when ready")
