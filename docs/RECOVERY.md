@@ -106,9 +106,9 @@ sudo vwctl restore
    - press Enter to paste an `AGE-SECRET-KEY` with input echo disabled;
    - select an existing identity file from removable media or another secure path; or
    - select a local encrypted recovery-kit ZIP discovered under `/root/vaultwarden-recovery/`.
-4. Review storage/decryption/manifest/SOPS/free-space/SQLite preflight.
-5. Review the live state that will be replaced.
-6. Type the exact `RESTORE` confirmation.
+4. Review the dedicated-storage gate, downloaded backup, decryption, manifest/checksums, and SOPS custody preflight. The remaining free-space, ownership, SQLite, and staged promotion checks run **after** your final authorization but **before** the application is stopped.
+5. Review the **full exact source path** and the live state that would be replaced. If you selected the wrong recovery point, type `CANCEL`; `RESTORE` is an authorization to replace live data from the selected point.
+6. Type the exact uppercase `RESTORE` confirmation **only when you intend to replace live state**. Any other text cancels without stopping services or replacing live data.
 7. After promotion, start when ready if you did not request automatic start.
 
 Explicit local form:
@@ -128,7 +128,16 @@ sudo vwctl restore \
   --start
 ```
 
-A remote object is downloaded once into protected staging; that exact download is verified and restored. All knowable checks run before the mutation boundary/service stop.
+Both explicit forms display the verified source and then require you to type `RESTORE` on a terminal. To perform an **unattended** explicit restore, supply the full chosen file/object path, the offline identity, and intentional consent in the command itself:
+
+```bash
+sudo vwctl restore --file /secure/recovery.vwrec \
+  --identity /secure/offline-age-key.txt --confirm RESTORE
+```
+
+Do not pass `--confirm RESTORE` when your purpose is to preview or cancel a restore. It is only accepted with an explicit `--file` or `--from-remote` source, not the guided picker.
+
+A remote object is downloaded once into protected, automatically cleaned staging; that **same download** is verified and, **only after confirmation**, restored. Interactive explicit `--file` and `--from-remote` commands require the same final typed `RESTORE` confirmation as the guided picker. A **noninteractive** explicit restore fails closed unless both `--identity` and the deliberate `--confirm RESTORE` argument are supplied. Read-only discovery and pre-confirm verification do **not** stop containers, disable timers, replace live state, or update recovery verification metadata. The preflight may create temporary files in protected staging (and rclone may refresh its authentication token). After consent, the engine stages the candidate, checks free space/SQLite/ownership, and finally stops containers and promotes the restored state under the global mutation lock.
 
 Interactive restore and verification display the configured public offline recovery recipient before asking for the matching private identity. The offline private key is **not stored on the appliance by default**. Pasted identities and identities extracted from a recovery-kit ZIP exist only in root-owned protected volatile storage under `/run/vaultwarden-oci`, mode `0600`, and are removed when the command completes, fails, is cancelled, or is interrupted. The operational key at `/etc/vaultwarden-oci/age-key.txt` is a different identity and is not a substitute for offline recovery.
 
@@ -171,6 +180,8 @@ This is intentionally a different procedure from same-host restore.
    sudo vwctl dns update --dry-run
    ```
 
+   On an interactive terminal, review the verified source and type `RESTORE` at the final confirmation. In headless automation, add `--identity /secure/offline-age-key.txt --confirm RESTORE` explicitly.
+
    Restore replaces the Vaultwarden data/SQLite database, Caddy persistent state, config, and encrypted secrets. It retains or regenerates/rekeys the new host's **operational** Age identity as needed, while the **offline private key stays in your separate custody**. It does not restore Ubuntu, packages, firewall service setup, or root's rclone configuration.
 
    Complete the standard Cloudflare/CrowdSec security activation and the **Worker Route Fail Open** confirmation in [Install, Step 6](INSTALL.md#6-validate-and-activate-security) **before** starting. Then follow [Install, Step 7](INSTALL.md#7-start-update-dns-and-create-the-first-backup): start the recovered app, check status/doctor, **only then** update the existing Cloudflare A record to the new host, create a verified backup, and enable timers. If the old host is still active, plan the DNS cutover deliberately rather than blindly overriding live traffic.
@@ -209,7 +220,7 @@ The command proves the supplied offline identity matches config, proves both ope
 
 **Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP. Interactive recovery-kit selection also supplies this passphrase with echo disabled and the secure 7-Zip stdin transport; it is never placed in argv or the environment.
 
-For non-TTY restore/verify callers, omission of `--identity` is an immediate error. For non-TTY recovery-kit export, omission of `--offline-identity` is an immediate error. Noninteractive workflows never read `/dev/tty`, choose a local recovery kit automatically, or attempt to recover a private identity on their own.
+For non-TTY explicit restore callers, both `--identity` and `--confirm RESTORE` are required; missing confirmation fails before recovery staging or live mutation. For non-TTY recovery verification callers, omission of `--identity` is an immediate error. For non-TTY recovery-kit export, omission of `--offline-identity` is an immediate error. Noninteractive workflows never read `/dev/tty`, choose a local recovery kit automatically, or attempt to recover a private identity on their own.
 
 **Transient-key custody:** after successful first-run handoff, the setup-generated offline private identity must no longer exist on the appliance. If setup reports a failed handoff and says that the transient identity remains in `/run`, secure that exact identity before reboot; losing it can strand recovery material already addressed to its public recipient.
 
