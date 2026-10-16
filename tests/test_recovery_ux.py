@@ -72,6 +72,21 @@ def zip_listing(archive: Path, members: list[str]) -> str:
 
 
 class RecoveryInventoryTests(unittest.TestCase):
+    def test_local_inventory_on_uninitialized_storage_remains_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            self.assertFalse(paths.backups.exists())
+            self.assertEqual(recovery_ux.list_local(paths), [])
+            self.assertFalse(paths.backups.exists())
+            self.assertFalse(paths.state_file.exists())
+
+    def test_verification_preflight_refuses_missing_staging_without_creating_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            with self.assertRaisesRegex(recovery_ux.RecoveryUXError, "staging directory"):
+                recovery_ux.verify_local(Path(directory) / "missing.vwrec", Path(directory) / "id", paths=paths)
+            self.assertFalse(paths.backups.exists())
+
     def test_local_inventory_newest_first_and_known_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -543,6 +558,28 @@ class IdentityCommandRoutingTests(unittest.TestCase):
             download.assert_not_called()
             restore.assert_not_called()
 
+    def test_explicit_remote_cli_tty_cancellation_never_dispatches_restore(self) -> None:
+        identity = Path("/tmp/offline.age")
+        remote = "bw-backup:parent/nested/recovery-20261015T221732Z-a.vwrec"
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("sys.stdout.isatty", return_value=True),
+            mock.patch("builtins.input", return_value="CANCEL"),
+            mock.patch.object(recovery_ux.storage, "verify"),
+            mock.patch.object(recovery_ux, "restore_remote_once") as staged,
+        ):
+            def simulate_once(*args, **kwargs):
+                point = recovery.VerifiedRecovery(Path("/tmp/staged.vwrec"), "a" * 64, 1, "2026-10-15T22:17:32Z")
+                self.assertEqual(args, (remote, identity))
+                self.assertFalse(kwargs["approve"](point))
+                return None
+            staged.side_effect = simulate_once
+            result = recovery_ux.main(
+                ["restore", "--from-remote", remote, "--identity", str(identity)]
+            )
+        self.assertEqual(result, 0)
+        staged.assert_called_once()
+
     def test_explicit_local_tty_cancel_does_not_record_or_dispatch_restore(self) -> None:
         identity = Path("/tmp/offline.age")
         artifact = Path("/tmp/a.vwrec")
@@ -561,6 +598,45 @@ class IdentityCommandRoutingTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(verify.call_args.kwargs["record"])
         restore.assert_not_called()
+
+    def test_explicit_local_exact_RESTORE_occurs_only_after_verified_source_shown(self) -> None:
+        identity = Path("/tmp/offline.age")
+        artifact = Path("/tmp/a.vwrec")
+        verified = recovery.VerifiedRecovery(artifact, "a" * 64, 1, "2026-08-20T03:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory) / "live-data"
+            live.write_bytes(b"previous-live-data")
+            calls: list[str] = []
+            def verify_local(source, provided_identity, **kwargs):
+                self.assertEqual(live.read_bytes(), b"previous-live-data")
+                self.assertFalse(kwargs["record"])
+                calls.append("verify")
+                return verified
+            def confirm(prompt):
+                self.assertIn("RESTORE", prompt)
+                self.assertEqual(calls, ["verify"])
+                self.assertEqual(live.read_bytes(), b"previous-live-data")
+                calls.append("confirm")
+                return "RESTORE"
+            def mutate(source, provided_identity, **kwargs):
+                self.assertEqual(calls, ["verify", "confirm"])
+                live.write_bytes(b"restored-data")
+                calls.append("promote")
+                return {"created_at": verified.created_at}
+            with (
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch("sys.stdout.isatty", return_value=True),
+                mock.patch("builtins.input", side_effect=confirm),
+                mock.patch.object(recovery_ux.storage, "verify"),
+                mock.patch.object(recovery_ux, "verify_local", side_effect=verify_local),
+                mock.patch.object(recovery, "restore_recovery", side_effect=mutate),
+            ):
+                result = recovery_ux.main(
+                    ["restore", "--file", str(artifact), "--identity", str(identity)]
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, ["verify", "confirm", "promote"])
+            self.assertEqual(live.read_bytes(), b"restored-data")
 
     def test_explicit_remote_tty_cancel_keeps_exact_download_and_never_restores(self) -> None:
         remote = "bw-backup:bw-backup/nested/recovery-20261015T221732Z-a.vwrec"
