@@ -1168,24 +1168,25 @@ def list_remote(
     ]
 
 
+def _safe_flat_recovery_name(item: Mapping[str, object]) -> str | None:
+    """Never construct destructive rclone paths from untrusted nested/unsafe names."""
+    name = item.get("Name")
+    if not isinstance(name, str) or _recovery_name_time(name) is None:
+        return None
+    if (
+        "/" in name or "\\" in name
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+        or ("Path" in item and item["Path"] != name)
+    ):
+        raise RecoveryError("rclone reported an unsafe recovery object for pruning")
+    return name
+
+
 def pruning_decision(entries: Iterable[Mapping[str, object]], keep_last: int) -> PruneDecision:
     """Preview only valid flat recovery object names, never unrelated .vwrec files."""
     if keep_last < 1:
         raise RecoveryError("keep_last must be at least 1")
-    names: set[str] = set()
-    for item in entries:
-        name = item.get("Name")
-        if not isinstance(name, str) or _recovery_name_time(name) is None:
-            continue
-        # A remote provider's Name/Path must not redirect the deletion outside
-        # the exact folder that the operator has selected.
-        if (
-            "/" in name or "\\" in name
-            or any(ord(char) < 32 or ord(char) == 127 for char in name)
-            or ("Path" in item and item["Path"] != name)
-        ):
-            raise RecoveryError("rclone reported an unsafe recovery object for pruning")
-        names.add(name)
+    names = {name for item in entries if (name := _safe_flat_recovery_name(item)) is not None}
     ordered = sorted(names, reverse=True)
     return PruneDecision(tuple(ordered[:keep_last]), tuple(ordered[keep_last:]))
 
@@ -1241,8 +1242,8 @@ def prune_remote_by_age(
     cutoff_now = now or datetime.now(timezone.utc)
     deleted: list[str] = []
     for item in list_remote(remote, runner=runner):
-        name = item.get("Name")
-        if not isinstance(name, str) or name == preserve_name:
+        name = _safe_flat_recovery_name(item)
+        if name is None or name == preserve_name:
             continue
         if not _older_than_days(name, days, now=cutoff_now):
             continue
