@@ -71,6 +71,37 @@ def zip_listing(archive: Path, members: list[str]) -> str:
     return "\n".join(sections)
 
 
+class RestoredBackupPolicyNoticeTests(unittest.TestCase):
+    def test_restored_local_only_policy_warns_before_automatic_backup_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            paths.config.parent.mkdir(parents=True)
+            paths.config.write_text(config_text() + '\n[backup]\nremote = ""\n', encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                recovery_ux._restored_offsite_policy_notice(
+                    recovery_ux.UI(color=False), paths=paths,
+                )
+            self.assertIn("LOCAL-ONLY", output.getvalue())
+            self.assertIn("recovery offsite configure", output.getvalue())
+
+    def test_restored_remote_policy_warns_about_retention_before_resuming_timers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = paths_for(Path(directory))
+            paths.config.parent.mkdir(parents=True)
+            paths.config.write_text(
+                config_text()
+                + '\n[backup]\nremote = "cloud:backups"\nlocal_retention_days = 30\nremote_retention_days = 1\n',
+                encoding="utf-8",
+            )
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                recovery_ux._restored_offsite_policy_notice(
+                    recovery_ux.UI(color=False), paths=paths,
+                )
+            self.assertIn("every local backup also publishes", output.getvalue())
+            self.assertIn("retention local/remote=30/1", output.getvalue())
+            self.assertIn("BEFORE resuming backup timers", output.getvalue())
+
+
 class RecoveryInventoryTests(unittest.TestCase):
     def test_local_inventory_on_uninitialized_storage_remains_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
