@@ -26,13 +26,16 @@ def status() -> None:
     print(f"Local retention: {local_policy}")
     print(f"Remote retention: {remote_policy}")
     if remote is None:
-        print("INFO: scheduled offsite backup disabled; daily encrypted local backups remain active")
-        print("ACTION: sudo vwctl recovery offsite configure")
+        print("INFO: remote publishing is DISABLED: every scheduled/manual backup is currently LOCAL-ONLY")
+        print("INFO: rclone credentials alone do not authorize an upload destination")
+        print("ACTION: choose the destination once with 'sudo vwctl recovery offsite configure'")
         return
     ok, message = recovery.rclone_destination_diagnostics(remote)
     print(f"Configured destination: {remote}")
     print(f"{'PASS' if ok else 'FAIL'}: {message}")
-    print("Daily backup timer: creates a new local .vwrec, then publishes and re-download-verifies it")
+    print("PASS: the SAME backup command (scheduled or manual) creates a local .vwrec,")
+    print("      then publishes and re-download-verifies that exact recovery point to this destination")
+    print("INFO: no separate remote backup timer or per-backup upload command is needed")
     if not ok:
         raise OffsiteError("scheduled offsite publishing is configured but unavailable")
 
@@ -88,8 +91,10 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
     if not ok:
         raise OffsiteError(message)
     runtime.set_backup_remote(remote)
-    print(f"PASS: daily scheduled offsite publication enabled: {remote}")
-    print("ACTION: run 'sudo vwctl backup' to create and verify the first offsite recovery point")
+    print(f"PASS: automatic offsite publication enabled for EVERY local backup: {remote}")
+    print("INFO: both the existing daily timer and manual 'sudo vwctl backup' now upload")
+    print("      each new encrypted recovery point and verify its remote copy")
+    print("ACTION: optionally run 'sudo vwctl backup' to verify publication immediately")
     print("ACTION: run 'sudo vwctl recovery offsite status' and 'sudo vwctl timers'")
 
 
@@ -107,11 +112,20 @@ def disable(*, confirmed: bool) -> None:
 
 
 def backup(*, override: str | None = None) -> int:
-    """One source of truth for manual and timer backup execution."""
+    """One local snapshot, optionally mirrored in the SAME job; no remote timer.
+
+    The saved backup.remote opt-in is the only authority for routine offsite
+    publication. Do not guess a cloud destination from root's rclone config.
+    A one-time --remote overrides this invocation without changing the policy.
+    """
     config = runtime.load_config()
     remote = override if override is not None else config.offsite_remote
     if remote:
         runtime.backup_remote_destination(remote)
+        print(f"INFO: this backup will create a local .vwrec and publish the same point to {remote}")
+    else:
+        print("INFO: LOCAL-ONLY backup: no saved offsite destination; enable once with")
+        print("      'sudo vwctl recovery offsite configure' to mirror EVERY future backup")
     verified = recovery.create_recovery(config.offline_recovery_recipient, remote=remote)
     print(f"PASS: verified local recovery {verified.artifact} sha256={verified.sha256}")
     if remote:
