@@ -347,9 +347,9 @@ class VwctlIntegrationTests(unittest.TestCase):
         self.assertEqual(version.stdout.strip(), f"vwctl {CURRENT_RELEASE_VERSION}")
         versions = self.run_vwctl("versions")
         self.assertEqual(versions.returncode, 0, versions.stderr)
-        self.assertIn("vaultwarden 1.37.1", versions.stdout)
-        self.assertIn("caddy 2.11.4", versions.stdout)
-        self.assertIn("vaultwarden_image vaultwarden/server:1.37.1@sha256:", versions.stdout)
+        self.assertIn(f"vaultwarden {cli.load_versions(ROOT / 'versions.toml').vaultwarden}", versions.stdout)
+        self.assertIn(f"caddy {cli.load_versions(ROOT / 'versions.toml').caddy}", versions.stdout)
+        self.assertIn(f"vaultwarden_image vaultwarden/server:{cli.load_versions(ROOT / 'versions.toml').vaultwarden}@sha256:", versions.stdout)
 
     def test_update_cli_has_supported_latest_mode(self) -> None:
         for action in ("check", "apply"):

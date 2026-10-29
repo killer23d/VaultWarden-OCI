@@ -1,24 +1,24 @@
 schema_version = 1
 
 [vaultwarden_oci]
-version = "0.1.0-rc.10"
+version = "0.1.0-rc.11"
 
 [components]
-vaultwarden = "1.37.1"
-caddy = "2.11.4"
+vaultwarden = "1.37.4"
+caddy = "2.11.7"
 caddy_dns_cloudflare = "v0.2.4"
 caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
 caddy_combine_ip_ranges = "v0.0.1"
 caddy_ratelimit = "v0.1.0"
 
 [image_digests.vaultwarden]
-amd64 = "sha256:ebdfe70701c60ac0c28c697e787cea767d7972940b786037b29fe0d507f821e8"
-arm64 = "sha256:ebdfe70701c60ac0c28c697e787cea767d7972940b786037b29fe0d507f821e8"
+amd64 = "sha256:2bb2e0344616c62a6d76ea10558497499f8ed3f731400e143dc7bf17b757b5b9"
+arm64 = "sha256:dfaefaea21028ea3024b708330b0aed27c4a448a49a3e174e49962f3e0789fc4"
 
 [image_digests.caddy_builder]
-amd64 = "sha256:8e89605351333ad2cc2f3bcc95275a2ccc427f88914050e86a5fde0fd77a63c4"
-arm64 = "sha256:8e89605351333ad2cc2f3bcc95275a2ccc427f88914050e86a5fde0fd77a63c4"
+amd64 = "sha256:420db7c0f6927c7e8140c666628915fb4a9141282fc5c344716ebf3879fe8f9b"
+arm64 = "sha256:3b407e6dffa0659c879c41185683a5010378680b912e51d509e9d1a7a9740d89"
 
 [image_digests.caddy_runtime]
-amd64 = "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
-arm64 = "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+amd64 = "sha256:04913b1da43339a40ad1ea87827d70a576ac5aa6cf674c6e24fdca675887533a"
+arm64 = "sha256:cc447f149425221422153c6cdf33a123b3f458839679f950298f68a690a54a5b"
