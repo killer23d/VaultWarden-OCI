@@ -278,13 +278,12 @@ def diagnostics_menu() -> None:
 
 def recovery_menu() -> None:
     def handle(choice: str) -> None:
-        if choice == "1": _command_screen("Verified local backup", ["backup"])
+        if choice == "1": _command_screen("Local backup + automatic saved offsite mirror", ["backup"])
         elif choice == "2":
             remote = _prompt(" rclone REMOTE:path: ")
-            if remote: _command_screen("Verified offsite backup", ["backup", "--remote", remote])
+            if remote: _command_screen("One-time backup to alternate remote (does not change schedule)", ["backup", "--remote", remote])
         elif choice == "3":
-            remote = _prompt(" Optional rclone REMOTE:path (blank for local only): ")
-            args = ["recovery", "list"] + (["--remote", remote] if remote else [])
+            args = ["recovery", "list"]
             _command_screen("Recovery inventory", args)
         elif choice == "4":
             location = _prompt(" Local .vwrec path: ")
@@ -293,7 +292,11 @@ def recovery_menu() -> None:
             remote = _prompt(" Remote .vwrec REMOTE:path: ")
             if remote: _command_screen("Verify remote recovery", ["recovery", "verify", "--from-remote", remote])
         elif choice == "6": _command_screen("Guided restore", ["restore"])
-    _menu("Backup & Recovery", (("1", "Backup now"), ("2", "Backup + verified offsite publication"), ("3", "Recovery inventory"), ("4", "Verify local recovery"), ("5", "Verify remote recovery"), ("6", "Guided local/remote restore")), handle)
+        elif choice == "7": _command_screen("Enable cloud mirror after every local backup", ["recovery", "offsite", "configure"])
+        elif choice == "8": _command_screen("Offsite configuration and health", ["recovery", "offsite", "status"])
+        elif choice == "9" and _confirm("Disable offsite publishing while keeping all backups?"):
+            _command_screen("Disable scheduled offsite", ["recovery", "offsite", "disable", "--confirm"])
+    _menu("Backup & Recovery", (("1", "Backup now (local + saved offsite mirror)"), ("2", "Backup once to an alternate remote (not saved)"), ("3", "Recovery inventory"), ("4", "Verify local recovery"), ("5", "Verify remote recovery"), ("6", "Guided local/remote restore"), ("7", "Enable offsite mirror for every backup"), ("8", "Offsite configuration and health"), ("9", "Disable scheduled offsite")), handle)
 
 
 def security_menu() -> None:

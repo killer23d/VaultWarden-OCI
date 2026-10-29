@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vaultwarden_oci import recovery, secrets
+from vaultwarden_oci import recovery, recovery_ux, secrets
 from vaultwarden_oci.cli import CommandResult, run_command
 
 VALUES = {
@@ -180,6 +180,52 @@ def main() -> int:
         if "offsite" not in state:
             raise AssertionError("offsite verification state was not recorded after real rclone verification")
 
+        # Real rclone-backend proof that parent-folder browsing finds nested
+        # recovery files and constructs their exact full remote object paths.
+        # This is read-only discovery: retention below must remain scoped to
+        # immediate objects in the configured destination.
+        nested_dir = remote + "/pr372-history/deeper"
+        nested_object = nested_dir + "/" + verified.artifact.name
+        subprocess.run(
+            ["rclone", "mkdir", nested_dir],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["rclone", "copyto", str(verified.artifact), nested_object],
+            check=True, capture_output=True, text=True,
+        )
+        inventory = recovery_ux.list_remote_points(remote, paths=paths, runner=runner)
+        if {point.location for point in inventory} != {remote_object, nested_object}:
+            raise AssertionError(
+                f"recursive remote inventory did not return the root and nested objects: {inventory}"
+            )
+        if any(point.name != verified.artifact.name for point in inventory):
+            raise AssertionError("recursive inventory changed recovery object basenames")
+
+        # Production may have older rclone versions where --immutable alone
+        # does not protect an existing remote name. The application must
+        # reject a same-name collision *before* invoking rclone copyto.
+        original_bytes = (remote_dir / verified.artifact.name).read_bytes()
+        collision_dir = root / "collision"
+        collision_dir.mkdir()
+        collision_file = collision_dir / verified.artifact.name
+        collision_file.write_bytes(original_bytes + b"unauthorized replacement bytes")
+        collision = recovery.VerifiedRecovery(
+            artifact=collision_file,
+            sha256=recovery._sha256(collision_file),
+            size=collision_file.stat().st_size,
+            created_at=verified.created_at,
+        )
+        try:
+            recovery.publish_offsite(collision, remote, paths=paths, runner=runner)
+        except recovery.RecoveryError as exc:
+            if "already exists" not in str(exc):
+                raise AssertionError(f"collision failed for an unexpected reason: {exc}") from exc
+        else:
+            raise AssertionError("existing remote recovery point was not rejected")
+        if (remote_dir / verified.artifact.name).read_bytes() != original_bytes:
+            raise AssertionError("remote recovery point changed after a refused collision")
+
         stale_name = "recovery-20000101T000000Z-stale.vwrec"
         subprocess.run(
             ["rclone", "copyto", str(verified.artifact), f"{remote}/{stale_name}"],
@@ -187,11 +233,13 @@ def main() -> int:
             text=True,
             capture_output=True,
         )
-        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner)
+        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner, lock_path=paths.lock)
         if stale_name not in decision.delete or (remote_dir / stale_name).exists():
             raise AssertionError("explicit rclone prune did not delete the stale recovery object")
         if verified.artifact.name not in decision.keep:
             raise AssertionError("explicit rclone prune did not retain the newest recovery object")
+        if not (remote_dir / "pr372-history/deeper" / verified.artifact.name).is_file():
+            raise AssertionError("flat remote prune deleted a nested recovery object")
 
         # Replacement-host condition: local recovery copy and old server-local
         # operational identity are gone. Recover only from rclone + offline key.

@@ -412,7 +412,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true")
 
     backup = commands.add_parser("backup", help="create and verify one encrypted .vwrec recovery point")
-    backup.add_argument("--remote", help="optional rclone REMOTE:path publication destination")
+    backup.add_argument("--remote", help="override configured rclone REMOTE:folder for this backup only")
     restore = commands.add_parser("restore", help="restore one encrypted .vwrec recovery point")
     source = restore.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", type=Path, help="local .vwrec recovery artifact")
@@ -629,15 +629,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
         return code
     if args.command == "backup":
-        from . import recovery, runtime
+        from . import offsite, recovery, runtime
         try:
-            config = runtime.load_config()
-            verified = recovery.create_recovery(config.offline_recovery_recipient, remote=args.remote)
-            print(f"PASS: verified local recovery {verified.artifact} sha256={verified.sha256}")
-            if args.remote:
-                print("PASS: offsite publication was remotely re-downloaded and checksum-verified")
-            return 0
-        except (recovery.RecoveryError, runtime.RuntimeConfigError, LockBusyError, OSError) as exc:
+            return offsite.backup(override=args.remote)
+        except (offsite.OffsiteError, recovery.RecoveryError, runtime.RuntimeConfigError, LockBusyError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "restore":

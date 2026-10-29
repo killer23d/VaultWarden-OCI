@@ -154,17 +154,16 @@ The five-minute health timer launches **separate** local-health and Cloudflare D
 
 ### Protect the first backup offsite
 
-**Enabling timers schedules local backups only.** The normal backup timer runs daily at **03:15 server-local time** plus up to 15 minutes of randomized delay, saving encrypted `.vwrec` files on the **same dedicated data volume** as the application. It does **not** set up rclone storage or send copies offsite automatically.
-
-After first start, follow [Recovery: Configure and publish offsite backups](RECOVERY.md#configure-and-publish-offsite-backups-rclone): configure your storage provider using `sudo rclone config` (root's remote), then run `sudo vwctl backup --remote 'offsite:Vaultwarden-OCI'` with your own remote name/path. Independently verify a real remote `.vwrec` by decrypting it using your **off-server** Age identity. Retain the recovery-kit ZIP and its separate passphrase **off the server**. Local backup files are not automatically pruned, so monitor free space.
-
-Do not consider disaster recovery tested until you have verified offsite decryption and practiced restoring onto a disposable host. See [Recovery](RECOVERY.md) for the safe restore procedure.
-
-Open the administrator dashboard:
+The standard timer always makes a local encrypted backup daily at **03:15 server-local time**, plus up to 15 minutes random delay. To add **automatic offsite copies** to that same schedule, set up a cloud rclone remote under root, then follow the guided setup:
 
 ```bash
-sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh
+sudo rclone config
+sudo vwctl recovery offsite configure
+sudo vwctl backup
+sudo vwctl recovery offsite status
 ```
+
+Choose an existing rclone remote, enter the desired folder, and type `ENABLE` to make future scheduled backups upload automatically. Leave it unconfigured for local-only backups. You can later disable offsite publication without deleting backups. Do **not** give rclone your offline Age private key; store the separate recovery-kit ZIP and passphrase off-host, verify a selected offsite archive using the offline key, and practice on a disposable host. See [Recovery](RECOVERY.md#configure-automatic-offsite-backups-rclone).
 
 ## 8. Optional: automatic failure emails
 
