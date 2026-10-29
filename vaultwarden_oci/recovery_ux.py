@@ -613,6 +613,31 @@ def _restore_approved(
     return True
 
 
+def _restored_offsite_policy_notice(
+    ui: UI,
+    *,
+    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
+) -> None:
+    """Make the restored backup policy explicit; never auto-export to a guessed cloud."""
+    try:
+        config = runtime.load_config(paths.config)
+    except (runtime.RuntimeConfigError, OSError) as exc:
+        ui.warn(f"restored backup policy could not be read; inspect configuration before resuming timers: {exc}")
+        return
+    if config.offsite_remote is None:
+        ui.warn("restored backup configuration is LOCAL-ONLY (backup.remote is empty)")
+        ui.action("to mirror EVERY future local backup to a chosen cloud folder, run "
+                  "'sudo vwctl recovery offsite configure' once before resuming timers")
+    else:
+        ui.info(
+            f"restored backup policy: every local backup also publishes to {config.offsite_remote}; "
+            f"retention local/remote={config.local_retention_days}/{config.remote_retention_days} days"
+        )
+        if config.local_retention_days > 0 or config.remote_retention_days > 0:
+            ui.warn("review restored retention settings BEFORE resuming backup timers; "
+                    "positive limits can delete older recovery points after a successful backup")
+
+
 def guided_restore(
     *,
     start: bool = False,
@@ -700,6 +725,7 @@ def guided_restore(
                 manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
 
         ui.ok(f"restored recovery point created {manifest['created_at']}")
+        _restored_offsite_policy_notice(ui, paths=paths)
         if not start:
             ui.action("services remain stopped; run 'vwctl start' when ready")
         return 0
@@ -1134,6 +1160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if manifest is None:
                         return 0
                 ui.ok(f"restored recovery point created {manifest['created_at']}")
+                _restored_offsite_policy_notice(ui)
                 if not args.start:
                     ui.action("services remain stopped; run 'vwctl start' when ready")
                 return 0
