@@ -1159,17 +1159,25 @@ def list_remote(
 
 
 def pruning_decision(entries: Iterable[Mapping[str, object]], keep_last: int) -> PruneDecision:
+    """Preview only valid flat recovery object names, never unrelated .vwrec files."""
     if keep_last < 1:
         raise RecoveryError("keep_last must be at least 1")
-    names = sorted(
-        {
-            str(item["Name"])
-            for item in entries
-            if isinstance(item.get("Name"), str) and str(item["Name"]).endswith(".vwrec")
-        },
-        reverse=True,
-    )
-    return PruneDecision(tuple(names[:keep_last]), tuple(names[keep_last:]))
+    names: set[str] = set()
+    for item in entries:
+        name = item.get("Name")
+        if not isinstance(name, str) or _recovery_name_time(name) is None:
+            continue
+        # A remote provider's Name/Path must not redirect the deletion outside
+        # the exact folder that the operator has selected.
+        if (
+            "/" in name or "\\" in name
+            or any(ord(char) < 32 or ord(char) == 127 for char in name)
+            or ("Path" in item and item["Path"] != name)
+        ):
+            raise RecoveryError("rclone reported an unsafe recovery object for pruning")
+        names.add(name)
+    ordered = sorted(names, reverse=True)
+    return PruneDecision(tuple(ordered[:keep_last]), tuple(ordered[keep_last:]))
 
 
 def _recovery_name_time(name: str) -> datetime | None:
@@ -1277,9 +1285,15 @@ def prune_remote(
     if not confirm:
         return decision
     with mutation_lock(lock_path):
-        # Re-list under the mutation lock so the confirmed deletion plan cannot
-        # be based on a stale view taken before another recovery operation.
-        decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
+        # A remote inventory can change after the operator previewed it. Never
+        # turn that stale confirmation into permission to delete new objects.
+        # Refuse instead, then require a new preview and explicit confirmation.
+        current = pruning_decision(list_remote(remote, runner=runner), keep_last)
+        if current != decision:
+            raise RecoveryError(
+                "remote recovery inventory changed since the deletion plan; "
+                "no files were deleted, preview again before confirming"
+            )
         for name in decision.delete:
             result = runner(["rclone", "deletefile", _remote_object(remote, name)])
             if not result.ok:
