@@ -701,6 +701,18 @@ class RcloneTests(unittest.TestCase):
         )
         self.assertFalse(any(call[-1].endswith("other.vwrec") for call in runner.calls if call[:2] == ("rclone", "deletefile")))
 
+    def test_remote_age_prune_rejects_unsafe_provider_paths_before_deletion(self) -> None:
+        runner = FakeRunner()
+        runner.remote_entries = [
+            {"Name": "recovery-20260101T000000Z-old.vwrec", "Path": "unexpected/subdir/recovery-20260101T000000Z-old.vwrec"},
+        ]
+        with self.assertRaisesRegex(recovery.RecoveryError, "unsafe"):
+            recovery.prune_remote_by_age(
+                "offsite:recovery", 30,
+                runner=runner, now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            )
+        self.assertFalse(any(x[:2] == ("rclone", "deletefile") for x in runner.calls))
+
     def test_apply_retention_uses_mutation_lock(self) -> None:
         verified = recovery.VerifiedRecovery(
             artifact=Path("/test/current.vwrec"),
