@@ -672,6 +672,58 @@ class RcloneTests(unittest.TestCase):
         lock.assert_called_once_with(paths.lock)
         self.assertEqual(deleted, (("local.vwrec",), ("remote.vwrec",)))
 
+    def test_explicit_remote_prune_fails_closed_when_inventory_changes_after_preview(self) -> None:
+        runner = FakeRunner()
+        runner.remote_entries = [
+            {"Name": "recovery-20260820T030000Z-c.vwrec"},
+            {"Name": "recovery-20260820T020000Z-b.vwrec"},
+        ]
+        calls = 0
+
+        def runner_with_change(argv, *, env=None, cwd=None):
+            nonlocal calls
+            if tuple(argv[:2]) == ("rclone", "lsjson"):
+                calls += 1
+                if calls == 2:
+                    runner.remote_entries.append(
+                        {"Name": "recovery-20260820T040000Z-new.vwrec"}
+                    )
+            return runner(argv, env=env, cwd=cwd)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(recovery.RecoveryError, "inventory changed"):
+                recovery.prune_remote(
+                    "offsite:recovery", 1, confirm=True,
+                    runner=runner_with_change, lock_path=Path(directory) / "lock",
+                )
+        self.assertEqual(calls, 2)
+        self.assertFalse(any(call[:2] == ("rclone", "deletefile") for call in runner.calls))
+
+    def test_explicit_prune_never_deletes_unrelated_or_unsafe_remote_names(self) -> None:
+        runner = FakeRunner()
+        runner.remote_entries = [
+            {"Name": "notes.vwrec", "Path": "notes.vwrec"},
+            {"Name": "unrelated.vwrec"},
+            {"Name": "recovery-20260820T030000Z-good.vwrec"},
+            {"Name": "recovery-20260820T020000Z-old.vwrec"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            decision = recovery.prune_remote(
+                "offsite:recovery", 1, confirm=True,
+                runner=runner, lock_path=Path(directory) / "lock",
+            )
+        self.assertEqual(decision.delete, ("recovery-20260820T020000Z-old.vwrec",))
+        deletes = [call for call in runner.calls if call[:2] == ("rclone", "deletefile")]
+        self.assertEqual(len(deletes), 1)
+        self.assertTrue(deletes[0][-1].endswith("recovery-20260820T020000Z-old.vwrec"))
+
+        for bad in (
+            {"Name": "recovery-20260820T010000Z-bad.vwrec", "Path": "other/recovery-20260820T010000Z-bad.vwrec"},
+            {"Name": "recovery-20260820T010000Z-bad\\path.vwrec"},
+        ):
+            with self.subTest(item=bad), self.assertRaisesRegex(recovery.RecoveryError, "unsafe"):
+                recovery.pruning_decision([bad], 1)
+
     def test_explicit_pruning_plan_and_delete_argv(self) -> None:
         runner = FakeRunner()
         plan = recovery.prune_remote("offsite:recovery", 2, confirm=False, runner=runner)
