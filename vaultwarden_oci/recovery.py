@@ -1355,6 +1355,19 @@ def doctor_checks(
     rows = {row["kind"]: row for row in status_rows(paths)}
     local, offsite = rows["local"], rows["offsite"]
     rclone_ok, rclone_message = rclone_diagnostics(runner=runner)
+    try:
+        saved_destination = runtime.load_config(paths.config).offsite_remote
+    except runtime.RuntimeConfigError:
+        saved_destination = None
+    offsite_message = (
+        f"last verified offsite recovery: {offsite['verified_at']}"
+        if offsite["state"] == "verified"
+        else "no verified offsite recovery recorded"
+    )
+    if saved_destination is None:
+        offsite_message += "; scheduled remote publishing DISABLED (local-only); prior success is historical"
+    else:
+        offsite_message += f"; automatic mirror destination: {saved_destination}"
     return [
         DoctorCheck(
             "recovery.local",
@@ -1366,9 +1379,7 @@ def doctor_checks(
         DoctorCheck(
             "recovery.offsite",
             "PASS" if offsite["state"] == "verified" else "WARN",
-            f"last verified offsite recovery: {offsite['verified_at']}"
-            if offsite["state"] == "verified"
-            else "no verified offsite recovery recorded",
+            offsite_message,
         ),
         DoctorCheck(
             "recovery.rclone",
