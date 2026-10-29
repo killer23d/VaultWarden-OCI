@@ -272,6 +272,36 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.assertEqual(paths.config.read_text(encoding="utf-8"), config_text())
             self.assertEqual((paths.caddy_data / "cert-state").read_text(encoding="utf-8"), "cert")
 
+    def test_doctor_distinguishes_historical_offsite_success_from_active_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            seed(paths)
+            paths.state_file.parent.mkdir(parents=True)
+            paths.state_file.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "offsite": {
+                        "verified_at": "2026-10-15T22:18:52Z",
+                        "remote_object": "offsite:recovery/previous.vwrec",
+                    },
+                }), encoding="utf-8",
+            )
+            runner = FakeRunner()
+            checks = {check.id: check for check in recovery.doctor_checks(paths, runner=runner)}
+            self.assertEqual(checks["recovery.offsite"].status, "PASS")
+            self.assertIn("publishing DISABLED", checks["recovery.offsite"].message)
+            self.assertIn("historical", checks["recovery.offsite"].message)
+
+            paths.config.write_text(
+                config_text() + '\n[backup]\nremote = "offsite:recovery"\n',
+                encoding="utf-8",
+            )
+            checks = {check.id: check for check in recovery.doctor_checks(paths, runner=runner)}
+            self.assertIn(
+                "automatic mirror destination: offsite:recovery",
+                checks["recovery.offsite"].message,
+            )
+
     def test_timer_backup_uses_current_saved_remote_inside_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = make_paths(Path(directory))
