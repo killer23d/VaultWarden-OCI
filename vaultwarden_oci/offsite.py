@@ -126,7 +126,11 @@ def backup(*, override: str | None = None) -> int:
     else:
         print("INFO: LOCAL-ONLY backup: no saved offsite destination; enable once with")
         print("      'sudo vwctl recovery offsite configure' to mirror EVERY future backup")
-    verified = recovery.create_recovery(config.offline_recovery_recipient, remote=remote)
+    verified = recovery.create_recovery(
+        config.offline_recovery_recipient,
+        remote=remote,
+        require_current_remote=(override is None),
+    )
     print(f"PASS: verified local recovery {verified.artifact} sha256={verified.sha256}")
     if remote:
         print("PASS: offsite publication was remotely re-downloaded and checksum-verified")
@@ -143,6 +147,9 @@ def backup(*, override: str | None = None) -> int:
         remote=retention_remote,
         remote_days=config.remote_retention_days,
         preserve=verified,
+        expected_backup_policy=(
+            config.offsite_remote, config.local_retention_days, config.remote_retention_days
+        ),
     )
     if config.local_retention_days > 0:
         print(
