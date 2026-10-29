@@ -102,7 +102,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(offsite.backup(), 0)
-            create.assert_called_once_with(OFFLINE, remote="cloud:backups")
+            create.assert_called_once_with(OFFLINE, remote="cloud:backups", require_current_remote=True)
             self.assertEqual(offsite.backup(override="other:folder"), 0)
             self.assertEqual(create.call_args.kwargs["remote"], "other:folder")
 
@@ -127,7 +127,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
         self.assertEqual(create.call_count, 2)
         self.assertEqual(
             [call.kwargs for call in create.call_args_list],
-            [{"remote": "bw-backup:bw-backup"}] * 2,
+            [{"remote": "bw-backup:bw-backup", "require_current_remote": True}] * 2,
         )
         self.assertEqual(retention.call_count, 2)
         self.assertIn("local .vwrec and publish the same point", output.getvalue())
@@ -145,9 +145,27 @@ class OffsiteWorkflowTests(unittest.TestCase):
             redirect_stdout(io.StringIO()) as output,
         ):
             offsite.backup()
-        create.assert_called_once_with(OFFLINE, remote=None)
+        create.assert_called_once_with(OFFLINE, remote=None, require_current_remote=True)
         self.assertIn("LOCAL-ONLY", output.getvalue())
         self.assertIn("mirror EVERY future backup", output.getvalue())
+
+    def test_one_time_override_does_not_require_saved_remote_to_match(self) -> None:
+        cfg = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE,
+            offsite_remote="cloud:configured",
+            local_retention_days=0,
+            remote_retention_days=0,
+        )
+        verified = SimpleNamespace(artifact=Path("/test/recovery.vwrec"), sha256="a" * 64)
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=cfg),
+            mock.patch.object(offsite.recovery, "create_recovery", return_value=verified) as create,
+            redirect_stdout(io.StringIO()),
+        ):
+            offsite.backup(override="cloud:alternate")
+        create.assert_called_once_with(
+            OFFLINE, remote="cloud:alternate", require_current_remote=False,
+        )
 
     def test_unconfigured_backup_keeps_local_only_behavior(self) -> None:
         cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote=None, local_retention_days=0, remote_retention_days=0)
@@ -157,7 +175,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(offsite.backup(), 0)
-        create.assert_called_once_with(OFFLINE, remote=None)
+        create.assert_called_once_with(OFFLINE, remote=None, require_current_remote=True)
 
     def test_failed_remote_publication_propagates_failure(self) -> None:
         cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote="cloud:backup", local_retention_days=30, remote_retention_days=90)
@@ -192,6 +210,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
             remote="cloud:backups",
             remote_days=90,
             preserve=verified,
+            expected_backup_policy=("cloud:backups", 30, 90),
         )
 
     def test_one_time_remote_override_never_auto_prunes_alternate_remote(self) -> None:
@@ -214,6 +233,7 @@ class OffsiteWorkflowTests(unittest.TestCase):
             remote=None,
             remote_days=90,
             preserve=verified,
+            expected_backup_policy=("cloud:configured", 0, 90),
         )
 
     def test_failed_publication_never_reaches_retention(self) -> None:
