@@ -287,7 +287,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
                 }), encoding="utf-8",
             )
             runner = FakeRunner()
-            checks = {check.id: check for check in recovery.doctor_checks(paths, runner=runner)}
+            checks = {check.check_id: check for check in recovery.doctor_checks(paths, runner=runner)}
             self.assertEqual(checks["recovery.offsite"].status, "PASS")
             self.assertIn("publishing DISABLED", checks["recovery.offsite"].message)
             self.assertIn("historical", checks["recovery.offsite"].message)
@@ -296,7 +296,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
                 config_text() + '\n[backup]\nremote = "offsite:recovery"\n',
                 encoding="utf-8",
             )
-            checks = {check.id: check for check in recovery.doctor_checks(paths, runner=runner)}
+            checks = {check.check_id: check for check in recovery.doctor_checks(paths, runner=runner)}
             self.assertIn(
                 "automatic mirror destination: offsite:recovery",
                 checks["recovery.offsite"].message,
