@@ -426,7 +426,7 @@ sudo vwctl recovery list
 
 The new local recovery point should be present and recorded as verified.
 
-## Offsite/rclone recovery fails
+**Daily local backups succeed, but no new cloud backups appear?** Inspect `sudo vwctl recovery offsite status` first. If it says **disabled** or `[backup] remote` is empty, the single backup timer is correctly creating local-only archives: saved root rclone credentials or old `recovery.offsite` verified history do not enable publication. To mirror every new backup, choose the correct folder **once** with `sudo vwctl recovery offsite configure --remote 'REMOTE:folder'`, type `ENABLE`, and optionally prove an immediate upload using `sudo vwctl backup` (which independently downloads and verifies its cloud copy). Do not add a second timer, use raw `rclone sync`, or blindly revive an expired one-day retention policy. A destructive restore or scripted test may deliberately reinstate a local-only operator config. If a destination *is* configured, inspect `sudo journalctl -u vaultwarden-oci-backup.service -n 120 --no-pager` for the actual rclone publication failure; the verified local archive remains available after a remote failure.\n\n## Offsite/rclone recovery fails
 
 **Diagnose:** use the same explicit remote you configured/selected for the operation:
 
