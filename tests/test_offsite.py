@@ -106,6 +106,49 @@ class OffsiteWorkflowTests(unittest.TestCase):
             self.assertEqual(offsite.backup(override="other:folder"), 0)
             self.assertEqual(create.call_args.kwargs["remote"], "other:folder")
 
+    def test_every_configured_manual_and_timer_backup_uses_one_local_remote_job(self) -> None:
+        config = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE,
+            offsite_remote="bw-backup:bw-backup",
+            local_retention_days=0,
+            remote_retention_days=0,
+        )
+        verified = SimpleNamespace(artifact=Path("/test/recovery.vwrec"), sha256="a" * 64)
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=config),
+            mock.patch.object(offsite.recovery, "create_recovery", return_value=verified) as create,
+            mock.patch.object(offsite.recovery, "apply_retention", return_value=((), ())) as retention,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            # Both manual 'vwctl backup' and the ExecStart of the single daily
+            # systemd timer enter the same public function, without an override.
+            self.assertEqual(offsite.backup(), 0)
+            self.assertEqual(offsite.backup(), 0)
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(
+            [call.kwargs for call in create.call_args_list],
+            [{"remote": "bw-backup:bw-backup"}] * 2,
+        )
+        self.assertEqual(retention.call_count, 2)
+        self.assertIn("local .vwrec and publish the same point", output.getvalue())
+        self.assertEqual(output.getvalue().count("remotely re-downloaded"), 2)
+
+    def test_opt_out_is_reported_as_local_only_not_stale_offsite_health(self) -> None:
+        config = SimpleNamespace(
+            offline_recovery_recipient=OFFLINE, offsite_remote=None,
+            local_retention_days=0, remote_retention_days=0,
+        )
+        verified = SimpleNamespace(artifact=Path("/test/recovery.vwrec"), sha256="a" * 64)
+        with (
+            mock.patch.object(offsite.runtime, "load_config", return_value=config),
+            mock.patch.object(offsite.recovery, "create_recovery", return_value=verified) as create,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            offsite.backup()
+        create.assert_called_once_with(OFFLINE, remote=None)
+        self.assertIn("LOCAL-ONLY", output.getvalue())
+        self.assertIn("mirror EVERY future backup", output.getvalue())
+
     def test_unconfigured_backup_keeps_local_only_behavior(self) -> None:
         cfg = SimpleNamespace(offline_recovery_recipient=OFFLINE, offsite_remote=None, local_retention_days=0, remote_retention_days=0)
         with (
