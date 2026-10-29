@@ -519,6 +519,7 @@ def create_recovery(
     paths: RecoveryPaths = RecoveryPaths(),
     runner: Runner = run_command,
     remote: str | None = None,
+    require_current_remote: bool = False,
 ) -> VerifiedRecovery:
     default_paths = paths == RecoveryPaths()
     if default_paths and os.geteuid() != 0:
@@ -537,6 +538,15 @@ def create_recovery(
 
     with mutation_lock(paths.lock):
         _validate_backup_secret_custody(offline_recipient, paths, runner=runner, uid=uid)
+        if require_current_remote:
+            # The timer reads operator config before acquiring the lock. If an
+            # admin disabled/switched offsite in the meantime, never publish to
+            # the stale destination after that deliberate configuration change.
+            if runtime.load_config(paths.config).offsite_remote != remote:
+                raise RecoveryError(
+                    "saved offsite destination changed before backup lock was acquired; "
+                    "no recovery snapshot or remote upload was started, retry the backup"
+                )
         with tempfile.TemporaryDirectory(prefix="vwrec-build-", dir=str(paths.backups)) as directory:
             staging = Path(directory) / "staging"
             staging.mkdir()
@@ -1251,10 +1261,26 @@ def apply_retention(
     preserve: VerifiedRecovery,
     paths: RecoveryPaths = RecoveryPaths(),
     runner: Runner = run_command,
+    expected_backup_policy: tuple[str | None, int, int] | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if local_days <= 0 and (not remote or remote_days <= 0):
         return (), ()
     with mutation_lock(paths.lock):
+        if expected_backup_policy is not None:
+            # A backup may finish, release the lock, and then enter retention.
+            # No deletion may use stale settings after an administrator disables
+            # or changes the destination/retention in that small interval.
+            config = runtime.load_config(paths.config)
+            current_policy = (
+                config.offsite_remote,
+                config.local_retention_days,
+                config.remote_retention_days,
+            )
+            if current_policy != expected_backup_policy:
+                raise RecoveryError(
+                    "backup policy changed before retention; no recovery points "
+                    "were pruned, retry under the current operator configuration"
+                )
         local_deleted = prune_local_by_age(
             local_days,
             paths=paths,
