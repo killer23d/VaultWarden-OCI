@@ -272,6 +272,58 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.assertEqual(paths.config.read_text(encoding="utf-8"), config_text())
             self.assertEqual((paths.caddy_data / "cert-state").read_text(encoding="utf-8"), "cert")
 
+    def test_timer_backup_uses_current_saved_remote_inside_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            seed(paths)
+            runner = FakeRunner()
+            # The operator disabled cloud publishing after the timer read a
+            # stale nonempty destination but before it acquired the backup lock.
+            with self.assertRaisesRegex(recovery.RecoveryError, "destination changed"):
+                recovery.create_recovery(
+                    OFFLINE, paths=paths, runner=runner,
+                    remote="offsite:recovery", require_current_remote=True,
+                )
+            self.assertEqual(list(paths.backups.glob("*.vwrec")), [])
+            self.assertFalse(any(x[:2] == ("rclone", "copyto") for x in runner.calls))
+
+            # After the destination is saved, the very same local backup
+            # transaction automatically publishes and verifies the cloud copy.
+            paths.config.write_text(
+                config_text() + '\n[backup]\nremote = "offsite:recovery"\n',
+                encoding="utf-8",
+            )
+            verified = recovery.create_recovery(
+                OFFLINE, paths=paths, runner=runner,
+                remote="offsite:recovery", require_current_remote=True,
+            )
+            remote_name = f"offsite:recovery/{verified.artifact.name}"
+            self.assertEqual(runner.remote[remote_name], verified.artifact.read_bytes())
+            self.assertEqual(recovery._load_state(paths.state_file)["offsite"]["remote_object"], remote_name)
+            copies = [x for x in runner.calls if x[:2] == ("rclone", "copyto")]
+            self.assertEqual(len(copies), 2)  # local upload then independent remote read-back
+
+    def test_retention_refuses_stale_policy_before_deleting_local_or_cloud(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            seed(paths)
+            runner = FakeRunner()
+            old = paths.backups / "recovery-20260101T000000Z-old.vwrec"
+            old.write_bytes(AGE_HEADER + b"older local data")
+            verified = recovery.VerifiedRecovery(
+                artifact=paths.backups / "recovery-20261010T000000Z-current.vwrec",
+                sha256="a" * 64, size=1, created_at="2026-10-10T00:00:00Z",
+            )
+            verified.artifact.write_bytes(AGE_HEADER + b"new data")
+            with self.assertRaisesRegex(recovery.RecoveryError, "policy changed"):
+                recovery.apply_retention(
+                    1, remote="offsite:recovery", remote_days=1,
+                    preserve=verified, paths=paths, runner=runner,
+                    expected_backup_policy=("offsite:recovery", 1, 1),
+                )
+            self.assertTrue(old.exists())
+            self.assertFalse(any(x[:2] == ("rclone", "deletefile") for x in runner.calls))
+
     def test_backup_rejects_sops_offline_recipient_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = make_paths(Path(directory))
