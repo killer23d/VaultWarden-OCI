@@ -26,7 +26,7 @@ def status() -> None:
     print(f"Local retention: {local_policy}")
     print(f"Remote retention: {remote_policy}")
     if remote is None:
-        print("INFO: remote publishing is DISABLED: every scheduled/manual backup is currently LOCAL-ONLY")
+        print("INFO: remote publishing is disabled: every scheduled/manual backup is currently LOCAL-ONLY")
         print("INFO: rclone credentials alone do not authorize an upload destination")
         print("ACTION: choose the destination once with 'sudo vwctl recovery offsite configure'")
         return
