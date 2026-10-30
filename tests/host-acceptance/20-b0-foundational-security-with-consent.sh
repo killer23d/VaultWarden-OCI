@@ -207,6 +207,23 @@ if any(rows.get(key)!="PASS" for key in required):
     raise SystemExit(1)
 print("cloudflare_worker_check="+str(rows.get("crowdsec.cloudflare","MISSING")))
 print("runtime_paths_check="+str(rows.get("runtime.paths","MISSING")))
+runtime=next((x for x in data.get("checks",[]) if isinstance(x,dict) and x.get("id")=="runtime.paths"),{})
+message=str(runtime.get("message","")).lower()
+if rows.get("runtime.paths")=="PASS":
+    reason="none"
+elif "only partially materialized" in message:
+    reason="incomplete_prestart_runtime"
+elif "missing directory" in message:
+    reason="missing_directory"
+elif "missing file" in message:
+    reason="missing_file"
+elif "incompatible ownership/mode" in message:
+    reason="ownership_or_mode"
+elif "service identity" in message or "uid" in message or "gid" in message:
+    reason="service_identity"
+else:
+    reason="unclassified_private_detail"
+print("runtime_paths_reason_category="+reason)
 print("foundation_ready=PASS")
 PY
 then
