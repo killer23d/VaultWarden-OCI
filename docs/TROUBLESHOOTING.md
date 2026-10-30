@@ -341,6 +341,14 @@ That symptom can be the Caddy outer rate limit rather than SMTP rejection.
 
 **Verify:** `edge.admin.protection` reports either protected or deliberately disabled/closed.
 
+## Original emailed recovery-kit ZIP not found in chooser
+
+**Symptom:** the recovery identity chooser's option 3 reports `no local recovery-kit ZIPs found under /root/vaultwarden-recovery`, although the encrypted emailed ZIP is available elsewhere on the recovered host.
+
+**Correction:** In rc.12 and later, use **option 4, encrypted recovery-kit ZIP at an explicit file path**, and enter its full absolute pathname. On a temporary recovery host, protect the copy with `chmod 600 /path/to/kit.zip`, using the actual trusted owner; do not print, paste, or place the offline private Age key in a shell history or log. The product copies **only the encrypted ZIP** to mode-0700 protected volatile staging, verifies its AES-256 contents and matching offline recipient, then deletes the temporary kit copy and private identity on exit. Do not use a symlink or a ZIP in a group/world-readable location. The source ZIP remains the operator's responsibility and is not deleted.
+
+**Security boundary:** On a fresh production host, keep the ZIP and private identity off-host until recovery is required; using an encrypted ZIP located on an emergency temporary restore host is a deliberate break-glass action, not a reason to retain the offline identity on a running appliance.
+
 ## CrowdSec engine, Hub, or host firewall fails
 
 **Diagnose:**
