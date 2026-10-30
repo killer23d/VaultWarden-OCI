@@ -484,6 +484,64 @@ def _extract_recovery_kit_identity(archive: Path, passphrase: str, workspace: Pa
     return identity
 
 
+def _stage_explicit_recovery_kit(source: Path, workspace: Path) -> Path:
+    """Freeze an operator-selected encrypted ZIP in the protected tmpfs workspace.
+
+    A recovery-kit handoff is commonly stored outside the default root kit
+    directory. Do not scan user homes, follow symlinks, extract private keys
+    in their source directory, or trust a replaceable source during verification.
+    """
+    if not source.is_absolute() or source.suffix.lower() != ".zip":
+        raise RecoveryUXError("enter an absolute path to an encrypted recovery-kit .zip")
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise RecoveryUXError("cannot inspect the selected encrypted recovery-kit ZIP") from exc
+    allowed_owners = {0, os.geteuid()}
+    try:
+        allowed_owners.add(int(os.environ.get("SUDO_UID", "")))
+    except ValueError:
+        pass
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or not 0 < before.st_size <= 16 * 1024 * 1024
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_uid not in allowed_owners
+    ):
+        raise RecoveryUXError(
+            "selected recovery-kit ZIP must be regular, nonempty, at most 16 MiB, "
+            "owned by root/the invoking user, and mode 0600 (not a symlink)"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    staged = workspace / "encrypted-recovery-kit.zip"
+    try:
+        with os.fdopen(os.open(source, flags), "rb") as original:
+            opened = os.fstat(original.fileno())
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or opened.st_size != before.st_size
+                or not stat.S_ISREG(opened.st_mode)
+            ):
+                raise RecoveryUXError("selected recovery-kit ZIP changed during secure open")
+            dest_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(staged, dest_flags, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                total = 0
+                for chunk in iter(lambda: original.read(1024 * 1024), b""):
+                    total += len(chunk)
+                    if total > 16 * 1024 * 1024:
+                        raise RecoveryUXError("selected encrypted recovery-kit ZIP exceeds 16 MiB")
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if total != before.st_size:
+                raise RecoveryUXError("selected encrypted recovery-kit ZIP changed during copy")
+    except OSError as exc:
+        raise RecoveryUXError("cannot securely stage selected encrypted recovery-kit ZIP") from exc
+    return staged
+
+
 @contextmanager
 def acquire_offline_identity(
     configured_recipient: str,
@@ -507,6 +565,7 @@ def acquire_offline_identity(
             print("  1) Paste AGE-SECRET-KEY securely")
             print("  2) Use an identity file")
             print("  3) Use a local recovery-kit ZIP")
+            print("  4) Use a recovery-kit ZIP at an explicit file path")
             print("  q) Cancel")
             answer = input("Choice [1]: ").strip().lower()
             if answer in {"q", "quit", "cancel"}:
@@ -532,7 +591,7 @@ def acquire_offline_identity(
             if answer == "3":
                 candidates = _local_recovery_kits(publication_dir)
                 if not candidates:
-                    ui.warn(f"no local recovery-kit ZIPs found under {publication_dir}")
+                    ui.warn(f"no local recovery-kit ZIPs found under {publication_dir}; choose 4 to enter a ZIP path")
                     continue
                 ui.header("Local recovery-kit ZIPs (newest first)")
                 _print_local_recovery_kits(candidates)
@@ -547,7 +606,21 @@ def acquire_offline_identity(
                 identity = _extract_recovery_kit_identity(candidates[selected], passphrase, workspace)
                 yield _validate_offline_identity(identity, configured_recipient, runner=runner)
                 return
-            ui.warn("choose 1, 2, 3, or q")
+            if answer == "4":
+                raw = input("Absolute path to encrypted recovery-kit ZIP (or q to cancel): ").strip()
+                if raw.lower() in {"q", "quit", "cancel"}:
+                    yield None
+                    return
+                source = Path(raw).expanduser()
+                workspace = _new_identity_workspace(sensitive_root)
+                archive = _stage_explicit_recovery_kit(source, workspace)
+                passphrase = getpass.getpass("Recovery-kit ZIP passphrase (input hidden): ")
+                if not passphrase:
+                    raise RecoveryUXError("recovery-kit ZIP passphrase is required")
+                identity = _extract_recovery_kit_identity(archive, passphrase, workspace)
+                yield _validate_offline_identity(identity, configured_recipient, runner=runner)
+                return
+            ui.warn("choose 1, 2, 3, 4, or q")
     finally:
         if workspace is not None:
             _cleanup_identity_workspace(workspace)
