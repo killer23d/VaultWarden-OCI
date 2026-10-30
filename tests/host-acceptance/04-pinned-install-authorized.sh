@@ -133,9 +133,10 @@ then stop BLOCKED "Disk no longer meets blank, non-boot, 50 GiB preflight"; fi
 say PASS "Exact OCI-alias disk, serial, size and blank state reverified"
 
 printf '\nRecovery custody is mandatory BEFORE the disk is formatted.\n'
-printf 'On a separate trusted workstation derive the existing public recipient\n'
-printf 'from your OFFLINE private Age identity with age-keygen -y.\n'
-printf 'The recovery-kit ZIP, passphrase and Box access must be independently held.\n'
+printf 'The emailed AES-256 recovery-kit ZIP contains the existing offline Age identity.\n'
+printf 'Use ONLY the PUBLIC age1... value printed by the prior kit-config check.\n'
+printf 'This script will verify the matching private identity in RAM without writing it.\n'
+printf 'The ORIGINAL encrypted ZIP and its passphrase must remain in off-host custody.\n'
 printf 'Do NOT paste private keys, recovery passwords or cloud tokens.\n\n'
 IFS= read -r -p "Existing OFFLINE Age PUBLIC recipient (age1...): " RECIPIENT </dev/tty ||
   stop BLOCKED "Public recipient not supplied"
@@ -143,14 +144,34 @@ if [ -z "$RECIPIENT" ]; then
   stop BLOCKED "No existing public Age recipient provided. This NEW host cannot generate a replacement key that decrypts the OLD Box backup. Find the original offline recovery kit or offline private identity first; no disk changes have occurred."
 fi
 [[ "$RECIPIENT" =~ ^age1[0-9a-z]{50,70}$ ]] ||
-  stop BLOCKED "Invalid public Age recipient. Obtain age1... from the original appliance configuration or derive it on a trusted workstation using age-keygen -y against the MATCHING old offline private identity."
-printf '\nDo not continue unless this recipient came from the key that unlocks\n'
-printf 'the existing Box recovery point, NOT a newly generated key.\n'
-IFS= read -r -p "Type EXISTING OFFHOST KEY to attest independent custody: " CUSTODY </dev/tty ||
-  stop BLOCKED "Offline identity custody not confirmed"
-[ "$CUSTODY" = "EXISTING OFFHOST KEY" ] ||
-  stop BLOCKED "Existing off-host recovery identity custody unconfirmed"
-say PASS "Operator attested external recovery-key custody (decrypt not yet tested)"
+  stop BLOCKED "Invalid public Age recipient. Reuse only the exact age1... recipient from the successfully decrypted EMAIL recovery kit."
+
+# Verify the actual emailed offline private identity before the destructive gate.
+# The helper extracts only two ZIP members in process memory. It never prints
+# or persists the private identity, password, or credential member.
+KIT="$HOME/vaultwarden-recovery-kit-20261006T222828Z.zip"
+HELPER="$SOURCE/tests/host-acceptance/07-kit-identity-match-ubuntu.py"
+[ -f "$KIT" ] && [ ! -L "$KIT" ] ||
+  stop BLOCKED "Expected emailed recovery kit missing: $KIT"
+[ -f "$HELPER" ] || stop BLOCKED "Missing in-memory offline-key verification helper"
+command -v 7zz >/dev/null 2>&1 || command -v 7z >/dev/null 2>&1 ||
+  stop BLOCKED "7-Zip missing; install Ubuntu 7zip first"
+command -v age-keygen >/dev/null 2>&1 ||
+  stop BLOCKED "age-keygen missing; install Ubuntu 'age' before running Gate A2"
+if python3 -B "$HELPER" "$KIT" "$RECIPIENT" | tee "$OUT/kit-identity-verification.txt"; then
+  say PASS "Original recovery-kit offline private identity derives exact supplied public recipient"
+else
+  stop BLOCKED "Offline private-key verification failed; disk formatting is forbidden"
+fi
+
+printf '\nThis match does NOT yet prove decryption of the existing Box .vwrec.\n'
+printf 'The original encrypted kit, its passphrase and Box access must remain in\n'
+printf 'your independent OFF-HOST custody. No new offline Age identity was generated.\n'
+IFS= read -r -p "Type KIT HELD OFFHOST to attest existing ZIP/passphrase custody: " CUSTODY </dev/tty ||
+  stop BLOCKED "Independent recovery-kit custody not confirmed"
+[ "$CUSTODY" = "KIT HELD OFFHOST" ] ||
+  stop BLOCKED "Independent recovery-kit custody not confirmed"
+say PASS "Operator attested off-host encrypted kit and passphrase custody"
 
 printf '\nFirst-install site values are temporary until the older vault is restored.\n'
 printf 'This command WILL NOT publish the public hostname or enable DNS timers.\n'
