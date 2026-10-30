@@ -63,37 +63,48 @@ raw = log_path.read_bytes()
 if len(raw) > 2_000_000:
     raw = raw[-2_000_000:]
 log = raw.decode("utf-8", errors="replace")
-fail_lines = [line.strip() for line in log.splitlines()
-              if re.match(r"(?i)^\s*FAIL\s*:", line)]
-print("original_failure_markers=" + str(len(fail_lines)))
-if not fail_lines:
+# Installer UI writes "FAIL <message>", not necessarily "FAIL: <message>".
+# Preserve only a fixed classification; never echo raw log text.
+lines = log.splitlines()
+fail_offsets = [
+    idx for idx, line in enumerate(lines)
+    if re.match(r"^\s*(?:\x1b\[[0-9;]*m)?FAIL(?:[ \t]|:)", line, re.I)
+]
+print("original_failure_markers=" + str(len(fail_offsets)))
+if not fail_offsets:
     print("failure_stage=UNKNOWN_NO_FAIL_MARKER")
+    print("curl_exit_code=NOT_IN_ERROR_BLOCK")
+    print("http_error_code=NOT_IN_ERROR_BLOCK")
 else:
-    last = fail_lines[-1]
+    last_index = fail_offsets[-1]
+    last = lines[last_index].strip()
+    # _must() embeds stderr, which may span multiple log lines after FAIL.
+    # Restrict to the final failure block, not unrelated earlier output.
+    failure = "\n".join(lines[last_index:])
     if re.search(r"SOPS\s+3\.13\.3\s+download\s+failed", last, re.I):
         category = "SOPS_DOWNLOAD_FAILED"
     elif re.search(r"SOPS\s+3\.13\.3\s+SHA-256\s+verification\s+failed", last, re.I):
         category = "SOPS_CHECKSUM_MISMATCH"
-    elif "dependency verification failed: SOPS" in last:
+    elif re.search(r"dependency verification failed:\s*SOPS", last, re.I):
         category = "SOPS_EXECUTION_CHECK_FAILED"
     elif "SOPS" in last:
         category = "OTHER_SOPS_ERROR"
     else:
         category = "NOT_SOPS_FAILURE"
     print("failure_stage=" + category)
-    match = re.search(r"\bcurl:\s*\((\d+)\)", last, re.I)
-    print("curl_exit_code=" + (match.group(1) if match else "NOT_IN_ERROR_LINE"))
-    # Include only unambiguous HTTP error codes, never raw URLs or text.
-    http = re.search(r"\b(?:HTTP\s+|status(?:\s+code)?\s*[=:]?\s*)(4\d\d|5\d\d)\b", last, re.I)
-    print("http_error_code=" + (http.group(1) if http else "NOT_IN_ERROR_LINE"))
+    matches = re.findall(r"\bcurl:\s*\((\d+)\)", failure, re.I)
+    print("curl_exit_code=" + (matches[-1] if matches else "NOT_IN_ERROR_BLOCK"))
+    http = re.search(r"\b(?:HTTP\s+|status(?:\s+code)?\s*[=:]?\s*)(4\d\d|5\d\d)\b", failure, re.I)
+    print("http_error_code=" + (http.group(1) if http else "NOT_IN_ERROR_BLOCK"))
     for label, terms in (
         ("resolution_error", ("could not resolve host", "temporary failure resolving")),
         ("connection_timeout", ("timed out", "timeout was reached")),
         ("tls_error", ("SSL certificate problem", "certificate verify failed")),
         ("connection_closed", ("transfer closed", "connection reset")),
         ("disk_io_error", ("failed writing received data", "no space left on device")),
+        ("permission_error", ("permission denied", "operation not permitted")),
     ):
-        print(label + "=" + str(any(term.lower() in last.lower() for term in terms)).lower())
+        print(label + "=" + str(any(term.lower() in failure.lower() for term in terms)).lower())
 source = setup_path.read_text(encoding="utf-8")
 m = re.search(r'(?s)SOPS_SHA256\s*=\s*\{(.{0,500}?)\}', source)
 pin = re.search(r'"arm64"\s*:\s*"([0-9a-f]{64})"', m.group(1)) if m else None
