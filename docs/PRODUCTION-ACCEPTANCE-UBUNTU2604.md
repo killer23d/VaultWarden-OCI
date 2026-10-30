@@ -8,7 +8,7 @@ This audit is pinned to the reviewed `v2` source commit `e0f961c9093e98139e4f57b
 |---|---|---|---|
 | 01. Read-only inventory, identity, runtime and automation inspection | Ubuntu 26.04 ARM64 acceptance host | Read-only to appliance; creates evidence under user home | NOT RUN until operator executes |
 | A0. Fresh-host disk inventory and root-disk refusal | New Ubuntu 26.04 ARM64 instance | Read-only; installer is invoked only with --dry-run and the root disk, which must be rejected | PASS (operator transcript 2026-10-30) |
-| A1. Selected-by-id-volume setup dry-run | Same disposable Ubuntu 26.04 ARM64 instance | Read-only; synthetic public Age recipient used strictly for dry-run | NOT RUN |
+| A1. Selected-by-id-volume setup dry-run | Same disposable Ubuntu 26.04 ARM64 instance | Read-only; synthetic public Age recipient used strictly for dry-run | PASS read-only checks; installation remains BLOCKED pending OCI Console ownership approval |
 | A. Independent fresh-host disaster recovery | Separate disposable Ubuntu 26.04 ARM64 with a separately provisioned data volume | Initially read-only; later restore is destructive and separately authorized | NOT RUN |
 | B. Observe a real unattended backup timer activation and verified cloud readback | Installed acceptance host | Existing timer operation only; writes a normal backup and remote object | NOT RUN |
 | C. Cold reboot, service/security and notification observation | Disposable acceptance host | Deliberate reboot and message delivery, separately approved | NOT RUN |
@@ -37,6 +37,15 @@ Run `tests/host-acceptance/03-selected-volume-dryrun.sh` using the by-id path an
 This stage deliberately passes a **syntactic test-only Age recipient** to `setup.sh --dry-run`. That fixture has no usable private key and **must never** be used for a real installation or recovery. The actual matching offline Age recipient must be derived from the independently held off-host identity **before any real installation**. This test does not exercise credential custody, Box access, restore, Cloudflare, or CrowdSec.
 
 The script deliberately exits nonzero when its read-only tests have passed but OCI block-volume ownership remains unverified: this reports that the next destructive stage is still **BLOCKED**, rather than suggesting implicit formatting permission.
+
+
+### A1 supplied operator results (2026-10-30)
+
+The operator provided the `summary.txt` and `device-report.txt` contents for the A1 selected-volume dry run, repeated twice. Accepted facts: stable path `/dev/disk/by-id/scsi-36015f8fecf5e4f7ab864af5a651cc628` resolves to `/dev/sda`; the root source is `/dev/sdb1`; selected volume has exactly `53,687,091,200` bytes (50.00 GiB); no mounted filesystems, partition children or recognized signatures; and the installer accepted this exact target under `--dry-run` while refusing a nonexistent target. The device metadata and appliance paths remained unchanged. Read-only checks **PASS**; intentionally reported **BLOCKED** is retained for provider-side attachment ownership and explicit formatting authorization.
+
+Next operator action is manual: inspect **Compute → Instances → the disposable instance → Storage → Attached block volumes** in OCI Console. Check that the intended **50 GiB** data volume is attached to this exact instance and is not a boot, production, shared, or otherwise valuable volume. Oracle documents an optional **Device path** field in attachment details; if present, compare it to the matching `/dev/oracleoci/*` symlink on the guest. Do not assume a SCSI `/dev/disk/by-id` identifier equals a volume OCID. A console-facing name/size alone without an unambiguous match should be treated as requiring further review. Do not run any `mkfs`, installer `--confirm-format`, or restore until the operator separately confirms volume ownership and explicitly authorizes the destruction of exactly that volume.
+
+Independent off-host recovery prerequisites also remain untested: the existing offline Age private key must already be accessible off-host (or recoverable from the separately held password-protected recovery-kit ZIP), the matching **public recipient** must be known for setup, and Box credentials must be recoverable independently from the old instance. Never create a new offline identity for an old encrypted recovery point. Never transmit private Age keys, ZIP passphrases, rclone credentials, or Cloudflare tokens in chat.
 
 ## Gate A0 — next operator preflight
 
