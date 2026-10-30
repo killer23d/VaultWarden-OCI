@@ -104,7 +104,6 @@ def _main() -> int:
         raise RuntimeError("empty or unsupported ZIP passphrase")
 
     requested = 0
-    approved = False
     workspace = recovery_ux._new_identity_workspace(SENSITIVE_ROOT)
     try:
         # The installed product owns AES-256 ZIP validation and extraction;
@@ -135,7 +134,7 @@ def _main() -> int:
         outcome = recovery_ux.restore_remote_once(
             remote, identity, approve=refuse, start=False
         )
-        if requested != 1 or outcome is not None or approved:
+        if requested != 1 or outcome is not None:
             raise RuntimeError("restore refusal boundary did not return expected cancelled outcome")
     finally:
         recovery_ux._cleanup_identity_workspace(workspace)
