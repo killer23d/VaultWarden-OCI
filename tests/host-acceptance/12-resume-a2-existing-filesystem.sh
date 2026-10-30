@@ -308,14 +308,28 @@ sudo -n /usr/local/bin/sops --version >/dev/null 2>&1 ||
     block "Pinned installed SOPS does not execute"
 say PASS "SOPS v3.13.3 matches official SHA-256 and executes"
 
+# systemctl is-enabled exits 0 for static services too. Do not confuse
+# UnitFileState=static with an enabled boot/start symlink.
 for unit in vaultwarden-oci.target vaultwarden-oci.service \
-    vaultwarden-oci-backup.timer vaultwarden-oci-dns.service; do
-    if systemctl is-active --quiet "$unit" ||
-       systemctl is-enabled --quiet "$unit" 2>/dev/null; then
-        block "Unexpected active/enabled app or DNS/timer unit: $unit"
-    fi
+    vaultwarden-oci-health.timer vaultwarden-oci-backup.timer \
+    vaultwarden-oci-maintenance.timer vaultwarden-oci-update-check.timer \
+    vaultwarden-oci-dns.service; do
+    ACTIVE="$(systemctl show --property=ActiveState --value "$unit")" ||
+        block "Cannot read activity state of $unit"
+    ENABLED="$(systemctl show --property=UnitFileState --value "$unit")" ||
+        block "Cannot read unit-file state of $unit"
+    [ "$ACTIVE" = inactive ] ||
+        block "Unexpected active or failed systemd unit: $unit ($ACTIVE)"
+    case "$unit" in
+        vaultwarden-oci-dns.service)
+            [ "$ENABLED" = static ] ||
+                block "DNS unit must remain static (not enabled): $ENABLED" ;;
+        *)
+            [ "$ENABLED" = disabled ] ||
+                block "Appliance target or timer enabled unexpectedly: $unit ($ENABLED)" ;;
+    esac
 done
-say PASS "Appliance target, DNS service and backup timer remain inactive/disabled"
+say PASS "Target, app and all four timers inactive/disabled; DNS oneshot inactive/static"
 say "NOT RUN" "Box archive download/decryption verification, restore or DNS cutover"
 say "NOT RUN" "Upstream PR #373 validation on clean Ubuntu 26.04 with new pinned release"
 printf 'Evidence: %s\n' "$OUT"
