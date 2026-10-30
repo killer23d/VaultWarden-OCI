@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import socket
 from pathlib import Path
 import re
 import shutil
@@ -74,6 +75,18 @@ def command(argv: list[str], *, input_text: str | None = None, timeout: int = 60
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         return fail("Usage: python3 05-kit-public-recipient.py /path/to/emailed-recovery-kit.zip")
+    # Workstation-only custody boundary: fail BEFORE opening the ZIP or asking
+    # for its password if invoked from an appliance or OCI guest via SSH.
+    guest_name = socket.gethostname().split(".", 1)[0].lower()
+    if guest_name.startswith("vaultwarden-oci-") or Path("/dev/oracleoci").exists():
+        return fail(
+            "this is a VaultWarden/OCI server, not the trusted workstation. "
+            "Open the emailed ZIP locally on your Mac/Linux computer, install "
+            "age and sevenzip there, and re-run this helper locally. "
+            "Do not extract the offline private Age identity on the new server."
+        )
+    if os.geteuid() == 0:
+        return fail("run locally as your regular workstation account, not root/sudo")
     if not sys.stdin.isatty():
         return fail("run this only in your trusted computer's interactive terminal")
     if sys.version_info < (3, 9):
