@@ -38,7 +38,7 @@ esac
     stop BLOCKED "The device must be a direct /dev/disk/by-id/ entry"
 [[ "$EXPECTED_BYTES" =~ ^[1-9][0-9]*$ ]] ||
     stop BLOCKED "Expected size must be an exact positive integer in bytes"
-for bin in git python3 sudo lsblk findmnt wipefs readlink cmp bash; do
+for bin in git python3 sudo lsblk findmnt wipefs readlink cmp bash systemctl grep; do
     command -v "$bin" >/dev/null 2>&1 ||
         stop BLOCKED "Missing read-only preflight tool: $bin"
 done
@@ -170,7 +170,7 @@ then
     stop FAIL "Disk identity, size, or empty-device metadata did not match expected facts"
 fi
 cat "$EVDIR/device-report.txt"
-say PASS "Stable by-id target is a separate unmounted 50 GiB-class disk with no recognized signatures"
+say PASS "Stable by-id target is an independent unmounted disk of the expected size with no recognized signatures"
 say BLOCKED "OCI Console block-volume ownership must be independently confirmed before formatting"
 
 # This recipient is synthetic, format-only test data for --dry-run.
@@ -231,4 +231,8 @@ say "NOT RUN" "Installation, filesystem provisioning, Box retrieval or ciphertex
 say "NOT RUN" "Guided restore cancellation, authorized restore, application health and DNS cutover"
 printf 'Evidence: %s\n' "$EVDIR"
 printf 'Share summary.txt and device-report.txt; keep other files private.\n'
+# Read-only tests can pass while installation remains explicitly blocked.
+if grep -Eq '^(FAIL|BLOCKED)[[:space:]]' "$SUMMARY"; then
+    exit 1
+fi
 exit 0
