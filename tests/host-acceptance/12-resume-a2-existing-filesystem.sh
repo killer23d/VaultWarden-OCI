@@ -39,7 +39,7 @@ block() {
     block "Run only as ubuntu on the original disposable OCI acceptance host"
 [ -t 0 ] && [ -r /dev/tty ] || block "Interactive operator terminal required"
 for cmd in git python3 sudo stat lsblk findmnt wipefs sha256sum systemctl \
-    grep readlink tr bash dpkg; do
+    grep readlink tr bash dpkg pgrep tail cut; do
     command -v "$cmd" >/dev/null 2>&1 || block "Missing required host command: $cmd"
 done
 sudo -n true >/dev/null 2>&1 || block "Passwordless sudo unavailable"
@@ -169,15 +169,19 @@ say PASS "No existing release, config, SOPS, secrets or running appliance automa
 # Use sudo env after privilege elevation so sudo does not discard TMPDIR.
 TMPBASE="/var/tmp"
 if ! sudo -n python3 -B -E - "$TMPBASE" <<'PY'
-import os, stat, sys, tempfile
+import os, stat, sys
 base = sys.argv[1]
 source = os.stat(base)
 destination = os.stat("/usr/local/bin")
+if any(os.path.islink(p) for p in (base, "/usr/local/bin")):
+    raise SystemExit(1)
 if not stat.S_ISDIR(source.st_mode) or not stat.S_ISDIR(destination.st_mode):
     raise SystemExit(1)
 if source.st_dev != destination.st_dev:
     raise SystemExit(1)
-if tempfile._get_default_tempdir is None:  # no-op: retain no private data
+if source.st_uid != 0 or destination.st_uid != 0:
+    raise SystemExit(1)
+if stat.S_IMODE(source.st_mode) & 0o002 and not source.st_mode & stat.S_ISVTX:
     raise SystemExit(1)
 PY
 then
