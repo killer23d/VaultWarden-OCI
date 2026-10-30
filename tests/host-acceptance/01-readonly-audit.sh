@@ -9,7 +9,7 @@ BRANCH="audit/rc11-ubuntu2604-arm64-production-readiness"
 RELEASE="0.1.0-rc.11"
 SOURCE="$(cd "$(dirname "$0")/../.." && pwd -P)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-EVDIR="$HOME/vwoci-acceptance/phase1-readonly-$STAMP"
+EVDIR="$HOME/vwoci-acceptance/initial-readonly-$STAMP"
 SUMMARY="$EVDIR/summary.txt"
 
 mkdir -p "$EVDIR"
@@ -26,7 +26,7 @@ stop() {
   exit 1
 }
 
-printf 'VaultWarden-OCI Phase 1 — Ubuntu 26.04 ARM64 read-only audit\n'
+printf 'VaultWarden-OCI Initial inventory — Ubuntu 26.04 ARM64 read-only audit\n'
 printf 'Evidence directory: %s\n' "$EVDIR"
 printf 'UTC started: %s\n' "$(date -u --iso-8601=seconds)" > "$EVDIR/metadata.txt"
 printf 'Source: %s\n' "$SOURCE" >> "$EVDIR/metadata.txt"
