@@ -10,8 +10,6 @@ BRANCH="audit/rc11-ubuntu2604-arm64-production-readiness"
 RELEASE="0.1.0-rc.11"
 HOST="vaultwarden-oci-5-vnic"
 DOMAIN="bw.lazymocha.com"
-SERIAL="6015f8fecf5e4f7ab864af5a51a1051440"
-# The actual OCI stable disk serial on this acceptance host:
 SERIAL="6015f8fecf5e4f7ab864af5a651cc628"
 BYID="/dev/disk/by-id/scsi-36015f8fecf5e4f7ab864af5a651cc628"
 ALIAS="/dev/oracleoci/oraclevdb"
@@ -275,9 +273,18 @@ for unit in vaultwarden-oci.target vaultwarden-oci.service \
     enabled="$(systemctl show -p UnitFileState --value "$unit")"
     [ "$active" = active ] ||
         block "Expected enabled DEV target/timer is not active: $unit"
-    [ "$enabled" = enabled ] ||
-        block "DEV target/timer does not report persistent enablement: $unit"
-    say INFO "enabled_unit=$unit active=$active persistent=$enabled"
+    if [ "$unit" = vaultwarden-oci.target ]; then
+        [ "$enabled" = enabled ] ||
+            block "DEV lifecycle target does not have persistent boot enablement"
+    else
+        # The target's Wants= starts its service and timers at runtime. Systemd
+        # intentionally leaves the individual unit files disabled unless
+        # separately enabled; they still start on boot via the enabled target.
+        case "$enabled" in enabled|disabled) ;; *)
+            block "Unexpected child service/timer unit-file state: $unit ($enabled)" ;;
+        esac
+    fi
+    say INFO "unit=$unit active=$active unit_file=$enabled (target enables boot lifecycle)"
 done
 [ "$(systemctl show -p UnitFileState --value "$WORKER")" = disabled ] ||
     block "Worker bouncer unexpectedly boot-enabled; must remain explicit"
