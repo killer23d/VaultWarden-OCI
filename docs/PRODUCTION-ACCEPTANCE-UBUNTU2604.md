@@ -91,6 +91,17 @@ As a consequence, this evidence supports only “public recipient recovered from
 
 If 7-Zip is missing, install `7zip` via Ubuntu apt on the **disposable acceptance host**, not on macOS. This changes the host package baseline before running installer Gate A2: document the package as preinstalled and do not claim fresh-image `7zip` bootstrap coverage from the subsequent install. It does not format or mount the dedicated data disk. All destructive changes remain gated by A2's explicit disk/serial consent.
 
+
+### Emailed kit public recipient validated; pre-format private-key check added (2026-10-30)
+
+Operator evidence: on `vaultwarden-oci-5-vnic`, the Ubuntu 26.04 `7zip` package was installed from the OS repository and the read-only kit-config helper accepted the emailed `vaultwarden-recovery-kit-20261006T222828Z.zip`, validating its expected AES-256 member structure and decrypting only `config.toml` in memory. This recovered a syntactically valid original offline Age **public** recipient (not repeated in this runbook). The original offline **private** identity and the Box `.vwrec` were **not yet tested**.
+
+To close the pre-format custody gap, the audit branch now includes `tests/host-acceptance/07-kit-identity-match-ubuntu.py` and Gate A2 invokes it **before final formatting consent**. The operator uses the existing kit and ZIP passphrase. The helper reads only `config.toml` and `offline-recovery-identity.txt` from the encrypted ZIP into process memory, derives the public recipient using the official `age-keygen -y` standard-input interface, and compares the result with both the recipient in the kit configuration and the one supplied to Gate A2. It never writes private identity material to a file or prints it. The private identity lives briefly in the process's memory and subprocess pipes on the **disposable** Ubuntu host, not persistently on the appliance.
+
+The Ubuntu package `age` must be installed before this check, in addition to the previously installed `7zip`. This means the subsequent A2 installation does **not** constitute fresh-image proof of missing-Age-tool bootstrap behavior; that distinct test remains **NOT RUN**. The encrypted ZIP is already present on the disposable host; verify continued off-host independent custody before using it. No production DNS, remote Box backup, or filesystem mutations occur during identity verification.
+
+A successful matching private key still does not prove that a possibly newer Box `.vwrec` uses the same recipient. Real remote archive retrieval, decrypt/manifest/SOPS verification, and restore remain mandatory gates before production readiness can be accepted.
+
 ## Gate A0 — next operator preflight
 
 Once Stage 01 confirms the host is fresh and uninstalled, run `tests/host-acceptance/02-fresh-host-preflight.sh` on **that same host**. It inventories non-boot devices via the existing `vaultwarden_oci.storage.inventory()`, lists filesystem signatures with read-only `wipefs --noheadings --output TYPE`, and verifies that the actual `setup.sh install --auto --dry-run` refuses the boot/root device.
