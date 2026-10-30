@@ -33,7 +33,7 @@ stop() {
 [ "$(id -un)" = ubuntu ] && [ "$(hostname -s)" = "$HOST" ] ||
   stop BLOCKED "Run as ubuntu on the exact disposable acceptance host only"
 [ -t 0 ] && [ -r /dev/tty ] || stop BLOCKED "Interactive terminal required"
-for cmd in git python3 sudo lsblk wipefs readlink sha256sum systemctl bash grep; do
+for cmd in git python3 sudo lsblk wipefs readlink sha256sum systemctl bash grep tr cut; do
   command -v "$cmd" >/dev/null 2>&1 || stop BLOCKED "Missing: $cmd"
 done
 [ "$(git -C "$SOURCE" branch --show-current)" = "$BRANCH" ] ||
@@ -184,6 +184,16 @@ IFS= read -r -p "Authorization: " ACK </dev/tty ||
 [ "$ACK" = "$ACK_REQUIRED" ] ||
   stop BLOCKED "Exact per-volume erase authorization NOT received"
 say PASS "Operator explicitly authorized formatting the identified test volume"
+
+# Recheck the exact target at the irreversible boundary, after typed consent.
+[ "$DISK" = "$(readlink -e "$BYID")" ] &&
+[ "$DISK" = "$(readlink -e "$ALIAS")" ] &&
+[ "$(sudo -n lsblk -bdn -o SIZE "$DISK" | tr -d '[:space:]')" = "$BYTES" ] &&
+[ "$(sudo -n lsblk -dn -o SERIAL "$DISK" | tr -d '[:space:]')" = "$SERIAL" ] ||
+  stop BLOCKED "Disk alias, size, or serial changed after authorization"
+[ -z "$(sudo -n wipefs --noheadings --output TYPE "$DISK")" ] ||
+  stop BLOCKED "Disk signatures changed after authorization"
+say PASS "Final stable device identity and blank signatures rechecked immediately before formatting"
 
 say INFO "Installing pinned appliance and host dependencies; raw log remains PRIVATE"
 if NO_COLOR=1 sudo -n bash "$SOURCE/setup.sh" install \
