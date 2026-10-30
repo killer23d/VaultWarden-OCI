@@ -80,6 +80,17 @@ Operator supplied a failed attempt from the **new OCI acceptance instance** `vau
 
 The helper now fail-closes on an appliance-like host name or `/dev/oracleoci` guest device path **before accessing the ZIP/passphrase**, to prevent extracting the offline private identity onto the recovery instance. Correct next step: open the emailed kit directly on a trusted personal macOS/Linux computer and run the pinned helper locally with `age-keygen`, `7zz/7z` and Python installed there. Post only PASS/BLOCKED and public `age1...` output. There is no reason to install tooling on the fresh test server solely to extract the old private key. Gate A2 formatting and fresh-host installation remain NOT RUN, with no filesystem changes.
 
+
+### Ubuntu-only public-recipient lookup (no Mac installation)
+
+On 2026-10-30 the operator ran the earlier **workstation-only** `05-kit-public-recipient.py` on the new Ubuntu 26.04 OCI host, with a local copy of `vaultwarden-recovery-kit-20261006T222828Z.zip`. The script stopped before extraction because neither Age nor 7-Zip was installed. The user's Mac cannot install Homebrew; no Mac installation is required for the next step.
+
+For the narrow goal of recovering the **public** `age1...` recipient, use `tests/host-acceptance/06-kit-public-only-ubuntu.py` on the Ubuntu machine. This intentionally has **no Age dependency**: Ubuntu 26.04's packaged `7zip` is sufficient. The helper checks the complete expected five-member AES-256 ZIP structure, asks for the existing ZIP passphrase without echo, and streams **only** `config.toml` into program memory. It prints the `[secrets].offline_recovery_recipient` public value and **never extracts or opens** either Age private identity, `credentials.txt` or the other kit members. It does not write plaintext to disk, create new keys, touch the appliance state or initiate a restore.
+
+As a consequence, this evidence supports only “public recipient recovered from readable encrypted kit config.” The matching private key has **not** been exercised, and the **Box .vwrec must still be independently decrypted/verified** with the original offline identity during the next gate. Keep the encrypted kit and separate passphrase protected; since the encrypted kit is already on the OCI test host, review secure cleanup after the recipient has been recovered and verified, without deleting the operator's sole off-host kit.
+
+If 7-Zip is missing, install `7zip` via Ubuntu apt on the **disposable acceptance host**, not on macOS. This changes the host package baseline before running installer Gate A2: document the package as preinstalled and do not claim fresh-image `7zip` bootstrap coverage from the subsequent install. It does not format or mount the dedicated data disk. All destructive changes remain gated by A2's explicit disk/serial consent.
+
 ## Gate A0 — next operator preflight
 
 Once Stage 01 confirms the host is fresh and uninstalled, run `tests/host-acceptance/02-fresh-host-preflight.sh` on **that same host**. It inventories non-boot devices via the existing `vaultwarden_oci.storage.inventory()`, lists filesystem signatures with read-only `wipefs --noheadings --output TYPE`, and verifies that the actual `setup.sh install --auto --dry-run` refuses the boot/root device.
