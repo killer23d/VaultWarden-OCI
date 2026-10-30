@@ -180,13 +180,17 @@ fi
 if sudo -n test -e "$KITDIR"; then
     [ "$(sudo -n stat -c '%u %a %F' "$KITDIR")" = "0 700 directory" ] ||
         block "Existing kit directory has unsafe ownership/mode"
-    sudo -n python3 -B -E - "$KITDIR" <<'PY' >/dev/null 2>&1 ||
-        block "Root publication directory is not empty; refuse to touch any existing kit"
+    if sudo -n python3 -B -E - "$KITDIR" <<'PY' >/dev/null 2>&1
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 raise SystemExit(0 if not any(root.iterdir()) else 1)
 PY
+    then
+        :
+    else
+        block "Root publication directory is not empty; refuse to touch any existing kit"
+    fi
 else
     sudo -n install -d -m 700 -o root -g root -- "$KITDIR" ||
         block "Cannot create private root publication directory"
