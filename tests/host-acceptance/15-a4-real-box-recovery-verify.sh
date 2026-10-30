@@ -66,7 +66,7 @@ trap cleanup EXIT
 [ -t 0 ] && [ -t 1 ] && [ -r /dev/tty ] ||
     block "Interactive terminal needed for hidden ZIP passphrase and protected identity chooser"
 for cmd in git sudo python3 sha256sum stat lsblk findmnt readlink systemctl \
-    rclone grep cmp install rmdir; do
+    rclone grep install rmdir rm cut tr cat; do
     command -v "$cmd" >/dev/null 2>&1 || block "Missing utility: $cmd"
 done
 sudo -n true >/dev/null 2>&1 || block "Noninteractive sudo unavailable"
@@ -143,9 +143,12 @@ for unit in vaultwarden-oci.target vaultwarden-oci.service \
     [ "$ACTIVE" = inactive ] ||
         block "Appliance/timer/DNS was activated unexpectedly: $unit"
 done
-if ! sudo -n rclone listremotes 2> "$OUT/rclone.private.stderr" | grep -Fxq 'bw-backup:'; then
-    block "Root bw-backup: rclone remote not available"
+if ! sudo -n rclone listremotes > "$OUT/root-remotes.private.txt" \
+    2> "$OUT/rclone.private.stderr"; then
+    block "Root's rclone config is inaccessible; leave secrets private"
 fi
+grep -Fxq 'bw-backup:' "$OUT/root-remotes.private.txt" ||
+    block "Root bw-backup: rclone remote not available"
 [ -f "$KIT_SOURCE" ] && [ ! -L "$KIT_SOURCE" ] &&
 [ "$(stat -c %a "$KIT_SOURCE")" = 600 ] ||
     block "Original encrypted emailed kit must be a regular mode-0600 file at approved user path"
