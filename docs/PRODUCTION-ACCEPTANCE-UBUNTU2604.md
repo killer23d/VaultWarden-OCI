@@ -8,7 +8,8 @@ This audit is pinned to the reviewed `v2` source commit `e0f961c9093e98139e4f57b
 |---|---|---|---|
 | 01. Read-only inventory, identity, runtime and automation inspection | Ubuntu 26.04 ARM64 acceptance host | Read-only to appliance; creates evidence under user home | NOT RUN until operator executes |
 | A0. Fresh-host disk inventory and root-disk refusal | New Ubuntu 26.04 ARM64 instance | Read-only; installer is invoked only with --dry-run and the root disk, which must be rejected | PASS (operator transcript 2026-10-30) |
-| A1. Selected-by-id-volume setup dry-run | Same disposable Ubuntu 26.04 ARM64 instance | Read-only; synthetic public Age recipient used strictly for dry-run | PASS read-only checks; installation remains BLOCKED pending OCI Console ownership approval |
+| A1. Selected-by-id-volume setup dry-run | Same disposable Ubuntu 26.04 ARM64 instance | Read-only; synthetic public Age recipient used strictly for dry-run | PASS read-only checks and manual attachment confirmation; no format authorized yet |
+| A2. Pinned release installation | Confirmed disposable OCI Ubuntu 26.04 ARM64 host, exact by-id block volume | Explicit typed per-volume erase consent is required; installs dependencies, source-pinned rc.11, initial SOPS but does not start or restore | NOT RUN |
 | A. Independent fresh-host disaster recovery | Separate disposable Ubuntu 26.04 ARM64 with a separately provisioned data volume | Initially read-only; later restore is destructive and separately authorized | NOT RUN |
 | B. Observe a real unattended backup timer activation and verified cloud readback | Installed acceptance host | Existing timer operation only; writes a normal backup and remote object | NOT RUN |
 | C. Cold reboot, service/security and notification observation | Disposable acceptance host | Deliberate reboot and message delivery, separately approved | NOT RUN |
@@ -46,6 +47,23 @@ The operator provided the `summary.txt` and `device-report.txt` contents for the
 Next operator action is manual: inspect **Compute → Instances → the disposable instance → Storage → Attached block volumes** in OCI Console. Check that the intended **50 GiB** data volume is attached to this exact instance and is not a boot, production, shared, or otherwise valuable volume. Oracle documents an optional **Device path** field in attachment details; if present, compare it to the matching `/dev/oracleoci/*` symlink on the guest. Do not assume a SCSI `/dev/disk/by-id` identifier equals a volume OCID. A console-facing name/size alone without an unambiguous match should be treated as requiring further review. Do not run any `mkfs`, installer `--confirm-format`, or restore until the operator separately confirms volume ownership and explicitly authorizes the destruction of exactly that volume.
 
 Independent off-host recovery prerequisites also remain untested: the existing offline Age private key must already be accessible off-host (or recoverable from the separately held password-protected recovery-kit ZIP), the matching **public recipient** must be known for setup, and Box credentials must be recoverable independently from the old instance. Never create a new offline identity for an old encrypted recovery point. Never transmit private Age keys, ZIP passphrases, rclone credentials, or Cloudflare tokens in chat.
+
+
+### Manual OCI attachment confirmation and A2 controls (2026-10-30)
+
+The operator explicitly confirmed the intended attached storage is correct. The guest output showed `/dev/disk/by-id/scsi-36015f8fecf5e4f7ab864af5a651cc628` -> `/dev/sda`, identical to OCI guest alias `/dev/oracleoci/oraclevdb`; `lsblk` reported 50 GiB, model `BlockVolume`, serial `6015f8fecf5e4f7ab864af5a651cc628`, and root is `/dev/sdb1`. These facts support **A1 PASS** and manual volume-ownership review. They do not authorize an erase until the operator provides a distinct final typed confirmation.
+
+Next: `tests/host-acceptance/04-pinned-install-authorized.sh` is **a controlled destructive disposable-host installation stage**, not a recovery or DNS test. It runs only on the expected OCI guest and accepts no parameters. Before any formatting, it rechecks clean fresh-host state, identical immutable rc.11 source, native Ubuntu 26.04 ARM64, stable disk serial, exact capacity, OCI guest alias, unmounted/no-partition/no-signature status, and the product root-disk guard. It then requires:
+
+- Existing `age1...` PUBLIC offline recipient, derived on a trusted separate workstation from the matching pre-existing private recovery identity; never generate a new key for this old recovery point. The separately held recovery-kit ZIP and passphrase and independent Box access remain operator responsibilities.
+- A non-mutating real `setup.sh install --auto --dry-run` using the exact site arguments and public recipient. No `--use-latest`.
+- A final typed `ERASE <exact-disk-serial>` acknowledgement **after** displaying the exact target. Disk identity/signatures are rechecked once more immediately before invoking the supported installer with `--confirm-format --auto`.
+
+This install is expected to format the single data disk as ext4, install supported host dependencies and publish the rc.11 immutable release, generate a **new operational** Age identity, and initialize SOPS addressed to the **existing offline public** recipient. This is not a restoration and does not create a replacement offline private identity. Verification confirms `storage.verify()`, installed release hash parity, protected file ownership, recipient preservation, initial disabled offsite publication, retention=0 and disabled application/backup/DNS units. **No `vwctl dns update`, `systemctl enable --now`, `vwctl restore`, `vwctl start`, `vwctl backup`, Cloudflare Worker activation, or unattended backup invocation occurs.**
+
+This stage is **BLOCKED** until the operator has both independent key custody and exact typed format consent. If setup fails after formatting begins, retain private logs and **do not blindly rerun `--confirm-format`**, since the appliance may be partially installed; review the point of interruption first. Even an A2 PASS leaves independent Box readback, offline Age decryption and a separately authorized real restore as **NOT RUN**.
+
+Keep detailed install logs local under `~/vwoci-acceptance/gate-a2-install-<UTC timestamp>/`; share `summary.txt` and `post-install.txt` first. NEVER paste offline Age private identities, ZIP passphrases, OAuth or Cloudflare tokens.
 
 ## Gate A0 — next operator preflight
 
