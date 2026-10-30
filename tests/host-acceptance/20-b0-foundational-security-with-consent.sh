@@ -91,7 +91,10 @@ if identity.fs_type != "ext4" or pathlib.Path(identity.source).resolve(strict=Tr
     raise RuntimeError("storage identity mismatch")
 with open("/etc/vaultwarden-oci/config.toml","rb") as f:
     config=tomllib.load(f)
-if config["backup"] != {"remote":"bw-backup:bw-backup","local_retention_days":0,"remote_retention_days":0}:
+backup=config["backup"]
+if (backup["remote"] != "bw-backup:bw-backup"
+    or backup["local_retention_days"] != 0
+    or backup["remote_retention_days"] != 0):
     raise RuntimeError("approved offsite/retention policy changed")
 recipient=config["secrets"]["offline_recovery_recipient"]
 if hashlib.sha256(recipient.encode()).hexdigest() != "7d08721bcc02bbef7dae1f07bfde244852560c69d0b72f8dc0fcba0da30c6773":
