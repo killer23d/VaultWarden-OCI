@@ -107,7 +107,8 @@ sudo vwctl restore
 3. Supply the matching offline Age private identity through the interactive chooser:
    - press Enter to paste an `AGE-SECRET-KEY` with input echo disabled;
    - select an existing identity file from removable media or another secure path; or
-   - select a local encrypted recovery-kit ZIP discovered under `/root/vaultwarden-recovery/`.
+   - select a local encrypted recovery-kit ZIP discovered under `/root/vaultwarden-recovery/`; or
+   - select **option 4** to enter the absolute path to an AES-256 recovery-kit ZIP you brought from an offline/email handoff (for example, `/home/ubuntu/vaultwarden-recovery-kit-...zip`). The file must be regular (not a symlink), owned by root or the invoking user, mode `0600`, and at most 16 MiB. The operator-selected **encrypted** ZIP is copied to private `/run/vaultwarden-oci` staging before verification; the passphrase is entered with echo disabled and the extracted Age identity is removed on completion. This does **not** search home directories or store the Age private key permanently on the appliance.
 4. Review the dedicated-storage gate, downloaded backup, decryption, manifest/checksums, and SOPS custody preflight. The remaining free-space, ownership, SQLite, and staged promotion checks run **after** your final authorization but **before** the application is stopped.
 5. Review the **full exact source path** and the live state that would be replaced. If you selected the wrong recovery point, type `CANCEL`; `RESTORE` is an authorization to replace live data from the selected point.
 6. Type the exact uppercase `RESTORE` confirmation **only when you intend to replace live state**. Any other text cancels without stopping services or replacing live data.
