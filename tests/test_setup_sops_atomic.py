@@ -42,7 +42,7 @@ class AtomicSopsPublicationTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), payload)
             self.assertEqual(download.read_bytes(), payload)
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
-            self.assertEqual([child.name for child in destination.parent.iterdir()], ["sops"])
+            self.assertEqual({child.name for child in destination.parent.iterdir()}, {"sops"})
 
     def test_invalid_download_checksum_never_overwrites_existing_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -79,7 +79,7 @@ class AtomicSopsPublicationTests(unittest.TestCase):
                         download, hashlib.sha256(b"source").hexdigest(), destination=destination
                     )
             self.assertEqual(destination.read_bytes(), b"existing")
-            self.assertEqual([p.name for p in root.iterdir()], ["download", "sops"])
+            self.assertEqual({p.name for p in root.iterdir()}, {"download", "sops"})
 
 
 if __name__ == "__main__":
