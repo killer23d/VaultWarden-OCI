@@ -106,8 +106,9 @@ if mode == "pre":
     for path in ("/var/lib/vaultwarden-oci/data", "/var/lib/vaultwarden-oci/caddy/data",
                  "/var/lib/vaultwarden-oci/caddy/config"):
         folder = pathlib.Path(path)
-        if not folder.is_dir() or folder.is_symlink() or any(folder.iterdir()):
-            raise RuntimeError("pre-restore application directories not empty")
+        if folder.exists() or folder.is_symlink():
+            if not folder.is_dir() or folder.is_symlink() or any(folder.iterdir()):
+                raise RuntimeError("pre-restore application directory unexpectedly contains data")
     if backup["remote"] or backup["local_retention_days"] or backup["remote_retention_days"]:
         raise RuntimeError("pre-restore backup automation/retention is not disabled")
     print("PASS: A6 pre-restore storage, original Age recipient and empty disposable data")
