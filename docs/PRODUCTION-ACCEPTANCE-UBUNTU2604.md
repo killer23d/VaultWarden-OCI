@@ -7,6 +7,7 @@ This audit is pinned to the reviewed `v2` source commit `e0f961c9093e98139e4f57b
 | Stage | Host | Mutability | Current result |
 |---|---|---|---|
 | 01. Read-only inventory, identity, runtime and automation inspection | Ubuntu 26.04 ARM64 acceptance host | Read-only to appliance; creates evidence under user home | NOT RUN until operator executes |
+| A0. Fresh-host disk inventory and root-disk refusal | New Ubuntu 26.04 ARM64 instance | Read-only; installer is invoked only with --dry-run and the root disk, which must be rejected | NOT RUN |
 | A. Independent fresh-host disaster recovery | Separate disposable Ubuntu 26.04 ARM64 with a separately provisioned data volume | Initially read-only; later restore is destructive and separately authorized | NOT RUN |
 | B. Observe a real unattended backup timer activation and verified cloud readback | Installed acceptance host | Existing timer operation only; writes a normal backup and remote object | NOT RUN |
 | C. Cold reboot, service/security and notification observation | Disposable acceptance host | Deliberate reboot and message delivery, separately approved | NOT RUN |
@@ -21,6 +22,16 @@ Run the one-shot checkout and audit command provided in the operator conversatio
 It does not use `setup.sh`, `vwctl backup`, `vwctl restore`, `vwctl dns update`, `rclone sync`, or `systemctl start`. It never reads or prints Age private identities, SOPS plaintext, rclone configuration, or Cloudflare tokens. Its JSON files and command error files are private operator evidence, not chat attachments.
 
 Evidence directory: `~/vwoci-acceptance/phase1-readonly-<UTC timestamp>/`; start by posting only **summary.txt**, without revealing any private identities, tokens, or unredacted logs. The command may return nonzero for an expected blocked/incomplete gate; that must not be called a pass.
+
+## Gate A0 — next operator preflight
+
+Once Stage 01 confirms the host is fresh and uninstalled, run `tests/host-acceptance/02-fresh-host-preflight.sh` on **that same host**. It inventories non-boot devices via the existing `vaultwarden_oci.storage.inventory()`, lists filesystem signatures with read-only `wipefs --noheadings --output TYPE`, and verifies that the actual `setup.sh install --auto --dry-run` refuses the boot/root device.
+
+This test is **not installation authorization**, even when it prints candidate disks. The operator must review the output, validate the actual OCI block-volume attachment, and explicitly select a stable device path for subsequent dry-run and installation work. Do not set `--confirm-format` or `--accept-existing-filesystem` in Gate A0.
+
+Evidence lives in `~/vwoci-acceptance/gate-a0-fresh-host-<UTC timestamp>/`. Share only `summary.txt` and `candidates.txt`. Keep raw stderr, filesystem inventories, and other local files private by default.
+
+The Stage A0 script creates **no installed appliance**, does not mount or format any disk, and does not touch DNS, CrowdSec, Box, Age identities, or backups. All later stages remain NOT RUN.
 
 ## What this first step does and does not prove
 
