@@ -73,6 +73,13 @@ The exact kit format includes `config.toml` (the existing offline public recipie
 
 The ZIP must remain in off-host custody. The private Age identity and password must **never be pasted into chat or into the new server's install prompt**. The public recipient can be pasted into the A2 prompt; the stage still requires independent key-custody attestation and a separate explicit erase authorization. Kit self-consistency is not proof that the exact 2026-10-29 Box `.vwrec` decrypts; that remains NOT RUN until the remote artifact is fetched and verified separately.
 
+
+### Emailed kit retrieval was attempted on the wrong host (2026-10-30)
+
+Operator supplied a failed attempt from the **new OCI acceptance instance** `vaultwarden-oci-5-vnic`, with encrypted file `/home/ubuntu/vaultwarden-recovery-kit-20261006T222828Z.zip`. The helper returned `BLOCKED: need 7zz/7z and age-keygen on your TRUSTED WORKSTATION`. This is a missing-tool/incorrect-execution-location result, **not a failed ZIP password or key-validation test**. The original kit is apparently available, but there is no evidence yet that it can be decrypted.
+
+The helper now fail-closes on an appliance-like host name or `/dev/oracleoci` guest device path **before accessing the ZIP/passphrase**, to prevent extracting the offline private identity onto the recovery instance. Correct next step: open the emailed kit directly on a trusted personal macOS/Linux computer and run the pinned helper locally with `age-keygen`, `7zz/7z` and Python installed there. Post only PASS/BLOCKED and public `age1...` output. There is no reason to install tooling on the fresh test server solely to extract the old private key. Gate A2 formatting and fresh-host installation remain NOT RUN, with no filesystem changes.
+
 ## Gate A0 — next operator preflight
 
 Once Stage 01 confirms the host is fresh and uninstalled, run `tests/host-acceptance/02-fresh-host-preflight.sh` on **that same host**. It inventories non-boot devices via the existing `vaultwarden_oci.storage.inventory()`, lists filesystem signatures with read-only `wipefs --noheadings --output TYPE`, and verifies that the actual `setup.sh install --auto --dry-run` refuses the boot/root device.
