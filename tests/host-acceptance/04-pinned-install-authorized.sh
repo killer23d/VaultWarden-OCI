@@ -139,8 +139,11 @@ printf 'The recovery-kit ZIP, passphrase and Box access must be independently he
 printf 'Do NOT paste private keys, recovery passwords or cloud tokens.\n\n'
 IFS= read -r -p "Existing OFFLINE Age PUBLIC recipient (age1...): " RECIPIENT </dev/tty ||
   stop BLOCKED "Public recipient not supplied"
+if [ -z "$RECIPIENT" ]; then
+  stop BLOCKED "No existing public Age recipient provided. This NEW host cannot generate a replacement key that decrypts the OLD Box backup. Find the original offline recovery kit or offline private identity first; no disk changes have occurred."
+fi
 [[ "$RECIPIENT" =~ ^age1[0-9a-z]{50,70}$ ]] ||
-  stop BLOCKED "Invalid public Age recipient syntax"
+  stop BLOCKED "Invalid public Age recipient. Obtain age1... from the original appliance configuration or derive it on a trusted workstation using age-keygen -y against the MATCHING old offline private identity."
 printf '\nDo not continue unless this recipient came from the key that unlocks\n'
 printf 'the existing Box recovery point, NOT a newly generated key.\n'
 IFS= read -r -p "Type EXISTING OFFHOST KEY to attest independent custody: " CUSTODY </dev/tty ||
