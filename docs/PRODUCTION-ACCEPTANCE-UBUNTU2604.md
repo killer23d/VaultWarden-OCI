@@ -65,6 +65,14 @@ This stage is **BLOCKED** until the operator has both independent key custody an
 
 Keep detailed install logs local under `~/vwoci-acceptance/gate-a2-install-<UTC timestamp>/`; share `summary.txt` and `post-install.txt` first. NEVER paste offline Age private identities, ZIP passphrases, OAuth or Cloudflare tokens.
 
+### Emailed recovery-kit custody: workstation-only verification (2026-10-30)
+
+Gate A2 was run once but **stopped safely before formatting** at `BLOCKED: Invalid public Age recipient syntax`, because no `age1...` recipient was supplied. The user has confirmed possession of the **emailed encrypted recovery-kit ZIP**, but has not yet verified its password, the matching offline Age identity, or decryption of the existing Box archive. A subsequent check of `/etc/vaultwarden-oci/config.toml` was accidentally executed on the **new, uninstalled** `vaultwarden-oci-5-vnic` and correctly returned `BLOCKED: Original appliance config not found`; that is not a failure of the original appliance or a missing recovery-kit key.
+
+The exact kit format includes `config.toml` (the existing offline public recipient) and `offline-recovery-identity.txt` (the matching offline private identity). To recover custody without copying the offline key to the test server, run `tests/host-acceptance/05-kit-public-recipient.py` on a **trusted local macOS/Linux workstation** where the emailed kit is available. It requires `python3`, `age-keygen`, and `7zz` or `7z`. The script checks the five-member encrypted ZIP contract, requests the ZIP passphrase with no echo, extracts only `config.toml` and the private offline identity into a private temporary directory, derives the `age1...` recipient using `age-keygen -y`, compares it with the kit configuration, and automatically deletes extracted plaintext. It prints **only the public recipient**. It does not upload any data, access Box, or mutate the source kit.
+
+The ZIP must remain in off-host custody. The private Age identity and password must **never be pasted into chat or into the new server's install prompt**. The public recipient can be pasted into the A2 prompt; the stage still requires independent key-custody attestation and a separate explicit erase authorization. Kit self-consistency is not proof that the exact 2026-10-29 Box `.vwrec` decrypts; that remains NOT RUN until the remote artifact is fetched and verified separately.
+
 ## Gate A0 — next operator preflight
 
 Once Stage 01 confirms the host is fresh and uninstalled, run `tests/host-acceptance/02-fresh-host-preflight.sh` on **that same host**. It inventories non-boot devices via the existing `vaultwarden_oci.storage.inventory()`, lists filesystem signatures with read-only `wipefs --noheadings --output TYPE`, and verifies that the actual `setup.sh install --auto --dry-run` refuses the boot/root device.
