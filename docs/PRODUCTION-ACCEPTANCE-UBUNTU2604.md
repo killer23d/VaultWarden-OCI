@@ -7,7 +7,8 @@ This audit is pinned to the reviewed `v2` source commit `e0f961c9093e98139e4f57b
 | Stage | Host | Mutability | Current result |
 |---|---|---|---|
 | 01. Read-only inventory, identity, runtime and automation inspection | Ubuntu 26.04 ARM64 acceptance host | Read-only to appliance; creates evidence under user home | NOT RUN until operator executes |
-| A0. Fresh-host disk inventory and root-disk refusal | New Ubuntu 26.04 ARM64 instance | Read-only; installer is invoked only with --dry-run and the root disk, which must be rejected | NOT RUN |
+| A0. Fresh-host disk inventory and root-disk refusal | New Ubuntu 26.04 ARM64 instance | Read-only; installer is invoked only with --dry-run and the root disk, which must be rejected | PASS (operator transcript 2026-10-30) |
+| A1. Selected-by-id-volume setup dry-run | Same disposable Ubuntu 26.04 ARM64 instance | Read-only; synthetic public Age recipient used strictly for dry-run | NOT RUN |
 | A. Independent fresh-host disaster recovery | Separate disposable Ubuntu 26.04 ARM64 with a separately provisioned data volume | Initially read-only; later restore is destructive and separately authorized | NOT RUN |
 | B. Observe a real unattended backup timer activation and verified cloud readback | Installed acceptance host | Existing timer operation only; writes a normal backup and remote object | NOT RUN |
 | C. Cold reboot, service/security and notification observation | Disposable acceptance host | Deliberate reboot and message delivery, separately approved | NOT RUN |
@@ -22,6 +23,20 @@ Run the one-shot checkout and audit command provided in the operator conversatio
 It does not use `setup.sh`, `vwctl backup`, `vwctl restore`, `vwctl dns update`, `rclone sync`, or `systemctl start`. It never reads or prints Age private identities, SOPS plaintext, rclone configuration, or Cloudflare tokens. Its JSON files and command error files are private operator evidence, not chat attachments.
 
 Evidence directory: `~/vwoci-acceptance/phase1-readonly-<UTC timestamp>/`; start by posting only **summary.txt**, without revealing any private identities, tokens, or unredacted logs. The command may return nonzero for an expected blocked/incomplete gate; that must not be called a pass.
+
+## Recorded operator evidence (2026-10-30)
+
+The operator supplied transcript from OCI host `vaultwarden-oci-5-vnic` for Stage 01 and A0. The audit checkout was pinned to `24653224ce291bc2a43da2fc3cafb350ee2ccc3a` at Stage A0. The supplied output confirms Ubuntu 26.04 ARM64, native Python 3.14, passwordless sudo, absence of installed appliance paths and active/enabled appliance automation, a root device of `/dev/sdb1`, and one unmounted 50.00 GiB non-boot disk candidate `/dev/sda`, reachable through stable by-id `/dev/disk/by-id/scsi-36015f8fecf5e4f7ab864af5a651cc628`. The installer rejected the root device under `--dry-run` and left appliance paths absent. This supports **A0 PASS** as a non-mutating host preflight; it does not prove provider-side OCI block-volume ownership.
+
+A0 evidence was reported at `~/vwoci-acceptance/gate-a0-fresh-host-20261030T195359Z`; the full evidence directory remains on the host and was not uploaded. No recovery data or credentials have been supplied. A1 and later gates remain **NOT RUN**; any action to format or adopt a disk remains **BLOCKED pending explicit operator verification and authorization**.
+
+### A1 exact selected-volume dry-run
+
+Run `tests/host-acceptance/03-selected-volume-dryrun.sh` using the by-id path and the independently recorded **expected exact size in bytes**, not the mutable `/dev/sda` spelling. The script verifies source purity, OS, absent appliance state, root-disk ancestry, disk type/size/unmounted status, absence of signatures/partition children, and that the existing installer accepts that exact by-id candidate under `--dry-run`. It also requires the installer to reject an intentionally nonexistent disk and checks that no disk metadata or appliance paths changed.
+
+This stage deliberately passes a **syntactic test-only Age recipient** to `setup.sh --dry-run`. That fixture has no usable private key and **must never** be used for a real installation or recovery. The actual matching offline Age recipient must be derived from the independently held off-host identity **before any real installation**. This test does not exercise credential custody, Box access, restore, Cloudflare, or CrowdSec.
+
+The script deliberately exits nonzero when its read-only tests have passed but OCI block-volume ownership remains unverified: this reports that the next destructive stage is still **BLOCKED**, rather than suggesting implicit formatting permission.
 
 ## Gate A0 — next operator preflight
 
