@@ -114,12 +114,16 @@ if ! sudo -n python3 -B -E - "$SOURCE" "$DEVICE" "$REMOTE" "$EXPECTED_SHA" \
 import json, pathlib, sys, tomllib
 sys.path.insert(0, sys.argv[1])
 from vaultwarden_oci import storage
+import hashlib
 storage.reject_boot_related(sys.argv[2])
 identity = storage.verify()
 if identity.fs_type != "ext4" or pathlib.Path(identity.source).resolve(strict=True) != pathlib.Path(sys.argv[2]).resolve(strict=True):
     raise RuntimeError("identity/mount mismatch")
 with pathlib.Path("/etc/vaultwarden-oci/config.toml").open("rb") as f:
     config = tomllib.load(f)
+recipient = config["secrets"]["offline_recovery_recipient"]
+if hashlib.sha256(recipient.encode()).hexdigest() != "7d08721bcc02bbef7dae1f07bfde244852560c69d0b72f8dc0fcba0da30c6773":
+    raise RuntimeError("original offline recovery public recipient has changed")
 backup = config["backup"]
 if backup["remote"] != "" or backup["local_retention_days"] != 0 or backup["remote_retention_days"] != 0:
     raise RuntimeError("cloud write or retention no longer disabled")
@@ -151,6 +155,18 @@ done
 [ -f "$ORIGINAL_KIT" ] && [ ! -L "$ORIGINAL_KIT" ] &&
     [ "$(stat -c '%a' "$ORIGINAL_KIT")" = 600 ] ||
     block "The original emailed encrypted ZIP is not the protected 0600 regular file"
+[ "$(findmnt -rn -T /run/vaultwarden-oci -o FSTYPE)" = tmpfs ] ||
+    block "Sensitive recovery-key staging must be located on tmpfs /run"
+HELPER="$SOURCE/tests/host-acceptance/16-a5-kit-cancel-helper.py"
+[ -f "$HELPER" ] && [ ! -L "$HELPER" ] ||
+    block "Missing audit cancellation helper"
+if ! python3 -B - "$HELPER" <<'PY' >/dev/null 2>&1
+import ast, pathlib, sys
+ast.parse(pathlib.Path(sys.argv[1]).read_text())
+PY
+then
+    block "Cancellation helper Python syntax is invalid"
+fi
 say PASS "A4, installed release, original data volume, root-only kit and dormant services verified"
 
 printf '\n============================================================\n'
@@ -226,9 +242,6 @@ then block "Failed copying encrypted kit; no restore preflight started"; fi
 STAGED=1
 say PASS "Exact encrypted emailed recovery kit staged root-only with matching checksum"
 
-HELPER="$SOURCE/tests/host-acceptance/16-a5-kit-cancel-helper.py"
-[ -f "$HELPER" ] && [ ! -L "$HELPER" ] ||
-    block "Missing immutable audit-only cancellation helper"
 printf '\nEnter the original ZIP passphrase at the hidden prompt.\n'
 printf 'After full cryptographic preflight, type CANCEL exactly.\n'
 printf 'This helper CAN NEVER invoke a destructive restore.\n\n'
