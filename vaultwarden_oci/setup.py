@@ -251,6 +251,36 @@ Signed-By: /etc/apt/keyrings/docker.asc
 '''
 
 
+def _publish_verified_sops(
+    candidate: Path,
+    expected_sha256: str,
+    *,
+    destination: Path = Path("/usr/local/bin/sops"),
+) -> None:
+    """Publish a verified SOPS binary atomically within the destination filesystem.
+
+    The initial download may be in /tmp (often tmpfs on Ubuntu 26.04), while
+    /usr/local/bin is on the boot filesystem. os.replace() across those mounts
+    fails with EXDEV (errno 18). Stage a second, private copy beside the final
+    destination, verify it again, then use the same-filesystem atomic rename.
+    Any download/copy/checksum failure leaves an existing installed binary alone.
+    """
+    if _sha256(candidate) != expected_sha256:
+        raise SetupError(f"SOPS {SOPS_VERSION} SHA-256 verification failed")
+    with tempfile.TemporaryDirectory(
+        prefix=".vwoci-sops-", dir=str(destination.parent)
+    ) as directory:
+        staged = Path(directory) / "sops"
+        with candidate.open("rb") as source, staged.open("wb") as target:
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        if _sha256(staged) != expected_sha256:
+            raise SetupError(f"SOPS {SOPS_VERSION} SHA-256 verification failed after staging")
+        os.chmod(staged, 0o755)
+        os.replace(staged, destination)
+
+
 def _install_dependencies(host: install.HostInfo, ui: UI) -> None:
     ui.header("Dependencies")
     _must(["apt-get", "update"], "apt package index refresh")
@@ -266,9 +296,7 @@ def _install_dependencies(host: install.HostInfo, ui: UI) -> None:
     with tempfile.TemporaryDirectory(prefix="vwoci-sops-") as directory:
         candidate = Path(directory) / "sops"
         _must(["curl", "-fL", url, "-o", str(candidate)], f"SOPS {SOPS_VERSION} download")
-        if _sha256(candidate) != SOPS_SHA256[sops_arch]:
-            raise SetupError(f"SOPS {SOPS_VERSION} SHA-256 verification failed")
-        os.chmod(candidate, 0o755); os.replace(candidate, "/usr/local/bin/sops")
+        _publish_verified_sops(candidate, SOPS_SHA256[sops_arch])
     checks = (
         (["docker", "version", "--format", "{{.Server.Version}}"], "Docker Engine"),
         (["docker", "compose", "version", "--short"], "Docker Compose"),
