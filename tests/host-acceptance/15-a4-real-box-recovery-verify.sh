@@ -60,6 +60,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+check_dormant_units() {
+    local unit active state
+    for unit in vaultwarden-oci.target vaultwarden-oci.service \
+        vaultwarden-oci-health.timer vaultwarden-oci-backup.timer \
+        vaultwarden-oci-maintenance.timer vaultwarden-oci-update-check.timer \
+        vaultwarden-oci-dns.service; do
+        active="$(systemctl show --property=ActiveState --value "$unit")" ||
+            block "Cannot inspect unit activity: $unit"
+        state="$(systemctl show --property=UnitFileState --value "$unit")" ||
+            block "Cannot inspect unit-file state: $unit"
+        [ "$active" = inactive ] ||
+            block "Appliance or timer activated unexpectedly: $unit ($active)"
+        case "$unit" in
+            vaultwarden-oci-dns.service)
+                [ "$state" = static ] ||
+                    block "DNS one-shot changed from static: $state" ;;
+            *)
+                [ "$state" = disabled ] ||
+                    block "App/target/timer enabled unexpectedly: $unit ($state)" ;;
+        esac
+    done
+}
+
 [ "$#" -eq 0 ] || block "No arguments accepted"
 [ "$(id -un)" = ubuntu ] && [ "$(hostname -s)" = "$HOST" ] ||
     block "Wrong operator or disposable acceptance VM"
@@ -134,15 +157,7 @@ if state.exists():
 print("PASS: identity, recipient, backup policy and prior state")
 PY
 then block "Storage/recipient/backup-policy/first-verification preflight failed; see private evidence"; fi
-for unit in vaultwarden-oci.target vaultwarden-oci.service \
-    vaultwarden-oci-health.timer vaultwarden-oci-backup.timer \
-    vaultwarden-oci-maintenance.timer vaultwarden-oci-update-check.timer \
-    vaultwarden-oci-dns.service; do
-    ACTIVE="$(systemctl show --property=ActiveState --value "$unit")" ||
-        block "Failed to inspect systemd unit: $unit"
-    [ "$ACTIVE" = inactive ] ||
-        block "Appliance/timer/DNS was activated unexpectedly: $unit"
-done
+check_dormant_units
 if ! sudo -n rclone listremotes > "$OUT/root-remotes.private.txt" \
     2> "$OUT/rclone.private.stderr"; then
     block "Root's rclone config is inaccessible; leave secrets private"
@@ -273,13 +288,7 @@ report PASS "Actually decrypted archive matches original Box SHA-256 and validat
     block "Verification unexpectedly changed live SOPS ciphertext"
 [ "$BEFORE_KEY" = "$(sudo -n sha256sum /etc/vaultwarden-oci/age-key.txt | cut -d ' ' -f1)" ] ||
     block "Verification unexpectedly changed live operational Age identity"
-for unit in vaultwarden-oci.target vaultwarden-oci.service \
-    vaultwarden-oci-health.timer vaultwarden-oci-backup.timer \
-    vaultwarden-oci-maintenance.timer vaultwarden-oci-update-check.timer \
-    vaultwarden-oci-dns.service; do
-    [ "$(systemctl show --property=ActiveState --value "$unit")" = inactive ] ||
-        block "Unexpected post-verification appliance/DNS/timer activation: $unit"
-done
+check_dormant_units
 if sudo -n python3 -B -E - <<'PY'
 from pathlib import Path
 run = Path("/run/vaultwarden-oci")
