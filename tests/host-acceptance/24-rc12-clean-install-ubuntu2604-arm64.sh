@@ -56,9 +56,19 @@ sudo -n true >/dev/null 2>&1 || block "Passwordless sudo unavailable"
     block "Only clean Ubuntu 26.04 ARM64 is approved"
 python3 -c 'import sys;assert sys.version_info[:2]==(3,14)' ||
     block "Native Python 3.14 is required"
-[ "$(git -C "$SOURCE" rev-parse HEAD)" = "$PIN" ] &&
+git -C "$SOURCE" cat-file -e "$PIN^{commit}" 2>/dev/null &&
+    git -C "$SOURCE" merge-base --is-ancestor "$PIN" HEAD &&
     [ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=no)" ] ||
-    block "Source differs from exact reviewed PR #373 SHA"
+    block "Source does not descend cleanly from exact reviewed PR #373 SHA"
+if ! git -C "$SOURCE" diff --quiet "$PIN" HEAD -- setup.sh versions.toml \
+    vaultwarden_oci systemd vwctl email-providers.toml; then
+    block "Product runtime changed after reviewed corrective SHA"
+fi
+while IFS= read -r changed; do
+    case "$changed" in tests/host-acceptance/*|docs/*) ;; *)
+        block "Unexpected source changes beyond accepted test/docs since corrective SHA" ;;
+    esac
+done < <(git -C "$SOURCE" diff --name-only "$PIN" HEAD)
 python3 - "$SOURCE/versions.toml" <<'PY' || block "Source version is not rc.12"
 import sys,tomllib
 with open(sys.argv[1],"rb") as f:
@@ -85,6 +95,8 @@ for unit in vaultwarden-oci.target vaultwarden-oci.service \
         block "Existing active or enabled appliance unit: $unit"
     fi
 done
+[ -d /run ] && [ -d /usr/local/bin ] ||
+    block "Required installed host directories /run or /usr/local/bin absent"
 [ "$(stat -c %d /run)" != "$(stat -c %d /usr/local/bin)" ] ||
     block "Cannot reproduce cross-filesystem SOPS install; /run and /usr/local/bin share a filesystem"
 say PASS "Blank OS and real /run tmpfs vs /usr/local/bin cross-filesystem boundary"
