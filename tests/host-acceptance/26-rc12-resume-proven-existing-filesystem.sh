@@ -173,7 +173,7 @@ record PASS "No installed release, no running lifecycle or scheduled automation"
 # This is an intentional adoption of a previously initialized filesystem.
 # This is an adoption-only resumption and cannot request another format.
 record INFO "Resuming supported rc.12 setup using --accept-existing-filesystem; NO mkfs permitted"
-record INFO "Unbuffered private log will show package progress; the original D1 logs are retained"
+record INFO "Unbuffered phase markers; apt/dpkg subprocess output remains privately captured until completion"
 if ! NO_COLOR=1 sudo -n env TMPDIR=/run PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive \
     bash "$SOURCE/setup.sh" install \
     --domain "$DOMAIN" --url "https://$DOMAIN" --email "$EMAIL" \
