@@ -223,8 +223,8 @@ for unit in vaultwarden-oci.target vaultwarden-oci.service \
         block "Installed application or timer unexpectedly activated: $unit"
 done
 say PASS "No Vaultwarden/Caddy startup, timers, dev DNS or Box changes"
-if ! python3 -B -m unittest discover -s "$SOURCE/tests" \
-    -p 'test_recovery_kit_explicit_path.py' -v \
+if ! (cd "$SOURCE" && python3 -B -m unittest discover -s tests \
+    -p 'test_recovery_kit_explicit_path.py' -v) \
     > "$OUT/recovery-ux-tests.private.log" 2>&1; then
     block "Real ARM64 explicit encrypted ZIP-path regression tests failed"
 fi
