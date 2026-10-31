@@ -171,7 +171,7 @@ done
 record PASS "No installed release, no running lifecycle or scheduled automation"
 
 # This is an intentional adoption of a previously initialized filesystem.
-# Crucially there is NO --confirm-format anywhere in this resumption.
+# This is an adoption-only resumption and cannot request another format.
 record INFO "Resuming supported rc.12 setup using --accept-existing-filesystem; NO mkfs permitted"
 record INFO "Unbuffered private log will show package progress; the original D1 logs are retained"
 if ! NO_COLOR=1 sudo -n env TMPDIR=/run PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive \
