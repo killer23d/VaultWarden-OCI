@@ -136,7 +136,7 @@ class SetupContractTests(unittest.TestCase):
                 mock.patch.object(setup, "_write_atomic"),
                 mock.patch.object(setup, "_sha256", return_value=setup.SOPS_SHA256["amd64"]),
                 mock.patch.object(setup.os, "chmod"),
-                mock.patch.object(setup.os, "replace"),
+                mock.patch.object(setup, "_publish_verified_sops"),
             ):
                 setup._install_dependencies(setup.install.HostInfo("ubuntu", "24.04", "noble", "amd64"), setup.UI(color=False))
 
@@ -183,7 +183,7 @@ class SetupContractTests(unittest.TestCase):
                 mock.patch.object(setup, "_write_atomic"),
                 mock.patch.object(setup, "_sha256", return_value=setup.SOPS_SHA256["amd64"]),
                 mock.patch.object(setup.os, "chmod"),
-                mock.patch.object(setup.os, "replace"),
+                mock.patch.object(setup, "_publish_verified_sops"),
             ):
                 with self.assertRaisesRegex(
                     setup.SetupError,
