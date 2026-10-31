@@ -65,7 +65,7 @@ if ! git -C "$SOURCE" diff --quiet "$PIN" HEAD -- setup.sh versions.toml \
     block "Product runtime changed after reviewed corrective SHA"
 fi
 while IFS= read -r changed; do
-    case "$changed" in tests/host-acceptance/*|docs/*) ;; *)
+    case "$changed" in tests/host-acceptance/*|tests/test_host_acceptance_rc12_gate_syntax.py|docs/*) ;; *)
         block "Unexpected source changes beyond accepted test/docs since corrective SHA" ;;
     esac
 done < <(git -C "$SOURCE" diff --name-only "$PIN" HEAD)
