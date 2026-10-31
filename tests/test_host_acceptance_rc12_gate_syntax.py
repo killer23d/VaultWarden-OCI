@@ -25,6 +25,22 @@ class Rc12CleanInstallGateTests(unittest.TestCase):
         self.assertNotIn("vwctl restore", source)
         self.assertNotIn("getpass.getpass(", source)  # product UX owns hidden passphrase entry
 
+    def test_resume_gate_requires_proven_marker_and_never_formats(self) -> None:
+        path = GATE.with_name("26-rc12-resume-proven-existing-filesystem.sh")
+        script = path.read_text(encoding="utf-8")
+        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("storage.verify()", script)
+        self.assertIn("storage.reject_boot_related(", script)
+        self.assertIn("--accept-existing-filesystem --auto", script)
+        self.assertIn("PYTHONUNBUFFERED=1", script)
+        self.assertIn('diff --quiet "$PIN" HEAD', script)
+        self.assertNotIn("--confirm-format", script)
+        self.assertNotIn("mkfs.ext4", script)
+        for mutation in ("vwctl dns update", "vwctl backup", "systemctl reboot",
+                         "systemctl enable --now", "vwctl crowdsec remediation-start"):
+            self.assertNotIn(mutation, script)
+
     def test_installer_gate_does_not_start_services_or_cloud_writes(self) -> None:
         text = GATE.read_text(encoding="utf-8")
         self.assertIn("storage.reject_boot_related", text)
