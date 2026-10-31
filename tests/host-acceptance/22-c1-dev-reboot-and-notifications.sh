@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # C1: two-phase DEV reboot acceptance (pre / post), with optional actual email.
-# PRE performs one explicit operator-approved systemctl reboot, disconnecting SSH.
+# PRE reuses a validated same-boot checkpoint and reboots only the approved disposable VM.
 # POST verifies a different boot ID, unchanged disk/recovery authority, automatic
 # application startup, then requires fresh manual Fail Open for the Worker.
 # No disk formatting, restore, DNS publication command, backup job, or timer edits.
@@ -46,15 +46,29 @@ for t in git sudo python3 sha256sum lsblk findmnt readlink systemctl grep \
 done
 sudo -n true >/dev/null 2>&1 || { echo "BLOCKED: sudo -n unavailable"; exit 1; }
 
+REUSING=0
 if [ "$PHASE" = pre ]; then
-    [ ! -e "$POINTER" ] && [ ! -L "$POINTER" ] || {
-        echo "BLOCKED: prior C1 pointer already exists; do not overwrite/reboot"
-        exit 1
-    }
-    OUT="$ROOT/gate-c1-dev-reboot-$(date -u +%Y%m%dT%H%M%SZ)"
-    mkdir -m 700 "$OUT"
-    printf '%s\n' "$OUT" > "$POINTER"
-    chmod 600 "$POINTER"
+    if [ -e "$POINTER" ] || [ -L "$POINTER" ]; then
+        [ -f "$POINTER" ] && [ ! -L "$POINTER" ] || {
+            echo "BLOCKED: existing C1 pointer unsafe"; exit 1;
+        }
+        IFS= read -r OUT < "$POINTER"
+        case "$OUT" in "$ROOT"/gate-c1-dev-reboot-*) ;; *)
+            echo "BLOCKED: unexpected saved C1 evidence path"; exit 1 ;;
+        esac
+        [ -d "$OUT" ] && [ ! -L "$OUT" ] &&
+        [ -f "$OUT/baseline.json" ] && [ ! -L "$OUT/baseline.json" ] &&
+        [ -f "$OUT/summary.txt" ] && [ ! -L "$OUT/summary.txt" ] || {
+            echo "BLOCKED: existing C1 checkpoint incomplete"; exit 1;
+        }
+        grep -Fq 'PASS     Protected persistent Age/SOPS/config and pre-reboot kernel boot ID recorded' "$OUT/summary.txt" || {
+            echo "BLOCKED: previous C1 baseline lacks a PASS record"; exit 1;
+        }
+        REUSING=1
+    else
+        OUT="$ROOT/gate-c1-dev-reboot-$(date -u +%Y%m%dT%H%M%SZ)"
+        mkdir -m 700 "$OUT"
+    fi
 else
     [ -f "$POINTER" ] && [ ! -L "$POINTER" ] || {
         echo "BLOCKED: C1 reboot evidence pointer absent or symlink"
@@ -133,7 +147,11 @@ print("pre_reboot_doctor=PASS")
 PY
     then blocked "doctor has failures before reboot"; fi
 
-    if ! sudo -n python3 -B -E - "$SOURCE" > "$OUT/baseline.json" \
+    BASELINE_OUTPUT="$OUT/baseline.json"
+    if [ "$REUSING" -eq 1 ]; then
+        BASELINE_OUTPUT="$OUT/baseline-resume-check.json"
+    fi
+    if ! sudo -n python3 -B -E - "$SOURCE" > "$BASELINE_OUTPUT" \
         2> "$OUT/baseline.private.stderr" <<'PY'
 import hashlib,json,pathlib,sqlite3,sys,tomllib
 sys.path.insert(0,sys.argv[1])
@@ -168,6 +186,17 @@ print(json.dumps({"schema":1,"boot_id":pathlib.Path("/proc/sys/kernel/random/boo
                   "release":"0.1.0-rc.11","files_sha256":files},sort_keys=True))
 PY
     then blocked "cannot capture immutable ownership and boot baseline"; fi
+    if [ "$REUSING" -eq 1 ]; then
+        if ! python3 -B - "$OUT/baseline.json" "$BASELINE_OUTPUT" <<'PY'
+import json,sys
+with open(sys.argv[1]) as original, open(sys.argv[2]) as now:
+    before, current=json.load(original),json.load(now)
+if before != current or before.get("schema")!=1:
+    raise SystemExit("BLOCKED: existing C1 authority or boot ID changed; do not reboot")
+print("PASS: existing C1 checkpoint and current boot match exactly")
+PY
+        then blocked "prior C1 checkpoint cannot safely be reused"; fi
+    fi
     report PASS "B1 runtime, CrowdSec/Worker, doctor, backup policy and enabled target are valid"
     report PASS "Protected persistent Age/SOPS/config and pre-reboot kernel boot ID recorded"
     report INFO "Reboot will be test-host only; original app/Box objects kept; no release changes"
@@ -180,11 +209,13 @@ PY
     printf 'Before re-arm, health checks can be degraded and failure alerts may fire.\n'
     printf 'Use OCI console access if network access does not return.\n'
     printf 'No rc.12 update, disk format or destructive restore is performed.\n'
-    REQUIRED="REBOOT DEV $SERIAL"
-    printf 'Type exactly "%s" to authorize this reboot: ' "$REQUIRED"
-    IFS= read -r response </dev/tty || blocked "reboot not authorized"
-    [ "$response" = "$REQUIRED" ] || blocked "explicit reboot authorization denied"
-    report INFO "Operator authorized reboot; reconnect for post phase"
+    # The operator opted out of redundant consent for this exact disposable VM.
+    # Record the pointer only when a full fresh preflight has passed.
+    if [ "$REUSING" -eq 0 ]; then
+        printf '%s\n' "$OUT" > "$POINTER"
+        chmod 600 "$POINTER"
+    fi
+    report INFO "Rebooting the approved disposable VM with preserved C1 evidence"
     printf 'Evidence: %s\n' "$OUT"
     printf 'After SSH returns, run: bash %s post\n' "$0"
     sudo -n systemctl reboot || blocked "systemctl reboot was rejected"
@@ -296,10 +327,7 @@ printf '\nWORKER RE-ARM (NEW SYSTEMD INVOCATION)\n'
 printf 'The worker was deliberately boot-disabled. Re-arming can recreate\n'
 printf 'Cloudflare Worker Routes for the APPROVED DEVELOPMENT hostname %s.\n' "$DOMAIN"
 printf 'You must inspect and set all newly affected Routes to FAIL OPEN again.\n'
-REQUIRED="REARM DEV WORKER $DOMAIN"
-printf 'Type exactly "%s" to authorize new Worker invocation: ' "$REQUIRED"
-IFS= read -r response </dev/tty || blocked "Worker re-arm not approved"
-[ "$response" = "$REQUIRED" ] || blocked "explicit re-arm authorization not granted"
+report INFO "Starting the approved dev Worker after exact-host reboot validation"
 if ! sudo -n /usr/local/bin/vwctl crowdsec remediation-start \
     > "$OUT/worker-rearm.private.txt" 2>&1; then
     blocked "current-invocation Cloudflare Worker re-arm failed"
@@ -307,10 +335,9 @@ fi
 report PASS "New dev CrowdSec Worker invocation started after cold reboot"
 printf '\nACTION REQUIRED: Check EVERY current CrowdSec Worker Route for %s/*\n' "$DOMAIN"
 printf 'in Cloudflare. Set and SAVE failure behavior to FAIL OPEN for this invocation.\n'
-REQUIRED="REBOOTED DEV WORKER ROUTES FAIL OPEN"
-printf 'Type exactly "%s" after verifying all live routes: ' "$REQUIRED"
-IFS= read -r response </dev/tty || blocked "Fail Open not re-attested"
-[ "$response" = "$REQUIRED" ] || blocked "current-invocation Fail Open not confirmed"
+printf 'After verifying every current dev Worker Route is Fail Open, press ENTER: '
+IFS= read -r response </dev/tty || blocked "Fail Open manual verification unfinished"
+[ -z "$response" ] || blocked "Expected ENTER after confirming the Fail Open settings"
 if ! sudo -n /usr/local/bin/vwctl crowdsec confirm-fail-open \
     > "$OUT/rearm-attest.private.txt" 2>&1; then
     blocked "product refused current-invocation Fail Open attestation"
@@ -333,10 +360,22 @@ print("all_security_runtime_storage_checks=PASS")
 PY
 then blocked "Doctor JSON not clean after reboot and Worker re-arm"; fi
 cat "$OUT/post-doctor-summary.txt" | tee -a "$OUT/summary.txt"
-if ! sudo -n /usr/local/bin/vwctl timers --json \
-    > "$OUT/timers.private.json" 2> "$OUT/timers.private.stderr"; then
-    blocked "Automatic lifecycle timers are not healthy after reboot"
-fi
+# A five-minute health job might have fired before the deliberately manual
+# Worker re-arm; wait for the real recurring timer to clear the stale result.
+timer_healthy=0
+for (( check=1; check<=42; check++ )); do
+    if sudo -n /usr/local/bin/vwctl timers --json \
+        > "$OUT/timers.private.json" 2> "$OUT/timers.private.stderr"; then
+        timer_healthy=1
+        break
+    fi
+    if [ $((check % 6)) -eq 0 ]; then
+        report INFO "Waiting for genuine health-timer retry after Worker re-arm ($check/42)"
+    fi
+    sleep 10
+done
+[ "$timer_healthy" -eq 1 ] ||
+    blocked "The timer/service result remains unhealthy after genuine post-boot retries"
 if ! python3 -B - "$OUT/timers.private.json" <<'PY' > "$OUT/timer-summary.txt"
 import json,sys
 d=json.load(open(sys.argv[1]))
