@@ -17,3 +17,7 @@ The source baseline was frozen **0.1.0-rc.11** at `e0f961c9093e98139e4f57bc94c49
 **Corrected rc.12 acceptance:** Original fresh-image D1 was **INTERRUPTED** after one format; the specific same-volume, no-format D1R continuation **PASSED**, including cross-filesystem SOPS and protected Age/SOPS. Real encrypted-kit ZIP option 4, recipient matching and temporary cleanup **PASSED** in D2. PR #373 and the archival PR #374 were merged with CI success. The full rc.12 live Caddy/CrowdSec/Box/timer/reboot path, actual production deployment and operator cutover/rollback GO-NO-GO remain **NOT RUN**. Do not mislabel the interrupted first attempt as an uninterrupted install.
 
 The archived scripts are not installed by `setup.sh` and must not be automatically invoked by production systemd units. No private logs, Age private identities, decrypted SOPS values or authentication tokens belong in this directory.
+
+## Read-only production-planning instruments
+
+The separate `production-readiness-inventory.py` targets an **already installed** appliance and `production-new-host-preflight.py` targets a **fresh replacement/disposable** Ubuntu 26.04 ARM64 VM. They are not numbered historical gates, are not installed appliance commands, and do not authorize formatting, installation, remote recovery, DNS changes or production cutover. Both collect limited private evidence under the invoking operator's home. See [Production readiness](../../docs/PRODUCTION-READINESS.md) before running either.

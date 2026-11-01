@@ -1,0 +1,76 @@
+# Production readiness: read-only P0
+
+Run this on the **explicitly selected installed appliance host**, not on an assumed historical acceptance VM. The host may be the current production appliance or a proposed replacement; make that distinction in the operator response. This file is an acceptance instrument, not a production service.
+
+## New VM / replacement host: P0 preflight (no installed appliance)
+
+A clean recovery VM has no `/opt/vaultwarden-oci/current`, so the **installed-host** P0 tool below must not be used as its first gate. Use the separate `tests/host-acceptance/production-new-host-preflight.py` instead. It supports the fresh Ubuntu 26.04 ARM64 path, uses the release-owned storage ancestry logic to list non-boot data-volume candidates, and refuses to approve a device without independent OCI Console confirmation. Run it with `sudo -n python3 -B -E` only after checking out **the exact reviewed PR head SHA**, not an unfrozen branch tip.
+
+P0 does not download a remote backup or create an installer state. The subsequent approved route is the documented [lost-server recovery](RECOVERY.md#lost-server-disaster-recovery): install exact `0.1.0-rc.12` with the **existing original offline public Age recipient**, verify the selected encrypted `.vwrec` from its full rclone object path or a securely transferred local copy, restore through supported `vwctl restore` with an explicit final `RESTORE` confirmation, then inspect the recovered config/backup retention and secure the isolated runtime before considering DNS. Root rclone config and credentials are NOT in the recovery archive. Do not create a replacement offline identity for material already encrypted to the original recipient.
+
+This fresh VM is a **disposable test/replacement candidate**, not automatically the currently serving production appliance. A successful new-host exercise cannot substitute for production-host inventory, approved cutover, and coherent rollback. Keep the existing production DNS and remote recovery objects unchanged.
+
+## Installed appliance: one-shot invocation
+
+On the selected Ubuntu host as `ubuntu` or another operator with passwordless `sudo -n`, copy and run this entire block:
+
+```bash
+(
+set -Eeuo pipefail
+umask 077
+REPO="killer23d/VaultWarden-OCI"
+BRANCH="audit/production-p0-readonly-inventory"
+ROOT="$HOME/VaultWarden-OCI-p0"
+if [ -e "$ROOT" ]; then
+  echo "BLOCKED: $ROOT already exists; do not overwrite prior evidence"; exit 1
+fi
+sudo -n true || { echo "BLOCKED: passwordless sudo unavailable"; exit 1; }
+git clone --quiet --depth 1 --branch "$BRANCH" "https://github.com/$REPO.git" "$ROOT"
+cd "$ROOT"
+git rev-parse HEAD
+python3 -B -m unittest discover -s tests -p 'test_production_readiness_inventory.py'
+sudo -n python3 -B -E tests/host-acceptance/production-readiness-inventory.py
+)
+```
+
+**Pin before using this for a production decision:** the branch name above is only for initial source retrieval; compare the printed SHA with the reviewed PR's exact commit. If it differs, stop and verify the new diff. This gate never serves as authorization for production mutation.
+
+The script reads installed release, protected storage markers, SOPS decryption into `/dev/null`, read-only `vwctl doctor/status/timers/dns status`, local encrypted artifact metadata and systemd result metadata. It writes only private evidence under the invoking operator's `~/vwoci-acceptance/production-p0-*`. No backup, restore, service enable/stop, Cloudflare write, SMTP send, host upgrade, or reboot is performed. DNS status is a live **read-only** API query, so it may be unavailable. Historical recovery timestamps are not fresh proof.
+
+**Paste the printed summary only.** Do not paste `diagnostics.json`, raw configuration, journals, encrypted credential files, private Age identities, rclone credentials or recovery ZIP passphrases. The operator must independently attest: host role (current/replacement), OCI Console volume attachment identity, off-host encrypted recovery-kit/private Age identity custody, Worker Route Fail Open per invocation, and production DNS ownership. Any storage mismatch, incomplete or failed release validation is a stop, not a reason to repair automatically.
+
+## Interpreting a pre-start rc.12 host inventory
+
+A host installed successfully but not yet operated may legitimately have **no backup directory, no encrypted `.vwrec`, no recovery verification state, inactive services and inactive timers**. These are `NOT RUN` or `PENDING` evidence gaps, not proof the underlying ext4 volume is damaged. An existing *symlinked*, unreadable, or wrong-filesystem backup path remains a blocker.
+
+A systemd backup service with `Result=success` but **no timer `LastTriggerUSec`** has not proved a scheduled backup. Even when a timer trigger exists, matching service journal, validated local encrypted artifact and independent remote readback are needed before claiming real scheduled-backup acceptance.
+
+The P0 script runs a non-disclosing SOPS decryption into `/dev/null` to prove **cryptographic** access. It then separately invokes the installed secret validator in memory to test required credential presence, Cloudflare token formats and the required remediation credential. These results can differ: a decryptable file may still contain incomplete first-run credentials. Share only the script's field-name/boolean status, never the raw decrypted JSON or exception text. Do not edit credentials or enable the appliance until a separate authorized gate.
+
+For the disposable `vaultwarden-oci-6-vnic` VM, D1R and D2 are accepted only within their historical scopes. Full rc.12 runtime/security/offsite/scheduled-backup acceptance still requires isolated endpoint planning, correct private offline Age identity custody, a verified representative remote `.vwrec`, and individual approval for any actual restore, Cloudflare, mail or backup effect. P0 itself must not perform any of those.
+
+## Initial observed P0 on disposable rc.12 host (2026-11-01 UTC)
+
+The operator executed the **earlier** P0 script at commit `d2051b6dbe85778414f9fee45923421fbe6735e5` on `vaultwarden-oci-6-vnic` at **2026-11-01T06:34:54Z**. The 9 focused `test_production_*.py` checks passed. This is the **existing rc.12 disposable acceptance VM**, not an independently selected production host.
+
+- **PASS**: Ubuntu 26.04 Resolute ARM64, native Python 3.14.4; installed immutable `0.1.0-rc.12`; launcher; dedicated ext4 volume UUID `75ceee68-0fff-4f74-b629-4e22b3b99c20`, stable by-id, separate root device and matching dual storage markers; approximately 46 GiB available; root-private config/SOPS/operational Age metadata; real SOPS ciphertext decryption to `/dev/null`; no update guard or reboot request.
+- **Stopped/unproven**: Vaultwarden target inactive/disabled, all four timers not accepted, no recorded local or remote verified recovery, offsite publishing not configured, retention 0/0. No DNS update, remote readback, SMTP, real restore, application start, timer firing or reboot was performed.
+- **Doctor FAIL**: `secrets.decrypt`, Cloudflare origin CIDR/firewall, and four CrowdSec checks; warnings for local/offsite/rclone recovery. The direct SOPS check proved only cryptographic decryption, **not** required secret values or provider token format. First-run credentials may be incomplete, but that cause was **not established** by this first P0 output.
+- **Initial P0 classification limitations corrected in this PR**: the initial script reported `BLOCKED` for an unreadable *or absent* backup directory without distinguishing them; the exact directory state is still unknown until the revised read-only inspection runs. It also marked backup.service `PASS` from systemd `Result=success` although `LastTriggerUSec` was empty. **No successful scheduled backup was observed.** The revised script classifies those evidence boundaries truthfully.
+- **Final first-run result: `BLOCKED` for progressing to live deployment.** OCI Console attachment ownership, offline recovery-kit/private identity, current Worker invocation Fail Open, actual DNS authority and the production deployment topology were not independently attested.
+
+Next run: use the corrected, pinned installed-appliance P0 script to classify missing/unsafe local backup path and secret schema without printing secrets. Then seek separate operator approval for isolated rc.12 recovery/security tests; do not re-run historical D1R/D2 or make a production mutation on this evidence alone.
+
+## Acceptance status and path selection
+
+The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes remain historical PASS. Full rc.12 live operation, an uninterrupted fresh rc.12 install, production update/restore, current offsite readback, release-specific coherent rollback, cutover and production monitoring are **NOT RUN**. Do not transfer the historical VM's result to production.
+
+**P1:** after P0, determine whether the installed predecessor has an explicitly supported in-place application update to the exact release, or whether a new dedicated-volume host plus verified encrypted `.vwrec` recovery is required. Do not assume arbitrary old snapshots support direct update. The new-host route also requires original offline Age identity and root rclone configuration separately from the recovery archive.
+
+**P2:** rehearse only release-delta security/restore/rollback boundaries not already proven, on an explicitly approved isolated host. No cloud, email, DNS, disk formatting or restore effect without its own authorization.
+
+**P3:** require signed-off exact candidate and CI, dedicated disk and ownership proof, verified offsite recovery/readback and original recovery-kit custody, consistent SQLite, Cloudflare/Caddy/CrowdSec/admin protections, manually confirmed Worker Fail Open, four timers, notification readiness, downtime/RPO/RTO and coherent rollback authority. A critical missing prerequisite means NO-GO.
+
+**P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
+
+Never claim a binary-only rollback restores persistent data or package state.
