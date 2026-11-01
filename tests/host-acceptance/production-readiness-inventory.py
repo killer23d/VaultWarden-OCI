@@ -156,6 +156,66 @@ def by_id_alias(device: Path) -> str | None:
     return str(sorted(acceptable)[0]) if acceptable else None
 
 
+def safe_secret_failure(exc: Exception) -> str:
+    """Expose only fixed non-secret reasons from the installed secret validator."""
+    reason = str(exc)
+    match = re.fullmatch(r'decrypted secret ([a-z_]+) must be a non-empty single-line string', reason)
+    safe_keys = {
+        'cloudflare_api_token', 'cloudflare_remediation_token',
+        'smtp_username', 'smtp_password', 'vaultwarden_admin_token',
+        'admin_basic_auth_password', 'email_api_token',
+    }
+    if match and match.group(1) in safe_keys:
+        return 'invalid or missing required secret value: ' + match.group(1)
+    if 'decrypted Cloudflare token does not match the supported' in reason:
+        return 'decrypted Cloudflare token has invalid format (value withheld)'
+    if reason.startswith('SOPS decryption'):
+        return 'installed SOPS JSON decryption failed (details withheld)'
+    return 'installed secret schema validation failed (details withheld)'
+
+
+def local_backup_inventory(path: Path, state_root: Path) -> tuple[str, str]:
+    """Inspect only backup metadata. No artifact is read, opened or decrypted."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return 'NOT RUN', 'backup directory absent; no first backup established'
+    except OSError:
+        return 'BLOCKED', 'cannot inspect backup directory'
+
+    if not stat.S_ISDIR(info.st_mode):
+        return 'BLOCKED', 'backup path is not a regular directory'
+    try:
+        if info.st_dev != state_root.stat().st_dev:
+            return 'BLOCKED', 'backup directory is not on the mounted dedicated volume'
+        timestamps: list[float] = []
+        for artifact in path.iterdir():
+            if not artifact.name.endswith('.vwrec'):
+                continue
+            stat_info = artifact.lstat()
+            if not stat.S_ISREG(stat_info.st_mode) or stat_info.st_size <= 0:
+                return 'BLOCKED', 'encrypted backup entry is not a nonempty regular file'
+            timestamps.append(stat_info.st_mtime)
+    except OSError:
+        return 'BLOCKED', 'backup directory unreadable'
+
+    if not timestamps:
+        return 'NOT RUN', 'backup directory present but no encrypted .vwrec created'
+    newest = dt.datetime.fromtimestamp(max(timestamps), tz=dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return 'PASS', f'count={len(timestamps)} newest_mtime_UTC={newest} (metadata only; not reverified)'
+
+
+def last_backup_witness(service: dict[str, str], timer: dict[str, str]) -> tuple[str, str]:
+    """systemd default Result=success is NOT proof of a scheduled invocation."""
+    triggered = timer.get('LastTriggerUSec', '').strip()
+    result = service.get('Result', 'unknown')
+    if not triggered or triggered in {'n/a', 'unknown', '-'}:
+        return 'NOT RUN', 'no recorded scheduled trigger; systemd Result is not execution evidence'
+    if result != 'success':
+        return 'WARN', 'a timer trigger exists but the backup service result is not success'
+    return 'PENDING', 'timer trigger and unit result recorded; matching journal and verified .vwrec still required'
+
+
 class Report:
     def __init__(self) -> None:
         self.rows: list[tuple[str, str, str]] = []
@@ -284,6 +344,7 @@ def main() -> int:
     protected = ('config.toml', 'secrets.sops.yaml', 'age-key.txt', 'storage-identity.json')
     good = all(safe_mode(ETC / f) for f in protected)
     r.add('PASS' if good else 'BLOCKED', 'Protected custody', 'root-owned, private nonempty config/SOPS/operational Age/storage markers' if good else 'missing, non-private or nonregular protected file')
+    crypto_ok = False
     if good:
         sops = Path('/usr/local/bin/sops')
         if not sops.is_file():
@@ -292,9 +353,25 @@ def main() -> int:
             env = dict(os.environ)
             env['SOPS_AGE_KEY_FILE'] = str(ETC / 'age-key.txt')
             rc, _ = command([str(sops), '--decrypt', '--output', '/dev/null', str(ETC / 'secrets.sops.yaml')], timeout=50, env=env)
-            r.add('PASS' if rc == 0 else 'BLOCKED', 'SOPS', 'operational key decrypts encrypted secrets to /dev/null' if rc == 0 else 'non-disclosing cryptographic check failed')
+            crypto_ok = rc == 0
+            r.add('PASS' if crypto_ok else 'BLOCKED', 'SOPS', 'operational key decrypts ciphertext (cryptography only)' if crypto_ok else 'non-disclosing cryptographic check failed')
     else:
         r.add('NOT RUN', 'SOPS', 'protected custody did not pass')
+
+    # The direct SOPS test checks cryptography only; the product's secret owner
+    # also requires actual nonempty fields and accepted Cloudflare token formats.
+    # Neither values nor arbitrary exceptions are written to the evidence.
+    if crypto_ok:
+        try:
+            from vaultwarden_oci import secrets
+            values = secrets.decrypt()
+            del values
+        except (secrets.SecretsError, OSError) as exc:
+            r.add('BLOCKED', 'Secret schema', safe_secret_failure(exc))
+        else:
+            r.add('PASS', 'Secret schema', 'required fields and provider token syntax validated; values withheld')
+    else:
+        r.add('NOT RUN', 'Secret schema', 'requires successful SOPS cryptographic check')
 
     try:
         with (ETC / 'config.toml').open('rb') as handle:
@@ -322,18 +399,8 @@ def main() -> int:
     except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError):
         r.add('BLOCKED', 'Backup policy', 'config.toml missing or invalid; no destination can be assumed')
 
-    backup_dir = STATE / 'backups'
-    try:
-        if backup_dir.is_symlink() or not backup_dir.is_dir():
-            raise OSError('invalid backup directory')
-        items = []
-        for p in backup_dir.iterdir():
-            if p.name.endswith('.vwrec') and p.is_file() and not p.is_symlink():
-                items.append(p.stat())
-        newest = dt.datetime.fromtimestamp(max(s.st_mtime for s in items), tz=dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') if items else 'none'
-        r.add('PASS' if items else 'WARN', 'Local encrypted backups', f'count={len(items)} newest_mtime_UTC={newest} (not reverified during P0)')
-    except OSError:
-        r.add('BLOCKED', 'Local encrypted backups', 'backup directory unreadable or unsafe')
+    backup_state, backup_detail = local_backup_inventory(STATE / 'backups', STATE)
+    r.add(backup_state, 'Local encrypted backups', backup_detail)
 
     state = load_json(STATE / 'state/recovery.json')
     r.add('PENDING', 'Recovery verification record', f'local={verified_recovery(state, "local")} offsite={verified_recovery(state, "offsite")} (historical; independent readback not performed)')
@@ -374,7 +441,12 @@ def main() -> int:
                 storage_status = data.get('storage') or {}
                 state_text = str(runtime.get('overall')) if runtime.get('overall') in {'running', 'stopped', 'degraded'} else 'unknown'
                 storage_text = str(storage_status.get('state')) if storage_status.get('state') in {'ok', 'warning', 'failure'} else 'unknown'
-                r.add('BLOCKED' if storage_text == 'failure' or state_text == 'unknown' else 'PASS', 'Status', f'runtime={state_text} storage={storage_text} exit={rc}')
+                status_result = (
+                    'BLOCKED' if storage_text in {'failure', 'unknown'} or state_text == 'unknown' or rc not in {0, 1}
+                    else 'WARN' if state_text == 'stopped' or rc != 0
+                    else 'PASS'
+                )
+                r.add(status_result, 'Status', f'runtime={state_text} storage={storage_text} exit={rc} (stopped is not live acceptance)')
                 r.data['status'] = {'runtime': state_text, 'storage': storage_text}
         else:
             healthy, n = timer_summary(data)
@@ -384,7 +456,8 @@ def main() -> int:
     last = systemd('vaultwarden-oci-backup.service')
     btimer = systemd('vaultwarden-oci-backup.timer')
     r.add('PASS' if target.get('ActiveState') == 'active' else 'WARN', 'Systemd target', f'active={target.get("ActiveState", "unknown")} enabled={target.get("UnitFileState", "unknown")}')
-    r.add('PASS' if last.get('Result') == 'success' else 'WARN', 'Last backup unit', f'result={last.get("Result", "unknown")} last_trigger={btimer.get("LastTriggerUSec", "unknown")}')
+    witness_state, witness_detail = last_backup_witness(last, btimer)
+    r.add(witness_state, 'Last backup unit', witness_detail)
     r.data['systemd'] = {'target': target, 'backup_service': last, 'backup_timer': btimer}
     rc, output = command(['systemctl', 'list-units', '--failed', '--plain', '--no-legend', '--no-pager'])
     failed = [line.split()[0] for line in output.splitlines() if line.split() and re.fullmatch(r'[A-Za-z0-9_.@-]+\.(?:service|timer|target)', line.split()[0])]
