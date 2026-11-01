@@ -305,7 +305,7 @@ class P1SourcePreflightTests(unittest.TestCase):
                     return_value=("26.04", "resolute")))
                 self.assertIn(mod.main(), (0, 2))
             summary = (output_dir / "summary.txt").read_text(encoding="utf-8")
-            self.assertIn("Existing appliance-named containers=1", summary)
+            self.assertIn("BLOCKED  Appliance-named containers total=1 running=1", summary)
             self.assertIn("Root's bw-backup: rclone name exists", summary)
             self.assertIn("Pre-restore readiness", summary)
             self.assertNotIn("SENSITIVE-CONTAINER-ID", summary)
