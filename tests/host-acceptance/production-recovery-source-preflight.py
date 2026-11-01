@@ -487,14 +487,21 @@ def main() -> int:
     backup_class, backup_detail = local_recovery_inventory(STATE)
     record(backup_class, "Local .vwrec inventory: " + backup_detail)
 
-    doctor_rc, doctor_json = run_readonly(
-        [sys.executable, "-B", "-E", str(installed / "vwctl"), "doctor", "--json"], timeout=85
-    )
-    valid_doctor, doctor_overall, failed_checks = doctor_readout(doctor_json, doctor_rc)
-    record("BLOCKED" if not valid_doctor else "PASS" if doctor_overall == "PASS" else "PENDING",
-           "Product doctor: " +
-           (f"overall={doctor_overall}; failing_check_ids={','.join(failed_checks[:16]) or 'none'}"
-            if valid_doctor else "malformed JSON or inconsistent exit status (messages withheld)"))
+    # A docker CLI inspection may trigger an inactive socket-activated daemon.
+    # Skip Docker-backed doctor entirely unless Docker is ALREADY active.
+    docker_unit = service_properties("docker.service")
+    docker_active = (docker_unit or {}).get("ActiveState") == "active"
+    if docker_active:
+        doctor_rc, doctor_json = run_readonly(
+            [sys.executable, "-B", "-E", str(installed / "vwctl"), "doctor", "--json"], timeout=85
+        )
+        valid_doctor, doctor_overall, failed_checks = doctor_readout(doctor_json, doctor_rc)
+        record("BLOCKED" if not valid_doctor else "PASS" if doctor_overall == "PASS" else "PENDING",
+               "Product doctor: " +
+               (f"overall={doctor_overall}; failing_check_ids={','.join(failed_checks[:16]) or 'none'}"
+                if valid_doctor else "malformed JSON or inconsistent exit status (messages withheld)"))
+    else:
+        record("NOT RUN", "Docker-backed doctor skipped: Docker daemon was not already active")
 
     binaries = ("git", "docker", "rclone", "sops", "age", "age-keygen",
                 "7zz", "cscli", "iptables", "ip6tables", "nft", "ss")
@@ -509,26 +516,29 @@ def main() -> int:
            "Host dpkg state clean" if dpkg_rc == 0 and not dpkg_out.strip()
            else "Package audit requires administrator review; no apt action performed")
 
-    docker_rc, docker_version = run_readonly(
-        ["docker", "version", "--format", "{{.Server.Version}}"], timeout=20
-    )
-    compose_rc, compose_version = run_readonly(["docker", "compose", "version", "--short"], timeout=20)
-    engine_ok = docker_rc == 0 and bool(docker_version.strip())
-    compose_ok = compose_rc == 0 and bool(compose_version.strip())
-    record("PASS" if engine_ok and compose_ok else "PENDING",
-           f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
-    if engine_ok:
-        code, rows = run_readonly(
-            ["docker", "ps", "--all",
-             "--filter", "name=^vaultwarden-oci-",
-             "--format", "{{.ID}}"], timeout=20
+    if docker_active:
+        docker_rc, docker_version = run_readonly(
+            ["docker", "version", "--format", "{{.Server.Version}}"], timeout=20
         )
-        count_containers = len([line for line in rows.splitlines() if line.strip()])
-        record("PASS" if code == 0 and count_containers == 0 else "PENDING",
-               f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
-               " (names, IDs and logs withheld)")
+        compose_rc, compose_version = run_readonly(["docker", "compose", "version", "--short"], timeout=20)
+        engine_ok = docker_rc == 0 and bool(docker_version.strip())
+        compose_ok = compose_rc == 0 and bool(compose_version.strip())
+        record("PASS" if engine_ok and compose_ok else "PENDING",
+               f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
+        if engine_ok:
+            code, rows = run_readonly(
+                ["docker", "ps", "--all",
+                 "--filter", "name=^vaultwarden-oci-",
+                 "--format", "{{.ID}}"], timeout=20
+            )
+            count_containers = len([line for line in rows.splitlines() if line.strip()])
+            record("PASS" if code == 0 and count_containers == 0 else "PENDING",
+                   f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
+                   " (names, IDs and logs withheld)")
+        else:
+            record("NOT RUN", "Container inventory unavailable without a healthy Docker engine")
     else:
-        record("NOT RUN", "Container inventory unavailable without a running Docker engine")
+        record("NOT RUN", "Docker CLI/Compose/container inventory skipped to avoid socket service activation")
 
     security_units = (
         "crowdsec.service",
