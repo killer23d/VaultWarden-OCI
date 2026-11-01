@@ -49,6 +49,18 @@ The P0 script runs a non-disclosing SOPS decryption into `/dev/null` to prove **
 
 For the disposable `vaultwarden-oci-6-vnic` VM, D1R and D2 are accepted only within their historical scopes. Full rc.12 runtime/security/offsite/scheduled-backup acceptance still requires isolated endpoint planning, correct private offline Age identity custody, a verified representative remote `.vwrec`, and individual approval for any actual restore, Cloudflare, mail or backup effect. P0 itself must not perform any of those.
 
+## Initial observed P0 on disposable rc.12 host (2026-11-01 UTC)
+
+The operator executed the **earlier** P0 script at commit `d2051b6dbe85778414f9fee45923421fbe6735e5` on `vaultwarden-oci-6-vnic` at **2026-11-01T06:34:54Z**. The 9 focused `test_production_*.py` checks passed. This is the **existing rc.12 disposable acceptance VM**, not an independently selected production host.
+
+- **PASS**: Ubuntu 26.04 Resolute ARM64, native Python 3.14.4; installed immutable `0.1.0-rc.12`; launcher; dedicated ext4 volume UUID `75ceee68-0fff-4f74-b629-4e22b3b99c20`, stable by-id, separate root device and matching dual storage markers; approximately 46 GiB available; root-private config/SOPS/operational Age metadata; real SOPS ciphertext decryption to `/dev/null`; no update guard or reboot request.
+- **Stopped/unproven**: Vaultwarden target inactive/disabled, all four timers not accepted, no recorded local or remote verified recovery, offsite publishing not configured, retention 0/0. No DNS update, remote readback, SMTP, real restore, application start, timer firing or reboot was performed.
+- **Doctor FAIL**: `secrets.decrypt`, Cloudflare origin CIDR/firewall, and four CrowdSec checks; warnings for local/offsite/rclone recovery. The direct SOPS check proved only cryptographic decryption, **not** required secret values or provider token format. First-run credentials may be incomplete, but that cause was **not established** by this first P0 output.
+- **Initial P0 classification limitations corrected in this PR**: the initial script reported `BLOCKED` for an unreadable *or absent* backup directory without distinguishing them; the exact directory state is still unknown until the revised read-only inspection runs. It also marked backup.service `PASS` from systemd `Result=success` although `LastTriggerUSec` was empty. **No successful scheduled backup was observed.** The revised script classifies those evidence boundaries truthfully.
+- **Final first-run result: `BLOCKED` for progressing to live deployment.** OCI Console attachment ownership, offline recovery-kit/private identity, current Worker invocation Fail Open, actual DNS authority and the production deployment topology were not independently attested.
+
+Next run: use the corrected, pinned installed-appliance P0 script to classify missing/unsafe local backup path and secret schema without printing secrets. Then seek separate operator approval for isolated rc.12 recovery/security tests; do not re-run historical D1R/D2 or make a production mutation on this evidence alone.
+
 ## Acceptance status and path selection
 
 The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes remain historical PASS. Full rc.12 live operation, an uninterrupted fresh rc.12 install, production update/restore, current offsite readback, release-specific coherent rollback, cutover and production monitoring are **NOT RUN**. Do not transfer the historical VM's result to production.
