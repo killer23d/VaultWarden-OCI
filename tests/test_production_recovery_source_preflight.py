@@ -126,6 +126,12 @@ class P1SourcePreflightTests(unittest.TestCase):
         self.assertEqual(mod.doctor_readout(warning, 0), (True, "WARN", []))
         self.assertEqual(mod.doctor_readout(warning.replace('"overall": "WARN"', '"overall": "PASS"'), 0)[0], False)
 
+    def test_no_socket_activated_docker_probe(self):
+        self.assertFalse(mod.daemon_running(None))
+        self.assertFalse(mod.daemon_running({"LoadState": "loaded", "ActiveState": "inactive"}))
+        self.assertFalse(mod.daemon_running({"LoadState": "not-found", "ActiveState": "active"}))
+        self.assertTrue(mod.daemon_running({"LoadState": "loaded", "ActiveState": "active"}))
+
 
 if __name__ == "__main__":
     unittest.main()
