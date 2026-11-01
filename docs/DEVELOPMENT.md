@@ -47,7 +47,7 @@ Permanent validation has three layers only:
 
 1. focused unit tests under `tests/`;
 2. small deterministic integrations, including Caddy config, recovery crypto/ZIP, and packet-boundary checks;
-3. disposable Ubuntu 24.04 real-host acceptance on `amd64` and `arm64` where environments are available, plus explicit Ubuntu 26.04 x64/Arm64 CI using native Python 3.14 and OS-sensitive checks. Real Ubuntu 26.04 OCI host acceptance is `NOT RUN` unless separately performed.
+3. disposable Ubuntu real-host release acceptance where environments are available; the Ubuntu 24.04 baseline remains, and explicit Ubuntu 26.04 x64/Arm64 CI uses native Python 3.14 with OS-sensitive checks. Ubuntu 26.04 **ARM64** real OCI acceptance was performed for frozen rc.11 A0–C1/B2 and corrected rc.12 D1R/D2; [the handoff](ACCEPTANCE-HANDOFF.md) records exact PASS/INTERRUPTED/NOT RUN boundaries. Real-host 26.04 AMD64, full live rc.12 application operations and actual production cutover are NOT RUN.
 
 Tests protect security, availability, recoverability, and operator truthfulness rather than private source order/text. Do not create a custom runner, coverage gate, giant matrix, or duplicate test architecture.
 
@@ -61,7 +61,7 @@ bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Real-host acceptance is described in [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md) and must be reported honestly as `NOT RUN` when unavailable.
+Real-host acceptance is described in [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md); the accepted Ubuntu 26.04 ARM64 specifics are in [the agent handoff](ACCEPTANCE-HANDOFF.md). Each unavailable gate/architecture/provider remains `NOT RUN`, even if a different gate on the same OS passed.
 
 ## Release workflow
 
