@@ -628,8 +628,23 @@ def main() -> int:
                  "--format", "{{.ID}}"], timeout=20
             )
             count_containers = len([line for line in container_id_output.splitlines() if line.strip()])
-            record("PASS" if code == 0 and count_containers == 0 else "PENDING",
-                   f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
+            running_rc, running_id_output = run_readonly(
+                ["docker", "ps",
+                 "--filter", "name=^vaultwarden-oci-",
+                 "--format", "{{.ID}}"], timeout=20
+            )
+            running_count = len([line for line in running_id_output.splitlines() if line.strip()])
+            if running_rc != 0 or code != 0:
+                container_state = "PENDING"
+            elif running_count:
+                container_state = "BLOCKED"
+            elif count_containers:
+                container_state = "PENDING"
+            else:
+                container_state = "PASS"
+            record(container_state,
+                   f"Appliance-named containers total={count_containers if code == 0 else 'unknown'} "
+                   f"running={running_count if running_rc == 0 else 'unknown'}"
                    " (names, IDs and logs withheld)")
         else:
             record("NOT RUN", "Container inventory unavailable without a healthy Docker engine")
