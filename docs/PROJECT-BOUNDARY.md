@@ -5,7 +5,7 @@ VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of rou
 ## Supported production path
 
 - Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute.
-- `amd64` and `arm64` are supported architectures. Ubuntu 24.04 retains the existing disposable real-host acceptance baseline; Ubuntu 26.04 is code/CI compatibility validated and has not received real OCI host acceptance in this workstream.
+- `amd64` and `arm64` are supported architectures. Ubuntu 24.04 retains its established disposable real-host baseline. **Ubuntu 26.04 ARM64 has recorded real OCI acceptance** for frozen rc.11 recovery/operation and corrected rc.12 installer/ZIP recovery identity gates (see [accepted evidence](ACCEPTANCE-HANDOFF.md)). That evidence does not establish Ubuntu 26.04 AMD64 real-host coverage, an uninterrupted first rc.12 installation, all rc.12 live security/backup operations, or a production cutover.
 - Runtime behavior is cloud-provider neutral.
 - Production persistent application state must live on a separate storage filesystem/volume. A host whose production state resides only on the boot/root filesystem is unsupported.
 - Cloudflare-proxied production ingress with Caddy.
