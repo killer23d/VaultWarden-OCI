@@ -303,6 +303,8 @@ class P1SourcePreflightTests(unittest.TestCase):
                     return_value={"ID": "ubuntu", "VERSION_ID": "26.04", "VERSION_CODENAME": "resolute"}))
                 stack.enter_context(patch.object(cli, "validate_supported_ubuntu_release",
                     return_value=("26.04", "resolute")))
+                import io
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertIn(mod.main(), (0, 2))
             summary = (output_dir / "summary.txt").read_text(encoding="utf-8")
             self.assertIn("BLOCKED  Appliance-named containers total=1 running=1", summary)
