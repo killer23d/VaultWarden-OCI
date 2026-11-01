@@ -344,7 +344,7 @@ def main() -> int:
                     except (recovery.RecoveryError, OSError, ValueError):
                         gate.record("BLOCKED", "Age decryption, manifest/checksums or recovered SOPS custody failed (details withheld)")
                         return gate.finish()
-                    gate.record("PASS", "Offline Age decryption, manifest v2, payload hashes and recovered SOPS custody verified")
+                    gate.record("PASS", "Offline Age decryption, manifest format 2, payload hashes and recovered SOPS custody verified")
 
                     if not sqlite_snapshot_integrity(extracted / "payload/data/db.sqlite3"):
                         gate.record("BLOCKED", "Recovered SQLite snapshot fails read-only integrity check")
