@@ -67,5 +67,65 @@ class P1SourcePreflightTests(unittest.TestCase):
             self.assertEqual(mod.kit_metadata(alias, os.getuid()), "unsafe")
 
 
+    def test_doctor_readout_uses_only_identifiers_not_messages(self):
+        import json
+        result = json.dumps({
+            "schema_version": 1, "overall": "FAIL",
+            "checks": [{"id": "secrets.decrypt", "status": "FAIL", "message": "super-secret-token"},
+                       {"id": "runtime.docker", "status": "PASS", "message": "secret-value"}],
+        })
+        self.assertEqual(mod.doctor_readout(result, 1), (True, "FAIL", ["secrets.decrypt"]))
+        self.assertEqual(mod.doctor_readout(result, 0)[0], False)
+        corrupted = result.replace("secrets.decrypt", "secret\nSENSITIVE")
+        self.assertFalse(mod.doctor_readout(corrupted, 1)[0])
+        self.assertEqual(mod.doctor_readout("not-json", 1)[0], False)
+
+    def test_local_backup_file_presence_is_only_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertEqual(mod.local_recovery_inventory(root)[0], "NOT RUN")
+            backup = root / "backups"
+            backup.mkdir()
+            self.assertEqual(mod.local_recovery_inventory(root)[0], "NOT RUN")
+            (backup / "recovery.vwrec").write_bytes(b"fake-encrypted-test")
+            self.assertEqual(mod.local_recovery_inventory(root)[0], "PENDING")
+            (backup / "unsafe.vwrec").symlink_to(backup / "recovery.vwrec")
+            self.assertEqual(mod.local_recovery_inventory(root)[0], "BLOCKED")
+
+    def test_release_owner_inventory_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "vwctl").write_bytes(b"fixture")
+            (root / "versions.toml").write_bytes(b"fixture")
+            (root / "email-providers.toml").write_bytes(b"fixture")
+            (root / "vaultwarden_oci").mkdir()
+            (root / "systemd").mkdir()
+            (root / "systemd" / "service").write_bytes(b"fixture")
+            self.assertEqual(len(mod.release_fingerprints(root)), 4)
+            (root / "systemd" / "link").symlink_to(root / "vwctl")
+            with self.assertRaises(ValueError):
+                mod.release_fingerprints(root)
+
+    def test_only_tcp_listeners_are_classified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tcp = Path(temp) / "tcp"
+            tcp6 = Path(temp) / "tcp6"
+            header = "sl  local_address rem_address st tx_queue rx_queue\n"
+            tcp.write_text(header +
+                "  0: 0100007F:01BB 00000000:0000 0A 0:0 0:0 0 0 0\n" +
+                "  1: 0100007F:0050 00000000:0000 01 0:0 0:0 0 0 0\n")
+            tcp6.write_text(header +
+                "  2: 00000000000000000000000000000000:0050 00000000:0000 0A 0:0 0:0 0 0 0\n")
+            self.assertEqual(mod.listening_ports((tcp, tcp6)), {80, 443})
+            self.assertIsNone(mod.listening_ports((Path(temp) / "missing",)))
+
+    def test_doctor_warn_no_false_pass(self):
+        import json
+        warning = json.dumps({"schema_version": 1, "overall": "WARN",
+            "checks": [{"id": "recovery.offsite", "status": "WARN", "message": "private"}]})
+        self.assertEqual(mod.doctor_readout(warning, 0), (True, "WARN", []))
+        self.assertEqual(mod.doctor_readout(warning.replace('"overall": "WARN"', '"overall": "PASS"'), 0)[0], False)
+
+
 if __name__ == "__main__":
     unittest.main()
