@@ -323,14 +323,14 @@ def main() -> int:
         print("BLOCKED: cannot create private operator evidence (" + type(exc).__name__ + ")", file=sys.stderr)
         return 2
 
-    rows: list[tuple[str, str]] = []
+    report_rows: list[tuple[str, str]] = []
     blocked = False
 
     def record(state: str, msg: str) -> None:
         nonlocal blocked
         if state not in {"PASS", "BLOCKED", "PENDING", "NOT RUN"}:
             raise RuntimeError("invalid evidence classification")
-        rows.append((state, msg))
+        report_rows.append((state, msg))
         if state == "BLOCKED":
             blocked = True
 
@@ -338,7 +338,7 @@ def main() -> int:
         overall = "BLOCKED" if blocked else "PENDING"
         record(overall, "Pre-restore readiness; no restore or external side effects authorized")
         summary = ("Gate P1 — rc.12 recovery source/custody inventory (read only)\n"
-                   + "\n".join(f"{state:<8} {msg}" for state, msg in rows) + "\n")
+                   + "\n".join(f"{state:<8} {msg}" for state, msg in report_rows) + "\n")
         (out / "summary.txt").write_text(summary, encoding="utf-8")
         print(summary, end="")
         print("Private summary:", out / "summary.txt")
@@ -531,12 +531,12 @@ def main() -> int:
         record("PASS" if engine_ok and compose_ok else "PENDING",
                f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
         if engine_ok:
-            code, rows = run_readonly(
+            code, container_id_output = run_readonly(
                 ["docker", "ps", "--all",
                  "--filter", "name=^vaultwarden-oci-",
                  "--format", "{{.ID}}"], timeout=20
             )
-            count_containers = len([line for line in rows.splitlines() if line.strip()])
+            count_containers = len([line for line in container_id_output.splitlines() if line.strip()])
             record("PASS" if code == 0 and count_containers == 0 else "PENDING",
                    f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
                    " (names, IDs and logs withheld)")
