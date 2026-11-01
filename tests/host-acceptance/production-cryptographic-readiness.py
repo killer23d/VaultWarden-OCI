@@ -115,8 +115,10 @@ class Gate:
     def finish(self) -> int:
         status = "BLOCKED" if self.blocked else "VERIFIED" if self.crypto_verified else "PENDING"
         self.rows.append((status, "P2 cryptographic rehearsal; no live restore was attempted"))
-        summary = "Gate P2 — original Box .vwrec independent decryption (no restore)\n" + "\n".join(
-            f"{state:<8} {message}" for state, message in self.rows) + "\n"
+        summary = (
+            "Gate P2 — original Box .vwrec independent decryption (no restore)\n"
+            + "\n".join(f"{state:<8} {message}" for state, message in self.rows)
+            + "\n"
         )
         (self.evidence / "summary.txt").write_text(summary, encoding="utf-8")
         print(summary, end="")
