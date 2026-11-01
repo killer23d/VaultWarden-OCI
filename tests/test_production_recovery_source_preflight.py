@@ -133,5 +133,74 @@ class P1SourcePreflightTests(unittest.TestCase):
         self.assertTrue(mod.daemon_running({"LoadState": "loaded", "ActiveState": "active"}))
 
 
+    def test_broad_gate_report_buffer_is_not_reassigned(self):
+        """Regression: docker ps stdout must never replace report rows."""
+        import ast
+        tree = ast.parse(ROOT.read_text(encoding="utf-8"))
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        report_bindings = [
+            name for node in ast.walk(main)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.For, ast.AsyncFor))
+            for target in (
+                node.targets if isinstance(node, ast.Assign)
+                else [node.target] if hasattr(node, "target")
+                else []
+            )
+            for name in ast.walk(target)
+            if isinstance(name, ast.Name) and name.id == "report_rows"
+        ]
+        self.assertEqual(len(report_bindings), 1)
+        self.assertIn("for state, msg in report_rows", ROOT.read_text(encoding="utf-8"))
+        self.assertIn("code, container_id_output = run_readonly", ROOT.read_text(encoding="utf-8"))
+
+    def test_stream_hash_without_materializing_ciphertext(self):
+        import hashlib
+        import sys
+        payload = b"encrypted-fixture"
+        sha, size = mod.digest_bounded_stdout(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'encrypted-fixture')"],
+            timeout_seconds=10, max_bytes=1024,
+        )
+        self.assertEqual(sha, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(size, len(payload))
+
+    def test_stream_failure_and_bounded_refusal(self):
+        import sys
+        with self.assertRaises(ValueError):
+            mod.digest_bounded_stdout(
+                [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'abc')"],
+                timeout_seconds=10, max_bytes=2,
+            )
+        with self.assertRaises(RuntimeError):
+            mod.digest_bounded_stdout(
+                [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'abc');sys.exit(3)"],
+                timeout_seconds=10, max_bytes=1024,
+            )
+        with self.assertRaises(ValueError):
+            mod.digest_bounded_stdout(
+                [sys.executable, "-c", "print('bad')"], timeout_seconds=0
+            )
+
+    def test_box_opt_in_never_contacts_remote_without_intent_and_preflight(self):
+        from unittest.mock import patch
+        with patch.object(mod, "digest_bounded_stdout") as digest:
+            self.assertEqual(mod.box_ciphertext_readback(False, True, True)[0], "NOT RUN")
+            self.assertEqual(mod.box_ciphertext_readback(True, False, True)[0], "PENDING")
+            self.assertEqual(mod.box_ciphertext_readback(True, True, False)[0], "NOT RUN")
+            digest.assert_not_called()
+            digest.return_value = (mod.HISTORICAL_SHA256, 76543)
+            state, info = mod.box_ciphertext_readback(True, True, True)
+            self.assertEqual(state, "PASS")
+            self.assertIn("76543", info)
+            self.assertEqual(digest.call_args.args[0][:3],
+                             ["rclone", "cat", mod.HISTORICAL_REMOTE])
+            digest.return_value = ("0" * 64, 76543)
+            self.assertEqual(mod.box_ciphertext_readback(True, True, True)[0], "BLOCKED")
+            digest.side_effect = OSError("private-auth-secret")
+            result = mod.box_ciphertext_readback(True, True, True)
+            self.assertEqual(result[0], "PENDING")
+            self.assertNotIn("private-auth-secret", result[1])
+
+
 if __name__ == "__main__":
     unittest.main()
