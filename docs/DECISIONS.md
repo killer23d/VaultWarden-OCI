@@ -265,7 +265,7 @@ This exception does not authorize ordinary package drift during application upda
 
 1. focused unit tests;
 2. small integration tests;
-3. disposable real-host Ubuntu 24.04 release acceptance on `amd64` and `arm64` where environments are available; Ubuntu 26.04 receives native Python 3.14 and OS-sensitive CI compatibility coverage, with real OCI host acceptance recorded as `NOT RUN` until deliberately performed.
+3. disposable real-host release acceptance on supported Ubuntu architectures where environments are available, alongside native Python 3.14 and OS-sensitive Ubuntu 26.04 compatibility CI. An intentional Ubuntu 26.04 **ARM64 OCI exercise** was subsequently completed for the specific frozen rc.11 and corrected rc.12 gates documented in [the acceptance handoff](ACCEPTANCE-HANDOFF.md). Unsupported or unperformed live-host/provider/product-version gates, including 26.04 AMD64, remain `NOT RUN`.
 
 Tests protect security, availability, recoverability, and operator truthfulness. Setup/custody coverage must protect the explicit-recipient boundary, supported CLI value forms, headless fail-closed-before-mutation behavior, and transient-key cleanup after handoff. Do not add permanent private source-string/order assertions, prose freezing, duplicated state machines, a custom test-runner product, or a coverage-percentage gate.
 
