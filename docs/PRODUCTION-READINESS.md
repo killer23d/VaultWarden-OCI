@@ -39,6 +39,16 @@ The script reads installed release, protected storage markers, SOPS decryption i
 
 **Paste the printed summary only.** Do not paste `diagnostics.json`, raw configuration, journals, encrypted credential files, private Age identities, rclone credentials or recovery ZIP passphrases. The operator must independently attest: host role (current/replacement), OCI Console volume attachment identity, off-host encrypted recovery-kit/private Age identity custody, Worker Route Fail Open per invocation, and production DNS ownership. Any storage mismatch, incomplete or failed release validation is a stop, not a reason to repair automatically.
 
+## Interpreting a pre-start rc.12 host inventory
+
+A host installed successfully but not yet operated may legitimately have **no backup directory, no encrypted `.vwrec`, no recovery verification state, inactive services and inactive timers**. These are `NOT RUN` or `PENDING` evidence gaps, not proof the underlying ext4 volume is damaged. An existing *symlinked*, unreadable, or wrong-filesystem backup path remains a blocker.
+
+A systemd backup service with `Result=success` but **no timer `LastTriggerUSec`** has not proved a scheduled backup. Even when a timer trigger exists, matching service journal, validated local encrypted artifact and independent remote readback are needed before claiming real scheduled-backup acceptance.
+
+The P0 script runs a non-disclosing SOPS decryption into `/dev/null` to prove **cryptographic** access. It then separately invokes the installed secret validator in memory to test required credential presence, Cloudflare token formats and the required remediation credential. These results can differ: a decryptable file may still contain incomplete first-run credentials. Share only the script's field-name/boolean status, never the raw decrypted JSON or exception text. Do not edit credentials or enable the appliance until a separate authorized gate.
+
+For the disposable `vaultwarden-oci-6-vnic` VM, D1R and D2 are accepted only within their historical scopes. Full rc.12 runtime/security/offsite/scheduled-backup acceptance still requires isolated endpoint planning, correct private offline Age identity custody, a verified representative remote `.vwrec`, and individual approval for any actual restore, Cloudflare, mail or backup effect. P0 itself must not perform any of those.
+
 ## Acceptance status and path selection
 
 The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes remain historical PASS. Full rc.12 live operation, an uninterrupted fresh rc.12 install, production update/restore, current offsite readback, release-specific coherent rollback, cutover and production monitoring are **NOT RUN**. Do not transfer the historical VM's result to production.
