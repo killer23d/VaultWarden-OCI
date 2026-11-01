@@ -51,6 +51,7 @@ def run_readonly(argv: list[str], timeout: int = 15) -> tuple[int | None, str]:
         env = {key: val for key, val in os.environ.items()
                if not key.startswith("RCLONE_")}
         env["HOME"] = "/root"
+        env["XDG_CONFIG_HOME"] = "/root/.config"
         result = subprocess.run(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, check=False,
