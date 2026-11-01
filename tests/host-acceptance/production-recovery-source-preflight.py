@@ -417,6 +417,153 @@ def main() -> int:
     else:
         record("PENDING", "Encrypted recovery-kit ZIP found at original VM path (metadata only; AES-256 and matching identity not reverified)")
     record("PENDING", "Offline private Age identity plus recovery-kit passphrase must be attested by operator off-host; do not paste them")
+    # Broad release and host readiness: all reads, independent of remote custody.
+    # These checks continue even when the known Box remote/kit are unavailable.
+    import shutil
+    from vaultwarden_oci import cli
+
+    host_ok = platform.machine() in {"aarch64", "arm64"} and sys.version_info[:2] == (3, 14)
+    try:
+        os_values = cli.read_os_release()
+        cli.validate_supported_ubuntu_release(os_values)
+        host_ok = host_ok and os_values.get("VERSION_ID") == "26.04"
+    except (OSError, cli.UnsupportedHost):
+        host_ok = False
+    record("PASS" if host_ok else "BLOCKED",
+           "Native Ubuntu 26.04 ARM64 / Python 3.14 host contract verified" if host_ok
+           else "Unsupported operating system or native Python interpreter")
+
+    clean, count = release_integrity(Path(__file__).resolve().parents[2], installed)
+    record("PASS" if clean else "BLOCKED",
+           f"Exact installed immutable release content matches reviewed checkout ({count} release-owned files)"
+           if clean else "Immutable release source, content, permissions or file inventory diverge; no update/restore authorized")
+
+    units_match, units_n = systemd_unit_integrity(installed)
+    record("PASS" if units_match else "BLOCKED",
+           f"Installed systemd unit files match immutable rc.12 release ({units_n} units)"
+           if units_match else "Installed systemd unit content/ownership differs from approved immutable release")
+
+    try:
+        usage = os.statvfs(STATE)
+        free_gib = usage.f_bavail * usage.f_frsize // (1024 ** 3)
+        free_inodes = usage.f_favail
+        capacity_ok = free_gib >= 4 and free_inodes >= 100
+        record("PASS" if capacity_ok else "PENDING",
+               f"Dedicated-volume capacity available_GiB={free_gib}; free_inodes={free_inodes}")
+    except OSError:
+        record("BLOCKED", "Cannot inspect dedicated data-volume capacity")
+
+    try:
+        cli.validate_config(Path("/etc/vaultwarden-oci/config.toml"))
+        config_ok = True
+    except (cli.ConfigError, OSError):
+        config_ok = False
+    record("PASS" if config_ok else "BLOCKED",
+           "Installed non-secret site/SMTP/backup config schema valid (values withheld)"
+           if config_ok else "Installed non-secret config validation fails (details withheld)")
+    schema = secret_schema_readout()
+    record("PASS" if schema == "valid" else "PENDING",
+           "Encrypted SOPS semantic credential schema valid; values withheld"
+           if schema == "valid" else
+           f"Pre-start credential readiness incomplete: {schema}; revalidate after approved restore/credential setup")
+    record("PENDING",
+           "SMTP endpoint and operational notifier settings parsed; no outbound TLS/SMTP/email delivery exercised")
+
+    def local_file_kind(path: Path) -> str:
+        try:
+            meta = path.lstat()
+        except FileNotFoundError:
+            return "absent"
+        except OSError:
+            return "unreadable"
+        if stat.S_ISLNK(meta.st_mode) or not stat.S_ISREG(meta.st_mode):
+            return "unsafe"
+        return "present" if meta.st_size > 0 else "empty"
+
+    db = local_file_kind(STATE / "data/db.sqlite3")
+    record("BLOCKED" if db in {"unsafe", "unreadable", "empty"} else "PENDING" if db == "present" else "NOT RUN",
+           "Vaultwarden database metadata: " + db +
+           ("; no SQLite integrity/read executed" if db == "present" else ""))
+    backup_class, backup_detail = local_recovery_inventory(STATE)
+    record(backup_class, "Local .vwrec inventory: " + backup_detail)
+
+    doctor_rc, doctor_json = run_readonly(
+        [sys.executable, "-B", "-E", str(installed / "vwctl"), "doctor", "--json"], timeout=85
+    )
+    valid_doctor, doctor_overall, failed_checks = doctor_readout(doctor_json, doctor_rc)
+    record("BLOCKED" if not valid_doctor else "PASS" if doctor_overall == "PASS" else "PENDING",
+           "Product doctor: " +
+           (f"overall={doctor_overall}; failing_check_ids={','.join(failed_checks[:16]) or 'none'}"
+            if valid_doctor else "malformed JSON or inconsistent exit status (messages withheld)"))
+
+    binaries = ("git", "docker", "rclone", "sops", "age", "age-keygen",
+                "7zz", "cscli", "iptables", "ip6tables", "nft", "ss")
+    present = {item for item in binaries if shutil.which(item)}
+    absent = sorted(set(binaries) - present)
+    record("PASS" if not absent else "PENDING",
+           "Host dependency binaries " +
+           ("all present" if not absent else "not yet installed: " + ",".join(absent)) +
+           " (presence only; no package changes)")
+    dpkg_rc, dpkg_out = run_readonly(["dpkg", "--audit"], timeout=30)
+    record("PASS" if dpkg_rc == 0 and not dpkg_out.strip() else "PENDING",
+           "Host dpkg state clean" if dpkg_rc == 0 and not dpkg_out.strip()
+           else "Package audit requires administrator review; no apt action performed")
+
+    docker_rc, docker_version = run_readonly(
+        ["docker", "version", "--format", "{{.Server.Version}}"], timeout=20
+    )
+    compose_rc, compose_version = run_readonly(["docker", "compose", "version", "--short"], timeout=20)
+    engine_ok = docker_rc == 0 and bool(docker_version.strip())
+    compose_ok = compose_rc == 0 and bool(compose_version.strip())
+    record("PASS" if engine_ok and compose_ok else "PENDING",
+           f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
+    if engine_ok:
+        code, rows = run_readonly(
+            ["docker", "ps", "--all",
+             "--filter", "name=^vaultwarden-oci-",
+             "--format", "{{.ID}}"], timeout=20
+        )
+        count_containers = len([line for line in rows.splitlines() if line.strip()])
+        record("PASS" if code == 0 and count_containers == 0 else "PENDING",
+               f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
+               " (names, IDs and logs withheld)")
+    else:
+        record("NOT RUN", "Container inventory unavailable without a running Docker engine")
+
+    security_units = (
+        "crowdsec.service",
+        "crowdsec-firewall-bouncer.service",
+        "crowdsec-cloudflare-worker-bouncer.service",
+    )
+    security_states = {name: service_properties(name) for name in security_units}
+    active_worker = (security_states["crowdsec-cloudflare-worker-bouncer.service"] or {}).get("ActiveState") in {
+        "active", "activating", "reloading"
+    }
+    installed_security = sum((state or {}).get("LoadState") == "loaded"
+                             for state in security_states.values())
+    record("BLOCKED" if active_worker else "PENDING",
+           f"Security unit deployment {installed_security}/3; "
+           f"Cloudflare Worker active={active_worker} (policy and Worker Route not validated)"
+           if not active_worker else
+           "Unexpected active Cloudflare Worker on dormant test VM; do not change it automatically")
+    record("PENDING", "Cloudflare origin CIDR/iptables rules and CrowdSec source ownership require separately authorized live security gate")
+
+    listeners = listening_ports()
+    record("PASS" if listeners == set() else "PENDING",
+           "No TCP/80 or TCP/443 listener on dormant host" if listeners == set()
+           else "Listener state unavailable" if listeners is None
+           else "Host TCP port(s) occupied: " + ",".join(str(i) for i in sorted(listeners)) +
+                " (listener ownership not determined)")
+    clock_rc, clock_val = run_readonly(["timedatectl", "show", "--property=NTPSynchronized", "--value"], timeout=12)
+    synced = clock_rc == 0 and clock_val.strip() == "yes"
+    record("PASS" if synced else "PENDING",
+           "Host NTP synchronized" if synced else "NTP synchronization not yet confirmed")
+    record("PENDING" if Path("/var/run/reboot-required").exists() else "PASS",
+           "OS reboot pending (no reboot attempted)" if Path("/var/run/reboot-required").exists()
+           else "No Ubuntu reboot-required marker")
+    record("NOT RUN", "Live client login, Admin UI, SSH ingress, Caddy TLS, SMTP, notification delivery, edge packets and current Worker Fail Open")
+    record("NOT RUN", "Actual scheduled backup, independent offsite readback, real restore, update rollback and reboot remain separate approved gates")
+
     record("NOT RUN", "No Box metadata API/readback, ciphertext download, Age private-key extraction, archive verification or restore")
     record("NOT RUN", "No services, CrowdSec Worker, DNS, SMTP, timers, snapshot, package changes or reboot")
     return finish()
