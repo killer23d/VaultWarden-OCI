@@ -106,6 +106,192 @@ def backup_policy_safe(remote: object, local: object, offsite: object) -> bool:
     return remote in ("", None) and type(local) is int and local == 0 and type(offsite) is int and offsite == 0
 
 
+
+def release_fingerprints(root: Path, *, strict_modes: bool = False) -> dict[str, str]:
+    """Hash product-owned release files only. Reject extra symlinks/bytecode."""
+    files = ("vwctl", "versions.toml", "email-providers.toml")
+    dirs = ("vaultwarden_oci", "systemd")
+    found: dict[str, str] = {}
+
+    def visit(path: Path) -> None:
+        if path.is_symlink():
+            raise ValueError("symlink in release")
+        info = path.lstat()
+        if strict_modes and (info.st_uid != 0 or stat.S_IMODE(info.st_mode)
+                             not in ({0o555} if stat.S_ISDIR(info.st_mode) else {0o444, 0o555})):
+            raise ValueError("immutable file ownership/mode drift")
+        if stat.S_ISDIR(info.st_mode):
+            if path.name == "__pycache__":
+                raise ValueError("bytecode directory in immutable source")
+            for item in path.iterdir():
+                visit(item)
+        elif stat.S_ISREG(info.st_mode):
+            if path.suffix == ".pyc" or info.st_size > 16 * 1024 * 1024:
+                raise ValueError("unexpected release file")
+            hash_value = hashlib.sha256()
+            with path.open("rb") as handle:
+                for part in iter(lambda: handle.read(1024 * 1024), b""):
+                    hash_value.update(part)
+            found[path.relative_to(root).as_posix()] = hash_value.hexdigest()
+        else:
+            raise ValueError("nonregular release object")
+
+    for file in files:
+        if not (root / file).is_file():
+            raise ValueError("required release file missing")
+        visit(root / file)
+    for directory in dirs:
+        if not (root / directory).is_dir():
+            raise ValueError("required release directory missing")
+        visit(root / directory)
+    return found
+
+
+def release_integrity(source: Path, installed: Path) -> tuple[bool, int]:
+    """No source identifier or live secret content is emitted."""
+    try:
+        expected = release_fingerprints(source)
+        actual = release_fingerprints(installed, strict_modes=True)
+    except (OSError, ValueError):
+        return False, 0
+    return expected == actual and len(expected) > 40, len(expected)
+
+
+def systemd_unit_integrity(installed: Path) -> tuple[bool, int]:
+    try:
+        from vaultwarden_oci import install
+        units = install.SYSTEMD_UNITS
+        for unit in units:
+            source = installed / "systemd" / unit
+            destination = Path("/etc/systemd/system") / unit
+            info = destination.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o644:
+                return False, len(units)
+            if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(destination.read_bytes()).digest():
+                return False, len(units)
+        return True, len(units)
+    except (OSError, ValueError):
+        return False, 0
+
+
+def doctor_readout(stdout: str, rc: int | None) -> tuple[bool, str, list[str]]:
+    """Allowlisted check IDs only; never expose any doctor check messages."""
+    import json
+    try:
+        payload = json.loads(stdout)
+        if payload.get("schema_version") != 1:
+            raise ValueError("invalid doctor schema")
+        checks = payload["checks"]
+        if not isinstance(checks, list) or not checks:
+            raise ValueError("empty checks")
+        fails = []
+        for check in checks:
+            check_id = check["id"]
+            state = check["status"]
+            if not isinstance(check_id, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,80}", check_id):
+                raise ValueError("unsafe check id")
+            if state not in {"PASS", "WARN", "FAIL", "SKIP"}:
+                raise ValueError("unexpected check status")
+            if state == "FAIL":
+                fails.append(check_id)
+        overall = payload["overall"]
+        if overall != ("FAIL" if fails else "WARN" if any(c["status"] == "WARN" for c in checks)
+                       else "SKIP" if all(c["status"] == "SKIP" for c in checks) else "PASS"):
+            raise ValueError("doctor overall mismatch")
+        if rc not in (0, 1) or (rc == 0) == (overall == "FAIL"):
+            raise ValueError("doctor returncode mismatch")
+        return True, overall, fails
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+        return False, "INVALID", []
+
+
+def secret_schema_readout() -> str:
+    """Call the installed secret authority, return only known names/status."""
+    try:
+        from vaultwarden_oci import secrets
+        payload = secrets.decrypt()
+        remediation = bool(payload.get("cloudflare_remediation_token"))
+        del payload
+        return "valid" if remediation else "missing cloudflare_remediation_token"
+    except Exception as exc:
+        reason = str(exc)
+        matched = re.fullmatch(
+            r"decrypted secret (cloudflare_api_token|smtp_username|smtp_password|cloudflare_remediation_token|email_api_token|admin_basic_auth_password|vaultwarden_admin_token) must be a non-empty single-line string",
+            reason,
+        )
+        if matched:
+            return "missing or invalid " + matched.group(1)
+        if reason.startswith("decrypted Cloudflare token does not match"):
+            return "invalid Cloudflare token format (value withheld)"
+        return "unverified (private details withheld)"
+
+
+def listening_ports(proc_files: tuple[Path, ...] | None = None) -> set[int] | None:
+    """Inspect /proc TCP LISTEN only; no listener addresses or socket owners."""
+    files = proc_files or (Path("/proc/net/tcp"), Path("/proc/net/tcp6"))
+    try:
+        ports: set[int] = set()
+        for file in files:
+            with file.open(encoding="ascii") as handle:
+                next(handle)
+                for row in handle:
+                    fields = row.split()
+                    if len(fields) < 4 or fields[3] != "0A":
+                        continue
+                    port = int(fields[1].rsplit(":", 1)[1], 16)
+                    if port in {80, 443}:
+                        ports.add(port)
+        return ports
+    except (OSError, StopIteration, IndexError, ValueError):
+        return None
+
+
+def local_recovery_inventory(root: Path) -> tuple[str, str]:
+    """Return only file counts; encrypted artifact content remains unopened."""
+    backup = root / "backups"
+    try:
+        info = backup.lstat()
+    except FileNotFoundError:
+        return "NOT RUN", "no local recovery points created"
+    except OSError:
+        return "BLOCKED", "cannot inspect backup directory"
+    if not stat.S_ISDIR(info.st_mode):
+        return "BLOCKED", "non-directory or symlink in backup path"
+    try:
+        if info.st_dev != root.stat().st_dev:
+            return "BLOCKED", "backup path is outside the dedicated volume"
+        count = 0
+        for path in backup.iterdir():
+            if path.name.endswith(".vwrec"):
+                item = path.lstat()
+                if not stat.S_ISREG(item.st_mode) or item.st_size == 0:
+                    return "BLOCKED", "invalid local recovery artifact metadata"
+                count += 1
+    except OSError:
+        return "BLOCKED", "unreadable local backup directory"
+    if not count:
+        return "NOT RUN", "backup directory exists but no recovery points"
+    return "PENDING", f"{count} encrypted .vwrec object(s) present; integrity NOT reverified"
+
+
+def daemon_running(props: dict[str, str] | None) -> bool:
+    """A CLI probe is permitted only if its daemon is already active."""
+    return bool(props and props.get("LoadState") == "loaded" and props.get("ActiveState") == "active")
+
+
+def service_properties(unit: str) -> dict[str, str] | None:
+    code, raw = run_readonly(
+        ["systemctl", "show", unit, "--no-pager",
+         "--property=LoadState,ActiveState,UnitFileState"],
+        timeout=12,
+    )
+    if code != 0:
+        return None
+    values = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    return {key: values.get(key, "unknown") for key in ("LoadState", "ActiveState", "UnitFileState")}
+
+
+
 def evidence_dir() -> Path:
     operator = os.environ.get("SUDO_USER")
     if operator != "ubuntu":
@@ -236,6 +422,163 @@ def main() -> int:
     else:
         record("PENDING", "Encrypted recovery-kit ZIP found at original VM path (metadata only; AES-256 and matching identity not reverified)")
     record("PENDING", "Offline private Age identity plus recovery-kit passphrase must be attested by operator off-host; do not paste them")
+    # Broad release and host readiness: all reads, independent of remote custody.
+    # These checks continue even when the known Box remote/kit are unavailable.
+    import shutil
+    from vaultwarden_oci import cli
+
+    host_ok = platform.machine() in {"aarch64", "arm64"} and sys.version_info[:2] == (3, 14)
+    try:
+        os_values = cli.read_os_release()
+        cli.validate_supported_ubuntu_release(os_values)
+        host_ok = host_ok and os_values.get("VERSION_ID") == "26.04"
+    except (OSError, cli.UnsupportedHost):
+        host_ok = False
+    record("PASS" if host_ok else "BLOCKED",
+           "Native Ubuntu 26.04 ARM64 / Python 3.14 host contract verified" if host_ok
+           else "Unsupported operating system or native Python interpreter")
+
+    clean, count = release_integrity(Path(__file__).resolve().parents[2], installed)
+    record("PASS" if clean else "BLOCKED",
+           f"Exact installed immutable release content matches reviewed checkout ({count} release-owned files)"
+           if clean else "Immutable release source, content, permissions or file inventory diverge; no update/restore authorized")
+
+    units_match, units_n = systemd_unit_integrity(installed)
+    record("PASS" if units_match else "BLOCKED",
+           f"Installed systemd unit files match immutable rc.12 release ({units_n} units)"
+           if units_match else "Installed systemd unit content/ownership differs from approved immutable release")
+
+    try:
+        usage = os.statvfs(STATE)
+        free_gib = usage.f_bavail * usage.f_frsize // (1024 ** 3)
+        free_inodes = usage.f_favail
+        capacity_ok = free_gib >= 4 and free_inodes >= 100
+        record("PASS" if capacity_ok else "PENDING",
+               f"Dedicated-volume capacity available_GiB={free_gib}; free_inodes={free_inodes}")
+    except OSError:
+        record("BLOCKED", "Cannot inspect dedicated data-volume capacity")
+
+    try:
+        cli.validate_config(Path("/etc/vaultwarden-oci/config.toml"))
+        config_ok = True
+    except (cli.ConfigError, OSError):
+        config_ok = False
+    record("PASS" if config_ok else "BLOCKED",
+           "Installed non-secret site/SMTP/backup config schema valid (values withheld)"
+           if config_ok else "Installed non-secret config validation fails (details withheld)")
+    schema = secret_schema_readout()
+    record("PASS" if schema == "valid" else "PENDING",
+           "Encrypted SOPS semantic credential schema valid; values withheld"
+           if schema == "valid" else
+           f"Pre-start credential readiness incomplete: {schema}; revalidate after approved restore/credential setup")
+    record("PENDING",
+           "SMTP endpoint and operational notifier settings parsed; no outbound TLS/SMTP/email delivery exercised")
+
+    def local_file_kind(path: Path) -> str:
+        try:
+            meta = path.lstat()
+        except FileNotFoundError:
+            return "absent"
+        except OSError:
+            return "unreadable"
+        if stat.S_ISLNK(meta.st_mode) or not stat.S_ISREG(meta.st_mode):
+            return "unsafe"
+        return "present" if meta.st_size > 0 else "empty"
+
+    db = local_file_kind(STATE / "data/db.sqlite3")
+    record("BLOCKED" if db in {"unsafe", "unreadable", "empty"} else "PENDING" if db == "present" else "NOT RUN",
+           "Vaultwarden database metadata: " + db +
+           ("; no SQLite integrity/read executed" if db == "present" else ""))
+    backup_class, backup_detail = local_recovery_inventory(STATE)
+    record(backup_class, "Local .vwrec inventory: " + backup_detail)
+
+    # A docker CLI inspection may trigger an inactive socket-activated daemon.
+    # Skip Docker-backed doctor entirely unless Docker is ALREADY active.
+    docker_unit = service_properties("docker.service")
+    docker_active = daemon_running(docker_unit)
+    if docker_active:
+        doctor_rc, doctor_json = run_readonly(
+            [sys.executable, "-B", "-E", str(installed / "vwctl"), "doctor", "--json"], timeout=85
+        )
+        valid_doctor, doctor_overall, failed_checks = doctor_readout(doctor_json, doctor_rc)
+        record("BLOCKED" if not valid_doctor else "PASS" if doctor_overall == "PASS" else "PENDING",
+               "Product doctor: " +
+               (f"overall={doctor_overall}; failing_check_ids={','.join(failed_checks[:16]) or 'none'}"
+                if valid_doctor else "malformed JSON or inconsistent exit status (messages withheld)"))
+    else:
+        record("NOT RUN", "Docker-backed doctor skipped: Docker daemon was not already active")
+
+    binaries = ("git", "docker", "rclone", "sops", "age", "age-keygen",
+                "7zz", "cscli", "iptables", "ip6tables", "nft", "ss")
+    present = {item for item in binaries if shutil.which(item)}
+    absent = sorted(set(binaries) - present)
+    record("PASS" if not absent else "PENDING",
+           "Host dependency binaries " +
+           ("all present" if not absent else "not yet installed: " + ",".join(absent)) +
+           " (presence only; no package changes)")
+    dpkg_rc, dpkg_out = run_readonly(["dpkg", "--audit"], timeout=30)
+    record("PASS" if dpkg_rc == 0 and not dpkg_out.strip() else "PENDING",
+           "Host dpkg state clean" if dpkg_rc == 0 and not dpkg_out.strip()
+           else "Package audit requires administrator review; no apt action performed")
+
+    if docker_active:
+        docker_rc, docker_version = run_readonly(
+            ["docker", "version", "--format", "{{.Server.Version}}"], timeout=20
+        )
+        compose_rc, compose_version = run_readonly(["docker", "compose", "version", "--short"], timeout=20)
+        engine_ok = docker_rc == 0 and bool(docker_version.strip())
+        compose_ok = compose_rc == 0 and bool(compose_version.strip())
+        record("PASS" if engine_ok and compose_ok else "PENDING",
+               f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
+        if engine_ok:
+            code, rows = run_readonly(
+                ["docker", "ps", "--all",
+                 "--filter", "name=^vaultwarden-oci-",
+                 "--format", "{{.ID}}"], timeout=20
+            )
+            count_containers = len([line for line in rows.splitlines() if line.strip()])
+            record("PASS" if code == 0 and count_containers == 0 else "PENDING",
+                   f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
+                   " (names, IDs and logs withheld)")
+        else:
+            record("NOT RUN", "Container inventory unavailable without a healthy Docker engine")
+    else:
+        record("NOT RUN", "Docker CLI/Compose/container inventory skipped to avoid socket service activation")
+
+    security_units = (
+        "crowdsec.service",
+        "crowdsec-firewall-bouncer.service",
+        "crowdsec-cloudflare-worker-bouncer.service",
+    )
+    security_states = {name: service_properties(name) for name in security_units}
+    active_worker = (security_states["crowdsec-cloudflare-worker-bouncer.service"] or {}).get("ActiveState") in {
+        "active", "activating", "reloading"
+    }
+    installed_security = sum((state or {}).get("LoadState") == "loaded"
+                             for state in security_states.values())
+    record("BLOCKED" if active_worker else "PENDING",
+           f"Security unit deployment {installed_security}/3; "
+           f"Cloudflare Worker active={active_worker} (policy and Worker Route not validated)"
+           if not active_worker else
+           "Unexpected active Cloudflare Worker on dormant test VM; do not change it automatically")
+    record("PENDING", "Cloudflare origin CIDR/iptables rules and CrowdSec source ownership require separately authorized live security gate")
+
+    listeners = listening_ports()
+    record("PASS" if listeners == set() else "PENDING",
+           "No TCP/80 or TCP/443 listener on dormant host" if listeners == set()
+           else "Listener state unavailable" if listeners is None
+           else "Host TCP port(s) occupied: " + ",".join(str(i) for i in sorted(listeners)) +
+                " (listener ownership not determined)")
+    clock_rc, clock_val = run_readonly(["timedatectl", "show", "--property=NTPSynchronized", "--value"], timeout=12)
+    synced = clock_rc == 0 and clock_val.strip() == "yes"
+    record("PASS" if synced else "PENDING",
+           "Host NTP synchronized" if synced else "NTP synchronization not yet confirmed")
+    record("PENDING" if Path("/var/run/reboot-required").exists() else "PASS",
+           "OS reboot pending (no reboot attempted)" if Path("/var/run/reboot-required").exists()
+           else "No Ubuntu reboot-required marker")
+    record("NOT RUN", "Live client login, Admin UI, SSH ingress, Caddy TLS, SMTP, notification delivery, edge packets and current Worker Fail Open")
+    record("NOT RUN", "Actual scheduled backup, independent offsite readback, real restore, update rollback and reboot remain separate approved gates")
+
     record("NOT RUN", "No Box metadata API/readback, ciphertext download, Age private-key extraction, archive verification or restore")
     record("NOT RUN", "No services, CrowdSec Worker, DNS, SMTP, timers, snapshot, package changes or reboot")
     return finish()
