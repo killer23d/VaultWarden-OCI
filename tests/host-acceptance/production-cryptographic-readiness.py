@@ -229,30 +229,45 @@ def main() -> int:
         print("BLOCKED: private P2 evidence directory cannot be created", file=sys.stderr)
         return 2
     gate = Gate(evidence)
+    # Fixed, non-secret stage labels only. No arbitrary exception messages.
+    stage = "host identity"
     try:
         if platform.node().split(".")[0] != HOST or platform.machine() not in {"aarch64", "arm64"}:
             gate.record("BLOCKED", "Unexpected host/architecture")
             return gate.finish()
         gate.record("PASS", "Approved disposable Ubuntu ARM64 acceptance host")
 
+        stage = "immutable release selection"
         if not CURRENT.is_symlink() or CURRENT.resolve(strict=True) != INSTALLED:
             gate.record("BLOCKED", "Unexpected installed release selection; no recovery attempted")
             return gate.finish()
+        stage = "P1 source helper import"
         p1 = p1_model()
-        if not p1.release_integrity(SOURCE, INSTALLED)[0] or not p1.systemd_unit_integrity(INSTALLED)[0]:
-            gate.record("BLOCKED", "Immutable release or installed systemd definitions diverge")
+        stage = "installed release integrity"
+        if not p1.release_integrity(SOURCE, INSTALLED)[0]:
+            gate.record("BLOCKED", "Immutable rc.12 release differs from reviewed source")
             return gate.finish()
-        gate.record("PASS", "Exact rc.12 release and systemd integrity match source")
+        gate.record("PASS", "Exact immutable rc.12 release content and ownership match reviewed source")
 
-        # Import product owner only from immutable installed release.
+        # The P1 unit validator imports vaultwarden_oci.install. When Python is
+        # invoked with -E, the checkout is not automatically importable.
+        # Register the previously verified immutable installed release first.
+        stage = "installed systemd unit integrity"
         sys.path.insert(0, str(INSTALLED))
+        if not p1.systemd_unit_integrity(INSTALLED)[0]:
+            gate.record("BLOCKED", "Installed systemd units differ from the immutable rc.12 release")
+            return gate.finish()
+        gate.record("PASS", "Installed systemd units match the immutable rc.12 release")
+        stage = "installed recovery owner import"
         from vaultwarden_oci import recovery, recovery_ux, runtime, secrets, storage
+        stage = "original storage identity"
         info = storage.verify()
         if info.uuid != p1.EXPECTED_VOLUME_UUID or p1.EXPECTED_BYID.resolve(strict=True) != Path(info.source).resolve(strict=True):
             gate.record("BLOCKED", "Original independent data volume or dual markers mismatched")
             return gate.finish()
         gate.record("PASS", "Original mounted volume, UUID, by-id and dual markers verified")
 
+        stage = "inactive service and timer isolation"
         statuses = {unit: p1.service_properties(unit) for unit in p1.UNITS}
         if any(state is None for state in statuses.values()) or not p1.stopped_units(statuses):
             gate.record("BLOCKED", "Application/DNS/timer isolation changed; preserve host")
@@ -270,6 +285,7 @@ def main() -> int:
                 return gate.finish()
         gate.record("PASS", "No active application/timers/DNS or unexpected running appliance containers")
 
+        stage = "source recipient and SOPS custody"
         config = runtime.load_config()
         if not p1.matches_offline_recipient(config.offline_recovery_recipient):
             gate.record("BLOCKED", "Offline public recipient differs from historical accepted recovery custody")
@@ -279,12 +295,14 @@ def main() -> int:
             gate.record("BLOCKED", "Pre-restore publication/retention unexpectedly enabled")
             return gate.finish()
         gate.record("PASS", "Source offline public recipient, SOPS custody, and no-publish/no-prune policy match")
+        stage = "root rclone configuration"
         rc, remotes = p1.run_readonly(["rclone", "listremotes"], timeout=15)
         if not p1.remote_available(remotes, rc):
             gate.record("PENDING", "Root's Box remote unavailable; configure without sharing credentials")
             return gate.finish()
         gate.record("PASS", "Root's Box remote configured; existing remote object will only be read")
 
+        stage = "protected tmpfs environment"
         if not verified_tmpfs():
             gate.record("BLOCKED", "No safe swap-free /run tmpfs confirmed; refuse to stage vault plaintext")
             return gate.finish()
@@ -298,6 +316,7 @@ def main() -> int:
             raise KeyboardInterrupt()
         signal.signal(signal.SIGTERM, on_terminate)
 
+        stage = "protected temporary memory staging"
         with tempfile.TemporaryDirectory(prefix="vwoci-p2-", dir="/run") as transient:
             private = Path(transient)
             os.chmod(private, 0o700)
@@ -378,7 +397,7 @@ def main() -> int:
         gate.record("PENDING", "Operator interrupted; no persistent recovery staging authorized")
         return gate.finish()
     except Exception:
-        gate.record("BLOCKED", "Host/recovery preflight raised an exception; details withheld")
+        gate.record("BLOCKED", f"Host/recovery preflight failed at {stage}; exception details withheld")
         return gate.finish()
 
 
