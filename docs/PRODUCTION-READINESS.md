@@ -2,7 +2,15 @@
 
 Run this on the **explicitly selected installed appliance host**, not on an assumed historical acceptance VM. The host may be the current production appliance or a proposed replacement; make that distinction in the operator response. This file is an acceptance instrument, not a production service.
 
-## One-shot invocation
+## New VM / replacement host: P0 preflight (no installed appliance)
+
+A clean recovery VM has no `/opt/vaultwarden-oci/current`, so the **installed-host** P0 tool below must not be used as its first gate. Use the separate `tests/host-acceptance/production-new-host-preflight.py` instead. It supports the fresh Ubuntu 26.04 ARM64 path, uses the release-owned storage ancestry logic to list non-boot data-volume candidates, and refuses to approve a device without independent OCI Console confirmation. Run it with `sudo -n python3 -B -E` only after checking out **the exact reviewed PR head SHA**, not an unfrozen branch tip.
+
+P0 does not download a remote backup or create an installer state. The subsequent approved route is the documented [lost-server recovery](RECOVERY.md#lost-server-disaster-recovery): install exact `0.1.0-rc.12` with the **existing original offline public Age recipient**, verify the selected encrypted `.vwrec` from its full rclone object path or a securely transferred local copy, restore through supported `vwctl restore` with an explicit final `RESTORE` confirmation, then inspect the recovered config/backup retention and secure the isolated runtime before considering DNS. Root rclone config and credentials are NOT in the recovery archive. Do not create a replacement offline identity for material already encrypted to the original recipient.
+
+This fresh VM is a **disposable test/replacement candidate**, not automatically the currently serving production appliance. A successful new-host exercise cannot substitute for production-host inventory, approved cutover, and coherent rollback. Keep the existing production DNS and remote recovery objects unchanged.
+
+## Installed appliance: one-shot invocation
 
 On the selected Ubuntu host as `ubuntu` or another operator with passwordless `sudo -n`, copy and run this entire block:
 
