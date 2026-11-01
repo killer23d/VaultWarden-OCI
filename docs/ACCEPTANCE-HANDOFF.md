@@ -54,6 +54,12 @@ This is the **current, sanitized operator handoff** for the Ubuntu 26.04 ARM64 O
 9. **No fake success**: do not hardcode PASS, reset/redact exceptions as success, weaken verification checks or automatically retry an unsafe destructive step. No private log exports.
 10. **Review integration**: record source SHA, exact PR diff and CI outcomes; ensure merged release-branch HEAD contains actual runtime changes. Historical test VM state is **not** altered by merging code.
 
+## 4A. Follow-up accepted rc.12 inventory and next cryptographic gate (2026-11-01 UTC)
+
+On `vaultwarden-oci-6-vnic`, the operator used merged release commit `2787243c93df024745260fa4e31a208796478edc`, which includes the corrected source-harness and bounded Box ciphertext readback from PR #380. **30 focused Python tests PASS; live P1 completed with final exit 0 (pre-restore classification PENDING)**. Direct Box `.vwrec` ciphertext readback (358680 bytes) matched historical A3/A4 SHA-256 `ee2b43a859ca85fb64ce20af67a3c862a2c2946ebf11df1e9fb95f880e235060`. Root Box remote exists and works for this read; source ciphertext access is no longer conjectural. Original dedicated disk, 52 release-owned files, 12 installed units, offsite 0/0 safety, dormant services/timers, Docker and NTP are verified. Existing `cloudflare_api_token` remains invalid/missing and CrowdSec/7zz is not deployed. **No real restore, original offline private Age identity verification, recovered SQLite, live security, production cutover or backup timer was run.**
+
+Next **P2**: non-promoting encrypted archive proof using the product's secure chooser for an original off-host private Age identity/ZIP; never paste it in a transcript. Pin accepted source, prove unchanged host/disks/services, read and hash exact original ciphertext to swap-free root-private `/run` tmpfs, decrypt/validate manifest and recovered SOPS/SQLite, inspect restore target capacity/recovered retention policy without mutation, then clean temporary plaintext. The original ZIP is **not currently present** at the historical VM pathname and `7zz` may be missing: never silently install dependencies or substitute the operational Age key. P2 is an acceptance instrument, not a product update; production cutover GO remains separate and NOT RUN.
+
 ## 5. Unproven boundaries and next gate
 
 **Completed:** original frozen rc.11 A/B/C operational/recovery/reboot gates, corrected rc.12 installer cross-filesystem and encrypted-kit-path feature gates, and merging all reviewed source, tests and evidence.
