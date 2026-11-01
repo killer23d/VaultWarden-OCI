@@ -16,6 +16,7 @@ import os
 import platform
 import pwd
 import select
+import shutil
 import signal
 import sqlite3
 import stat
@@ -317,6 +318,8 @@ def main() -> int:
                 gate.record("BLOCKED", "Unexpected archive size")
                 return gate.finish()
 
+            if shutil.which("7zz") is None:
+                gate.record("PENDING", "7zz not installed: encrypted ZIP chooser unavailable; secure paste/file selection remains supported")
             print("\nOFFLINE IDENTITY: choose 1 for hidden AGE-SECRET-KEY paste, 2 for a protected identity file,")
             print("or 4 for an encrypted ZIP at an absolute path (if available on this VM).")
             print("To skip decryption safely choose q. Never paste private material back into chat.")
