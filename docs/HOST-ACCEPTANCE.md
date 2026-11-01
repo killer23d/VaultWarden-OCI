@@ -2,7 +2,7 @@
 
 Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`.
 
-The established destructive/full-system release gate remains disposable Ubuntu 24.04 real-host acceptance on both architectures when those environments are available. Ubuntu 26.04 compatibility is validated by source review, automated tests, native Python 3.14 execution, explicit Ubuntu 26.04 x64/Arm64 GitHub Actions jobs, package/repository checks, systemd verification, and non-destructive OS-sensitive probes. **Real Ubuntu 26.04 OCI host acceptance: NOT RUN by owner decision.** Do not reinterpret that missing live evidence as `PASS`.
+The established disposable Ubuntu 24.04 release baseline remains applicable where available. Ubuntu 26.04 is covered by source review, automated checks, native Python 3.14, explicit x64/Arm64 CI, package/repository and systemd checks, **and actual OCI ARM64 acceptance performed on October 30–31, 2026**. The frozen rc.11 A0–C1/B2 and corrected rc.12 D1R/D2 gates are recorded in the [sanitized agent handoff](ACCEPTANCE-HANDOFF.md) and [chronological runbook](PRODUCTION-ACCEPTANCE-UBUNTU2604.md). **Ubuntu 26.04 AMD64 real-host acceptance, uninterrupted initial rc.12 first-pass install, full live rc.12 application/security/batch operation, and production cutover remain NOT RUN.** Do not extend one gate's PASS to another.
 
 Record unavailable architecture/provider/destructive coverage as **NOT RUN**; CI mocks or container integrations do not turn missing real-host evidence into `PASS`.
 

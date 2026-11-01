@@ -93,6 +93,8 @@ If setup already formatted/mounted a dedicated volume and exited partway through
 
 **Verify:** `sops --version` succeeds, the installed `/usr/local/bin/sops` SHA-256 matches the pinned architecture-specific checksum, the dedicated volume remains mounted by identity, and no app or DNS/timer activation occurs before the recovery gate.
 
+**Observed interrupted-install diagnostic (disposable ARM64 gate):** Python/subprocess buffering can leave a private installer log at zero bytes while dependency operations are active; do not equate an empty log with a completed or failed setup. A Linux process state `T` means *stopped*, not merely slow. In the recorded rc.12 continuation, an independently identified stopped `apt-get` child resumed with a guarded `SIGCONT` and the original installer completed without a second format. The cause of the stop signal was not established. Before any process intervention, inspect the exact parent chain, state, package audit, original storage markers and private logs; do **not** signal an arbitrary PID, repeat a formatting command, or promote interrupted progress to PASS. See [the acceptance handoff](ACCEPTANCE-HANDOFF.md).
+
 ## Setup stops during recovery custody
 
 **Symptom:** setup generated an offline Age identity but recovery-kit handoff or email delivery did not complete.

@@ -14,11 +14,11 @@ For each task, use this order of authority:
 4. this file as the repository map;
 5. historical material only as evidence/rationale unless the human explicitly promotes it for the task.
 
-`reports/TEST-STRATEGY.md` is the current supporting validation policy. Obsolete workstream prompt archives are not product authorities and do not belong in the normal repository surface.
+`reports/TEST-STRATEGY.md` is the current supporting validation policy. [The accepted ARM64 operator handoff](docs/ACCEPTANCE-HANDOFF.md) and [chronological host evidence](docs/PRODUCTION-ACCEPTANCE-UBUNTU2604.md) record **historical results, not a second product authority**. Obsolete workstream prompt archives do not belong in the normal repository surface.
 
 ## Product invariants
 
-- Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. Ubuntu 24.04 retains the disposable real-host baseline; Ubuntu 26.04 is code/CI compatibility validated unless separate real-host evidence is explicitly recorded.
+- Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`. Ubuntu 24.04 retains its earlier real-host baseline. Ubuntu 26.04 ARM64 now has **documented disposable OCI host acceptance**: frozen rc.11 A0–C1/B2 and corrected rc.12 D1R/D2. This does not imply 26.04 AMD64 real-host acceptance or an authorized production deployment. Read [the current operator handoff](docs/ACCEPTANCE-HANDOFF.md) before planning more gates.
 - Production persistent application state must live on a dedicated storage filesystem/volume. A root-only host is not a supported production install.
 - The normal first-run human path is `setup.sh`: validate host/storage, install dependencies and the appliance, prepopulate config from operator inputs, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
 - `setup.sh` supports interactive mode, `--auto`, and an independent explicit `--use-latest` override. Terminal-driven `--auto` may generate the separate offline Age identity only when no `--offline-recipient` was supplied, keep that private identity only in root-owned volatile storage, and require verified recovery-kit handoff before deleting it. Fully headless `--auto` requires an existing public `--offline-recipient`. An explicitly supplied recipient is authoritative and must never be silently replaced. Frontend custody decisions must use the same authoritative CLI grammar/parser as the installer rather than ad-hoc raw-token inspection.
@@ -62,7 +62,7 @@ Do not recreate earlier Make orchestration, Postfix/local MTA, backup tiers, bro
 
 ## Testing and working rules
 
-Use three permanent validation layers: focused unit tests, small integration tests, and disposable real-host Ubuntu 24.04 release acceptance. Add explicit Ubuntu 26.04 native-Python/OS-sensitive CI coverage for the newer LTS. Real Ubuntu 26.04 OCI host acceptance remains `NOT RUN` unless it is actually performed. Test security, availability, recoverability, and operator truthfulness rather than private source structure.
+Use three permanent validation layers: focused unit tests, small integration tests, and disposable real-host release acceptance. Continue native-Python/OS-sensitive CI for both supported Ubuntu LTS targets. **Ubuntu 26.04 ARM64 was accepted on actual OCI disposable hosts on 2026-10-30/31**, but only the specific rc.11 operational/recovery and rc.12 corrected-installer/recovery-UX gates in [the evidence](docs/ACCEPTANCE-HANDOFF.md) may be called PASS. Ubuntu 26.04 AMD64 real-host and production cutover remain `NOT RUN`. Test security, availability, recoverability, and operator truthfulness rather than private source structure.
 
 Before editing, confirm the current branch/head and inspect the existing owner of the behavior. Keep changes bounded to the assigned task. Preserve secret redaction, fail-closed security boundaries, truthful success/failure reporting, and recoverability.
 

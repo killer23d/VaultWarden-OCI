@@ -18,7 +18,7 @@ Use real temporary files/process boundaries when they are the risk: permissions/
 
 ### Disposable real-host release acceptance
 
-Reserve the established full-system proof for clean Ubuntu 24.04 hosts with real dedicated storage and external test resources. Cover both `amd64` and `arm64` when available: setup/root-only refusal/boot guard, real stack/dashboard, Cloudflare origin and `/admin`, CrowdSec remediation, backup/rclone/restore, recovery-kit SMTP handoff, update/rollback/use-latest, timers, host upgrade/reboot state, and a representative notification path. Ubuntu 26.04 compatibility is exercised in CI on explicit x64 and Arm64 runners with native Python 3.14, repository/package checks, systemd verification, and non-destructive OS-sensitive command coverage; real Ubuntu 26.04 OCI host acceptance is `NOT RUN` for this workstream.
+Keep the established full-system Ubuntu 24.04 disposable-host baseline and test both `amd64` and `arm64` where available: storage/root-disk refusal, real stack/dashboard, origin/CrowdSec, backup/rclone/restore, recovery-kit handoff, update/rollback, timers, host upgrades/reboot and notifications. Ubuntu 26.04 also has explicit native Python 3.14 x64/Arm64 CI and OS-sensitive checks. **Actual Ubuntu 26.04 ARM64 OCI acceptance was completed on October 30–31, 2026**, with frozen rc.11 recovery/operations/reboot and corrected rc.12 SOPS install continuation/real ZIP path verification recorded in [the agent handoff](../docs/ACCEPTANCE-HANDOFF.md). Do not infer a clean uninterrupted rc.12 first pass, complete live rc.12 operation, AMD64 real-host acceptance, or production cutover from that evidence.
 
 Unavailable host/provider/architecture coverage is `NOT RUN`, never inferred from mocks or another architecture.
 

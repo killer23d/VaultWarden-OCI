@@ -2,7 +2,7 @@
 
 VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarden), a self-hosted password manager for a small team, with HTTPS, Cloudflare protection, encrypted recovery, and an administrator dashboard.
 
-**Supported servers:** Ubuntu 24.04 LTS or 26.04 LTS, `amd64` or `arm64`. Ubuntu 24.04 has disposable real-host acceptance; Ubuntu 26.04 has code/CI compatibility checks, not a recorded real-host acceptance run. **Production data requires a separate ext4/xfs disk/filesystem**; the boot disk is not a supported fallback.
+**Supported servers:** Ubuntu 24.04 LTS or 26.04 LTS, `amd64` or `arm64`. Ubuntu 24.04 has an earlier disposable real-host baseline; Ubuntu 26.04 **ARM64** now has recorded real OCI host acceptance for the frozen rc.11 operational/recovery gates and the corrected rc.12 setup/recovery-kit features. This is **not** proof of 26.04 AMD64 real-host acceptance or a production cutover. **Production data requires a separate ext4/xfs disk/filesystem**; the boot disk is not a supported fallback.
 
 ## New here? Follow this path
 
@@ -82,7 +82,7 @@ The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, g
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Diagnose a failed step safely |
 | [Security](docs/SECURITY.md) | Security boundaries and practices to avoid |
 
-Maintainers: [Project boundary](docs/PROJECT-BOUNDARY.md), [Decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), [Host acceptance](docs/HOST-ACCEPTANCE.md), and [Test strategy](reports/TEST-STRATEGY.md).
+Maintainers: [Project boundary](docs/PROJECT-BOUNDARY.md), [Decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), [Host acceptance](docs/HOST-ACCEPTANCE.md), [current ARM64 acceptance handoff](docs/ACCEPTANCE-HANDOFF.md), [chronological gate evidence](docs/PRODUCTION-ACCEPTANCE-UBUNTU2604.md), and [Test strategy](reports/TEST-STRATEGY.md).
 
 ## What is managed?
 
