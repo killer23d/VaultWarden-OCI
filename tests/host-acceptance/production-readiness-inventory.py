@@ -365,11 +365,14 @@ def main() -> int:
         try:
             from vaultwarden_oci import secrets
             values = secrets.decrypt()
+            required_remediation = bool(values.get('cloudflare_remediation_token'))
             del values
         except (secrets.SecretsError, OSError) as exc:
             r.add('BLOCKED', 'Secret schema', safe_secret_failure(exc))
         else:
-            r.add('PASS', 'Secret schema', 'required fields and provider token syntax validated; values withheld')
+            r.add('PASS' if required_remediation else 'BLOCKED', 'Secret schema',
+                  'required fields, remediation credential and token formats validated; values withheld'
+                  if required_remediation else 'required cloudflare_remediation_token missing; values withheld')
     else:
         r.add('NOT RUN', 'Secret schema', 'requires successful SOPS cryptographic check')
 
