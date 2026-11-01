@@ -106,6 +106,187 @@ def backup_policy_safe(remote: object, local: object, offsite: object) -> bool:
     return remote in ("", None) and type(local) is int and local == 0 and type(offsite) is int and offsite == 0
 
 
+
+def release_fingerprints(root: Path, *, strict_modes: bool = False) -> dict[str, str]:
+    """Hash product-owned release files only. Reject extra symlinks/bytecode."""
+    files = ("vwctl", "versions.toml", "email-providers.toml")
+    dirs = ("vaultwarden_oci", "systemd")
+    found: dict[str, str] = {}
+
+    def visit(path: Path) -> None:
+        if path.is_symlink():
+            raise ValueError("symlink in release")
+        info = path.lstat()
+        if strict_modes and (info.st_uid != 0 or stat.S_IMODE(info.st_mode)
+                             not in ({0o555} if stat.S_ISDIR(info.st_mode) else {0o444, 0o555})):
+            raise ValueError("immutable file ownership/mode drift")
+        if stat.S_ISDIR(info.st_mode):
+            if path.name == "__pycache__":
+                raise ValueError("bytecode directory in immutable source")
+            for item in path.iterdir():
+                visit(item)
+        elif stat.S_ISREG(info.st_mode):
+            if path.suffix == ".pyc" or info.st_size > 16 * 1024 * 1024:
+                raise ValueError("unexpected release file")
+            hash_value = hashlib.sha256()
+            with path.open("rb") as handle:
+                for part in iter(lambda: handle.read(1024 * 1024), b""):
+                    hash_value.update(part)
+            found[path.relative_to(root).as_posix()] = hash_value.hexdigest()
+        else:
+            raise ValueError("nonregular release object")
+
+    for file in files:
+        if not (root / file).is_file():
+            raise ValueError("required release file missing")
+        visit(root / file)
+    for directory in dirs:
+        if not (root / directory).is_dir():
+            raise ValueError("required release directory missing")
+        visit(root / directory)
+    return found
+
+
+def release_integrity(source: Path, installed: Path) -> tuple[bool, int]:
+    """No source identifier or live secret content is emitted."""
+    try:
+        expected = release_fingerprints(source)
+        actual = release_fingerprints(installed, strict_modes=True)
+    except (OSError, ValueError):
+        return False, 0
+    return expected == actual and len(expected) > 40, len(expected)
+
+
+def systemd_unit_integrity(installed: Path) -> tuple[bool, int]:
+    try:
+        from vaultwarden_oci import install
+        units = install.SYSTEMD_UNITS
+        for unit in units:
+            source = installed / "systemd" / unit
+            destination = Path("/etc/systemd/system") / unit
+            info = destination.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o644:
+                return False, len(units)
+            if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(destination.read_bytes()).digest():
+                return False, len(units)
+        return True, len(units)
+    except (OSError, ValueError):
+        return False, 0
+
+
+def doctor_readout(stdout: str, rc: int | None) -> tuple[bool, str, list[str]]:
+    """Allowlisted check IDs only; never expose any doctor check messages."""
+    import json
+    try:
+        payload = json.loads(stdout)
+        if payload.get("schema_version") != 1:
+            raise ValueError("invalid doctor schema")
+        checks = payload["checks"]
+        if not isinstance(checks, list) or not checks:
+            raise ValueError("empty checks")
+        fails = []
+        for check in checks:
+            check_id = check["id"]
+            state = check["status"]
+            if not isinstance(check_id, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,80}", check_id):
+                raise ValueError("unsafe check id")
+            if state not in {"PASS", "WARN", "FAIL", "SKIP"}:
+                raise ValueError("unexpected check status")
+            if state == "FAIL":
+                fails.append(check_id)
+        overall = payload["overall"]
+        if overall != ("FAIL" if fails else "WARN" if any(c["status"] == "WARN" for c in checks)
+                       else "SKIP" if all(c["status"] == "SKIP" for c in checks) else "PASS"):
+            raise ValueError("doctor overall mismatch")
+        if rc not in (0, 1) or (rc == 0) == (overall == "FAIL"):
+            raise ValueError("doctor returncode mismatch")
+        return True, overall, fails
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+        return False, "INVALID", []
+
+
+def secret_schema_readout() -> str:
+    """Call the installed secret authority, return only known names/status."""
+    try:
+        from vaultwarden_oci import secrets
+        payload = secrets.decrypt()
+        remediation = bool(payload.get("cloudflare_remediation_token"))
+        del payload
+        return "valid" if remediation else "missing cloudflare_remediation_token"
+    except Exception as exc:
+        reason = str(exc)
+        matched = re.fullmatch(
+            r"decrypted secret (cloudflare_api_token|smtp_username|smtp_password|cloudflare_remediation_token|email_api_token|admin_basic_auth_password|vaultwarden_admin_token) must be a non-empty single-line string",
+            reason,
+        )
+        if matched:
+            return "missing or invalid " + matched.group(1)
+        if reason.startswith("decrypted Cloudflare token does not match"):
+            return "invalid Cloudflare token format (value withheld)"
+        return "unverified (private details withheld)"
+
+
+def listening_ports(proc_files: tuple[Path, ...] | None = None) -> set[int] | None:
+    """Inspect /proc TCP LISTEN only; no listener addresses or socket owners."""
+    files = proc_files or (Path("/proc/net/tcp"), Path("/proc/net/tcp6"))
+    try:
+        ports: set[int] = set()
+        for file in files:
+            with file.open(encoding="ascii") as handle:
+                next(handle)
+                for row in handle:
+                    fields = row.split()
+                    if len(fields) < 4 or fields[3] != "0A":
+                        continue
+                    port = int(fields[1].rsplit(":", 1)[1], 16)
+                    if port in {80, 443}:
+                        ports.add(port)
+        return ports
+    except (OSError, StopIteration, IndexError, ValueError):
+        return None
+
+
+def local_recovery_inventory(root: Path) -> tuple[str, str]:
+    """Return only file counts; encrypted artifact content remains unopened."""
+    backup = root / "backups"
+    try:
+        info = backup.lstat()
+    except FileNotFoundError:
+        return "NOT RUN", "no local recovery points created"
+    except OSError:
+        return "BLOCKED", "cannot inspect backup directory"
+    if not stat.S_ISDIR(info.st_mode):
+        return "BLOCKED", "non-directory or symlink in backup path"
+    try:
+        if info.st_dev != root.stat().st_dev:
+            return "BLOCKED", "backup path is outside the dedicated volume"
+        count = 0
+        for path in backup.iterdir():
+            if path.name.endswith(".vwrec"):
+                item = path.lstat()
+                if not stat.S_ISREG(item.st_mode) or item.st_size == 0:
+                    return "BLOCKED", "invalid local recovery artifact metadata"
+                count += 1
+    except OSError:
+        return "BLOCKED", "unreadable local backup directory"
+    if not count:
+        return "NOT RUN", "backup directory exists but no recovery points"
+    return "PENDING", f"{count} encrypted .vwrec object(s) present; integrity NOT reverified"
+
+
+def service_properties(unit: str) -> dict[str, str] | None:
+    code, raw = run_readonly(
+        ["systemctl", "show", unit, "--no-pager",
+         "--property=LoadState,ActiveState,UnitFileState"],
+        timeout=12,
+    )
+    if code != 0:
+        return None
+    values = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    return {key: values.get(key, "unknown") for key in ("LoadState", "ActiveState", "UnitFileState")}
+
+
+
 def evidence_dir() -> Path:
     operator = os.environ.get("SUDO_USER")
     if operator != "ubuntu":
