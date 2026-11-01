@@ -63,7 +63,7 @@ class P0Tests(unittest.TestCase):
             backups.mkdir()
             self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'NOT RUN')
             (backups / 'recovery.vwrec').write_bytes(b'encrypted-fixture')
-            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'PASS')
+            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'PENDING')
             (backups / 'bad.vwrec').symlink_to(backups / 'recovery.vwrec')
             self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'BLOCKED')
 
