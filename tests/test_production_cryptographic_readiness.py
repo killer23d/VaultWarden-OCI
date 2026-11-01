@@ -45,17 +45,21 @@ class P2NoRestoreTests(unittest.TestCase):
             mod.preview_policy(Config())
 
     def test_gate_classifies_cancel_pending_and_missing_privacy_blocked(self):
+        import contextlib
+        import io
         with tempfile.TemporaryDirectory() as folder:
             gate = mod.Gate(Path(folder))
             gate.record("PASS", "Ciphertext checksum matched")
             gate.record("PENDING", "Offline identity not provided")
-            self.assertEqual(gate.finish(), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(gate.finish(), 0)
             report = (Path(folder) / "summary.txt").read_text()
             self.assertIn("PENDING", report)
             self.assertIn("no live restore was attempted", report)
             unsafe = mod.Gate(Path(folder))
             unsafe.record("BLOCKED", "Unsafe private storage")
-            self.assertEqual(unsafe.finish(), 2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(unsafe.finish(), 2)
 
     def test_bounded_stream_hash_to_temporary_file(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -100,6 +104,34 @@ class P2NoRestoreTests(unittest.TestCase):
             self.assertFalse(mod.filename_guard(alias))
 
 
+    def test_exception_stage_is_safe_and_diagnosable(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            release = root / "release"
+            release.mkdir()
+            current = root / "current"
+            current.symlink_to(release, target_is_directory=True)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(mod.os, "geteuid", return_value=0))
+                stack.enter_context(mock.patch.object(mod.sys, "argv", ["p2.py"]))
+                stack.enter_context(mock.patch.object(mod.platform, "node", return_value=mod.HOST))
+                stack.enter_context(mock.patch.object(mod.platform, "machine", return_value="aarch64"))
+                stack.enter_context(mock.patch.object(mod, "CURRENT", current))
+                stack.enter_context(mock.patch.object(mod, "INSTALLED", release))
+                stack.enter_context(mock.patch.object(mod, "root_private_evidence", return_value=evidence))
+                stack.enter_context(mock.patch.object(mod, "p1_model",
+                    side_effect=ModuleNotFoundError("PRIVATE-TOKEN in imported module")))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertEqual(mod.main(), 2)
+            summary = (evidence / "summary.txt").read_text(encoding="utf-8")
+            self.assertIn("P1 source helper import", summary)
+            self.assertNotIn("PRIVATE-TOKEN", summary)
+            self.assertNotIn("No module named", summary)
+
     def test_complete_mocked_p2_verifies_and_sanitizes_without_promotion(self):
         """Ensure the whole operator path reaches a secure result, not just unit helpers."""
         import contextlib
@@ -127,12 +159,19 @@ class P2NoRestoreTests(unittest.TestCase):
                 offline_recovery_recipient=recipient, offsite_remote=None,
                 local_retention_days=0, remote_retention_days=0,
             )
+            def check_installed_module_path(checked_release):
+                # The original P2 failed when this helper imported the product
+                # before its immutable installed directory was importable.
+                self.assertEqual(checked_release, release)
+                self.assertEqual(mod.sys.path[0], str(release))
+                return True, 12
+
             p1 = SimpleNamespace(
                 EXPECTED_VOLUME_UUID="volume-fixture-uuid",
                 EXPECTED_BYID=alias,
                 UNITS=("service-a", "service-b"),
                 release_integrity=lambda *args: (True, 52),
-                systemd_unit_integrity=lambda *args: (True, 12),
+                systemd_unit_integrity=check_installed_module_path,
                 service_properties=lambda unit: {
                     "LoadState": "loaded", "ActiveState": "inactive",
                     "UnitFileState": "disabled",
