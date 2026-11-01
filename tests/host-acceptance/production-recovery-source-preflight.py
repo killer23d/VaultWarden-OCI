@@ -274,6 +274,11 @@ def local_recovery_inventory(root: Path) -> tuple[str, str]:
     return "PENDING", f"{count} encrypted .vwrec object(s) present; integrity NOT reverified"
 
 
+def daemon_running(props: dict[str, str] | None) -> bool:
+    """A CLI probe is permitted only if its daemon is already active."""
+    return bool(props and props.get("LoadState") == "loaded" and props.get("ActiveState") == "active")
+
+
 def service_properties(unit: str) -> dict[str, str] | None:
     code, raw = run_readonly(
         ["systemctl", "show", unit, "--no-pager",
@@ -490,7 +495,7 @@ def main() -> int:
     # A docker CLI inspection may trigger an inactive socket-activated daemon.
     # Skip Docker-backed doctor entirely unless Docker is ALREADY active.
     docker_unit = service_properties("docker.service")
-    docker_active = (docker_unit or {}).get("ActiveState") == "active"
+    docker_active = daemon_running(docker_unit)
     if docker_active:
         doctor_rc, doctor_json = run_readonly(
             [sys.executable, "-B", "-E", str(installed / "vwctl"), "doctor", "--json"], timeout=85
