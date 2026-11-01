@@ -60,6 +60,12 @@ On `vaultwarden-oci-6-vnic`, the operator used merged release commit `2787243c93
 
 Next **P2**: non-promoting encrypted archive proof using the product's secure chooser for an original off-host private Age identity/ZIP; never paste it in a transcript. Pin accepted source, prove unchanged host/disks/services, read and hash exact original ciphertext to swap-free root-private `/run` tmpfs, decrypt/validate manifest and recovered SOPS/SQLite, inspect restore target capacity/recovered retention policy without mutation, then clean temporary plaintext. The original ZIP is **not currently present** at the historical VM pathname and `7zz` may be missing: never silently install dependencies or substitute the operational Age key. P2 is an acceptance instrument, not a product update; production cutover GO remains separate and NOT RUN.
 
+## 4B. P2 early preflight failure and acceptance-only correction (2026-11-01 UTC)
+
+The operator executed P2 from merged `46825ed694a22bc7016183ae6f07b1c51ae28410` at **2026-11-01T07:15:41Z** on `vaultwarden-oci-6-vnic`. Source confirmed, 37 tests PASS, actual host **PASS identity only then BLOCKED** with a generic caught exception. The real P2 did **not** reach Box download, Age private identity prompt, archive/manifest/SOPS/SQLite validation, or restore. The first two Gate P2 printed messages came from fixture tests; they were not host outcomes.
+
+Source review identified an import ordering bug: P2 calls the P1 systemd-unit verifier (which imports `vaultwarden_oci.install`) before putting the verified installed rc.12 package on Python's `sys.path`. With `python3 -E`, this can cause a hidden `ModuleNotFoundError`. The corrective PR fixes the import order, adds a full-path regression asserting the installed release is first on `sys.path`, captures test fixture summary output, and reports only fixed sanitized failure stage labels. This remains an acceptance-script defect, **not** a product runtime or archive-integrity failure. P2 actual decrypt/restore result remains NOT RUN pending rerun of reviewed corrected code.
+
 ## 5. Unproven boundaries and next gate
 
 **Completed:** original frozen rc.11 A/B/C operational/recovery/reboot gates, corrected rc.12 installer cross-filesystem and encrypted-kit-path feature gates, and merging all reviewed source, tests and evidence.
