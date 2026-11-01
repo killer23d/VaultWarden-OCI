@@ -202,7 +202,7 @@ def local_backup_inventory(path: Path, state_root: Path) -> tuple[str, str]:
     if not timestamps:
         return 'NOT RUN', 'backup directory present but no encrypted .vwrec created'
     newest = dt.datetime.fromtimestamp(max(timestamps), tz=dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return 'PASS', f'count={len(timestamps)} newest_mtime_UTC={newest} (metadata only; not reverified)'
+    return 'PENDING', f'count={len(timestamps)} newest_mtime_UTC={newest} (metadata only; not reverified)'
 
 
 def last_backup_witness(service: dict[str, str], timer: dict[str, str]) -> tuple[str, str]:
