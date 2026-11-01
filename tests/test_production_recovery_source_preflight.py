@@ -202,5 +202,25 @@ class P1SourcePreflightTests(unittest.TestCase):
             self.assertNotIn("private-auth-secret", result[1])
 
 
+    def test_root_rclone_environment_uses_root_config(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"RCLONE_CONFIG": "/tmp/unsafe.conf", "HOME": "/home/ubuntu",
+                                    "XDG_CONFIG_HOME": "/home/ubuntu/.config"}):
+            environment = mod.root_command_env()
+        self.assertEqual(environment["HOME"], "/root")
+        self.assertEqual(environment["XDG_CONFIG_HOME"], "/root/.config")
+        self.assertNotIn("RCLONE_CONFIG", environment)
+
+    def test_stream_timeout_terminates_child(self):
+        import sys
+        from unittest.mock import patch
+        with patch.object(mod.select, "select", return_value=([], [], [])):
+            with self.assertRaises(TimeoutError):
+                mod.digest_bounded_stdout(
+                    [sys.executable, "-c", "import time; time.sleep(4)"],
+                    timeout_seconds=10, max_bytes=1024,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
