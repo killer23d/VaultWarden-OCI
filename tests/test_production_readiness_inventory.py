@@ -54,6 +54,34 @@ class P0Tests(unittest.TestCase):
             q.symlink_to(p)
             self.assertFalse(p0.safe_mode(q))
 
+    def test_missing_or_empty_backups_are_not_a_disk_failure(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backups = root / 'backups'
+            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'NOT RUN')
+            backups.mkdir()
+            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'NOT RUN')
+            (backups / 'recovery.vwrec').write_bytes(b'encrypted-fixture')
+            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'PASS')
+            (backups / 'bad.vwrec').symlink_to(backups / 'recovery.vwrec')
+            self.assertEqual(p0.local_backup_inventory(backups, root)[0], 'BLOCKED')
+
+    def test_backup_timer_default_success_is_not_a_firing(self):
+        self.assertEqual(p0.last_backup_witness(
+            {'Result': 'success'}, {'LastTriggerUSec': ''})[0], 'NOT RUN')
+        self.assertEqual(p0.last_backup_witness(
+            {'Result': 'success'}, {'LastTriggerUSec': 'Sat 2026-10-31 03:23:17 UTC'})[0], 'PENDING')
+        self.assertEqual(p0.last_backup_witness(
+            {'Result': 'exit-code'}, {'LastTriggerUSec': 'Sat 2026-10-31 03:23:17 UTC'})[0], 'WARN')
+
+    def test_semantic_sops_failure_reasons_do_not_expose_values(self):
+        self.assertEqual(p0.safe_secret_failure(
+            ValueError('decrypted secret smtp_password must be a non-empty single-line string')),
+            'invalid or missing required secret value: smtp_password')
+        self.assertNotIn('highly-secret', p0.safe_secret_failure(
+            ValueError('untrusted highly-secret error text')))
+
 
 if __name__ == "__main__":
     unittest.main()
