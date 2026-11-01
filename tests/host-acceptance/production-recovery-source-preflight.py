@@ -2,8 +2,10 @@
 """Read-only source/custody preflight before an explicitly authorized rc.12 restore.
 
 Disposable host-specific acceptance instrument, NOT an installed product command.
-No remote API access, credential refresh, decrypt-to-disk, restore, backup,
-Cloudflare change, systemd activation, or appliance filesystem mutation.
+Default: no remote API access, credential refresh, decrypt-to-disk, restore,
+backup, Cloudflare change, systemd activation or appliance mutation.
+Explicit --verify-box-readback: streams one exact historical Box ciphertext
+for SHA-256 verification; rclone may refresh root's local OAuth token.
 Only a root-private summary under the sudo operator's acceptance directory.
 """
 from __future__ import annotations
@@ -14,7 +16,9 @@ import os
 import platform
 import pwd
 import re
+import select
 import stat
+import time
 import subprocess
 import sys
 import tomllib
@@ -46,20 +50,106 @@ UNITS = (
 REMOTE = "bw-backup"
 
 
+def root_command_env() -> dict[str, str]:
+    """Explicit root rclone config, avoiding accidental sudo-inherited overrides."""
+    env = {key: val for key, val in os.environ.items()
+           if not key.startswith("RCLONE_")}
+    env["HOME"] = "/root"
+    env["XDG_CONFIG_HOME"] = "/root/.config"
+    return env
+
+
 def run_readonly(argv: list[str], timeout: int = 15) -> tuple[int | None, str]:
     try:
-        env = {key: val for key, val in os.environ.items()
-               if not key.startswith("RCLONE_")}
-        env["HOME"] = "/root"
-        env["XDG_CONFIG_HOME"] = "/root/.config"
         result = subprocess.run(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, check=False,
-            timeout=timeout, cwd="/", env=env,
+            timeout=timeout, cwd="/", env=root_command_env(),
         )
         return result.returncode, result.stdout
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
+
+
+
+def digest_bounded_stdout(
+    argv: list[str],
+    *,
+    timeout_seconds: int = 600,
+    max_bytes: int = 4 * 1024**3,
+    env: dict[str, str] | None = None,
+) -> tuple[str, int]:
+    """Read-only bounded stream digest. Never buffer/write recovered ciphertext.
+
+    Exit code and bytes read must both be valid. The subprocess's stderr stays
+    private (discarded) because rclone failures can include sensitive paths.
+    """
+    if timeout_seconds < 1 or max_bytes < 1 or not argv:
+        raise ValueError("invalid bounded stream limits")
+    process = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, cwd="/", env=env or root_command_env(),
+    )
+    digest = hashlib.sha256()
+    size = 0
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        if process.stdout is None:
+            raise RuntimeError("stream missing")
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("stream timed out")
+            readable, _, _ = select.select([process.stdout], [], [], remaining)
+            if not readable:
+                raise TimeoutError("stream timed out")
+            block = os.read(process.stdout.fileno(), 1024 * 1024)
+            if not block:
+                break
+            size += len(block)
+            if size > max_bytes:
+                raise ValueError("bounded stream limit exceeded")
+            digest.update(block)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("stream timed out")
+        if process.wait(timeout=remaining) != 0:
+            raise RuntimeError("stream process failed")
+        if size == 0:
+            raise ValueError("empty stream")
+        return digest.hexdigest(), size
+    finally:
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def box_ciphertext_readback(enabled: bool, configured: bool, safe_to_run: bool) -> tuple[str, str]:
+    """One exact Box object, client-read-only. OAuth token may refresh locally."""
+    if not enabled:
+        return ("NOT RUN", "Box ciphertext SHA-256 readback not requested (default offline gate)")
+    if not safe_to_run:
+        return ("NOT RUN", "Box readback skipped because host identity/isolation checks blocked")
+    if not configured:
+        return ("PENDING", "Box readback skipped: root bw-backup: rclone remote unavailable")
+    try:
+        digest, size = digest_bounded_stdout(
+            ["rclone", "cat", HISTORICAL_REMOTE, "--retries", "1"],
+            timeout_seconds=600,
+            max_bytes=4 * 1024**3,
+        )
+    except TimeoutError:
+        return ("PENDING", "Box ciphertext readback timed out; remote unchanged")
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        return ("PENDING", "Box ciphertext readback failed or exceeded safe bound; private diagnostics withheld")
+    if digest != HISTORICAL_SHA256:
+        return ("BLOCKED", "Historical Box ciphertext SHA-256 mismatch; do not restore")
+    return ("PASS", f"Original Box ciphertext SHA-256 matched independent acceptance pin; bytes={size}, no local artifact saved")
 
 
 def matches_offline_recipient(value: object) -> bool:
@@ -314,23 +404,24 @@ def evidence_dir() -> Path:
 
 
 def main() -> int:
-    if len(sys.argv) != 1 or os.geteuid() != 0:
-        print("BLOCKED: no arguments; run with sudo -n as ubuntu", file=sys.stderr)
+    if sys.argv[1:] not in ([], ["--verify-box-readback"]) or os.geteuid() != 0:
+        print("BLOCKED: unsupported arguments or not root; use sudo -n as ubuntu", file=sys.stderr)
         return 2
+    verify_box = sys.argv[1:] == ["--verify-box-readback"]
     try:
         out = evidence_dir()
     except (OSError, KeyError, RuntimeError) as exc:
         print("BLOCKED: cannot create private operator evidence (" + type(exc).__name__ + ")", file=sys.stderr)
         return 2
 
-    rows: list[tuple[str, str]] = []
+    report_rows: list[tuple[str, str]] = []
     blocked = False
 
     def record(state: str, msg: str) -> None:
         nonlocal blocked
         if state not in {"PASS", "BLOCKED", "PENDING", "NOT RUN"}:
             raise RuntimeError("invalid evidence classification")
-        rows.append((state, msg))
+        report_rows.append((state, msg))
         if state == "BLOCKED":
             blocked = True
 
@@ -338,7 +429,7 @@ def main() -> int:
         overall = "BLOCKED" if blocked else "PENDING"
         record(overall, "Pre-restore readiness; no restore or external side effects authorized")
         summary = ("Gate P1 — rc.12 recovery source/custody inventory (read only)\n"
-                   + "\n".join(f"{state:<8} {msg}" for state, msg in rows) + "\n")
+                   + "\n".join(f"{state:<8} {msg}" for state, msg in report_rows) + "\n")
         (out / "summary.txt").write_text(summary, encoding="utf-8")
         print(summary, end="")
         print("Private summary:", out / "summary.txt")
@@ -406,9 +497,9 @@ def main() -> int:
     # rclone listremotes loads root configuration names only: no cloud API call.
     # Do NOT call rclone lsf/lsjson: an OAuth refresh can rewrite host credentials.
     status, names = run_readonly(["rclone", "listremotes"], timeout=15)
-    present = remote_available(names, status)
-    record("PASS" if present else "PENDING",
-           "Root's bw-backup: rclone name exists (no remote connectivity tested)" if present
+    box_remote_configured = remote_available(names, status)
+    record("PASS" if box_remote_configured else "PENDING",
+           "Root's bw-backup: rclone name exists (no remote connectivity tested)" if box_remote_configured
            else "Root's bw-backup: remote not available; credentials must be provisioned securely or a trusted workstation must transfer ciphertext")
     record("PENDING", "Historical Box ciphertext known from A3/A4: " + HISTORICAL_REMOTE
            + "; original recorded SHA-256=" + HISTORICAL_SHA256 + " (current availability and hash NOT checked)")
@@ -510,8 +601,8 @@ def main() -> int:
 
     binaries = ("git", "docker", "rclone", "sops", "age", "age-keygen",
                 "7zz", "cscli", "iptables", "ip6tables", "nft", "ss")
-    present = {item for item in binaries if shutil.which(item)}
-    absent = sorted(set(binaries) - present)
+    present_tools = {item for item in binaries if shutil.which(item)}
+    absent = sorted(set(binaries) - present_tools)
     record("PASS" if not absent else "PENDING",
            "Host dependency binaries " +
            ("all present" if not absent else "not yet installed: " + ",".join(absent)) +
@@ -531,14 +622,29 @@ def main() -> int:
         record("PASS" if engine_ok and compose_ok else "PENDING",
                f"Docker engine reachable={engine_ok} Compose available={compose_ok} (no containers started)")
         if engine_ok:
-            code, rows = run_readonly(
+            code, container_id_output = run_readonly(
                 ["docker", "ps", "--all",
                  "--filter", "name=^vaultwarden-oci-",
                  "--format", "{{.ID}}"], timeout=20
             )
-            count_containers = len([line for line in rows.splitlines() if line.strip()])
-            record("PASS" if code == 0 and count_containers == 0 else "PENDING",
-                   f"Existing appliance-named containers={count_containers if code == 0 else 'unknown'}"
+            count_containers = len([line for line in container_id_output.splitlines() if line.strip()])
+            running_rc, running_id_output = run_readonly(
+                ["docker", "ps",
+                 "--filter", "name=^vaultwarden-oci-",
+                 "--format", "{{.ID}}"], timeout=20
+            )
+            running_count = len([line for line in running_id_output.splitlines() if line.strip()])
+            if running_rc != 0 or code != 0:
+                container_state = "PENDING"
+            elif running_count:
+                container_state = "BLOCKED"
+            elif count_containers:
+                container_state = "PENDING"
+            else:
+                container_state = "PASS"
+            record(container_state,
+                   f"Appliance-named containers total={count_containers if code == 0 else 'unknown'} "
+                   f"running={running_count if running_rc == 0 else 'unknown'}"
                    " (names, IDs and logs withheld)")
         else:
             record("NOT RUN", "Container inventory unavailable without a healthy Docker engine")
@@ -579,7 +685,11 @@ def main() -> int:
     record("NOT RUN", "Live client login, Admin UI, SSH ingress, Caddy TLS, SMTP, notification delivery, edge packets and current Worker Fail Open")
     record("NOT RUN", "Actual scheduled backup, independent offsite readback, real restore, update rollback and reboot remain separate approved gates")
 
-    record("NOT RUN", "No Box metadata API/readback, ciphertext download, Age private-key extraction, archive verification or restore")
+    box_status, box_detail = box_ciphertext_readback(
+        verify_box, box_remote_configured, safe_to_run=not blocked
+    )
+    record(box_status, "Box ciphertext readback: " + box_detail)
+    record("NOT RUN", "No offline Age private-key extraction, archive decryption/manifest verification or restore")
     record("NOT RUN", "No services, CrowdSec Worker, DNS, SMTP, timers, snapshot, package changes or reboot")
     return finish()
 
