@@ -301,6 +301,10 @@ def main() -> int:
                  "Pre-foundation doctor JSON classification=" + diagnosis
                  + (f" failing_ids={','.join(sorted(k for k, v in statuses.items() if v == 'FAIL'))}"
                     if statuses else " (private error text withheld)"))
+        if diagnosis != "valid":
+            gate.add("PENDING", "Doctor structural diagnostic unresolved: no firewall, package, or service changes authorized")
+            gate.add("NOT RUN", "P5 mutation and activation held before operator consent, pending doctor classification repair")
+            return gate.finish()
         gate.add("NOT RUN", "No pre-consent Cloudflare CIDR/firewall, CrowdSec package or runtime mutation")
         print("\n=== SECURITY FOUNDATION: DISPOSABLE VM ONLY ===")
         print("This WILL modify this VM's apt repositories/packages and firewall:")
@@ -368,7 +372,8 @@ def main() -> int:
         gate.add("PASS", "App/Caddy/DNS/4 timers remain inactive and original restored SQLite SHA unchanged")
         gate.add("PASS", "Cloudflare Worker remains boot-disabled and inactive; no Worker Route changed")
         if deferred:
-            gate.add("PENDING", "Interrupt was deferred during foundational mutation; inspect host before next gate")
+            gate.add("BLOCKED", "Interrupt deferred during foundational mutation; preserve VM and inspect before next gate")
+            return gate.finish()
         gate.add("NOT RUN", "Cloudflare Worker start/Fail Open, Vaultwarden/Caddy, SMTP, DNS/record, timers, Box uploads or reboot")
         gate.add("PENDING", "External OCI ingress isolation and independent offline recovery kit custody still require attestation")
         gate.verified = True
