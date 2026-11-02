@@ -150,7 +150,6 @@ class P3ConsentTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(p3,"CURRENT",current))
                 stack.enter_context(mock.patch.object(p3,"RELEASE",release))
                 stack.enter_context(mock.patch.object(p3,"STATE",root))
-                stack.enter_context(mock.patch.object(p3,"root_private_evidence",return_value=evidence))
                 stack.enter_context(mock.patch.object(p3,"evidence_directory",return_value=evidence))
                 stack.enter_context(mock.patch.object(p3,"p2_module",return_value=p2))
                 stack.enter_context(mock.patch.object(p3,"confirm_isolated",return_value=True))
