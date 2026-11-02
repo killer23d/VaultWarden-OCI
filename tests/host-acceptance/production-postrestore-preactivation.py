@@ -218,7 +218,11 @@ def main() -> int:
             gate.record("BLOCKED", "Post-P3 SQLite missing, malformed, unsafe or not on the owned dedicated volume")
             return gate.finish()
         try:
-            digest = hashlib.sha256(db.read_bytes()).hexdigest()
+            hasher = hashlib.sha256()
+            with db.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
             db_size = db.stat().st_size
         except OSError:
             gate.record("BLOCKED", "Restored SQLite cannot be hashed")
