@@ -153,14 +153,21 @@ def confirm_isolated(p1, storage, *, require_empty_database: bool) -> bool:
         return False
     if (STATE / "state/update-recovery-required.json").exists():
         return False
-    if p1.daemon_running(p1.service_properties("docker.service")):
-        code, lines = p1.run_readonly([
-            "docker", "ps", "--filter", "name=^vaultwarden-oci-",
-            "--format", "{{.ID}}"], timeout=20,
-        )
-        if code != 0 or bool(lines.strip()):
-            return False
-    if require_empty_database and (STATE / "data/db.sqlite3").exists():
+    # The installed restore engine requires Docker before any promotion.
+    # Do not socket-activate a stopped Docker daemon as an inspection side effect.
+    if not p1.daemon_running(p1.service_properties("docker.service")):
+        return False
+    code, lines = p1.run_readonly([
+        "docker", "ps", "--filter", "name=^vaultwarden-oci-",
+        "--format", "{{.ID}}"], timeout=20,
+    )
+    if code != 0 or bool(lines.strip()):
+        return False
+    if require_empty_database and any(
+        path.exists() or path.is_symlink()
+        for name in ("db.sqlite3", "db.sqlite3-wal", "db.sqlite3-shm")
+        for path in (STATE / "data" / name,)
+    ):
         return False
     return True
 
@@ -262,10 +269,10 @@ def main() -> int:
             if digest != EXPECTED_SHA:
                 gate.record("BLOCKED", "Original Box encrypted object SHA-256 no longer matches the accepted pin")
                 return gate.finish()
-            gate.record("PASS", f"One bounded Box transfer to tmpfs: 358680-byte candidate SHA-256 verified={size == 358680}")
             if size != 358680:
                 gate.record("BLOCKED", "Original Box archive size changed unexpectedly")
                 return gate.finish()
+            gate.record("PASS", "One bounded Box transfer to protected tmpfs matched original 358680-byte SHA-256 pin")
 
             stage = "secure offline identity and payload verification"
             with recovery_ux.acquire_offline_identity(
