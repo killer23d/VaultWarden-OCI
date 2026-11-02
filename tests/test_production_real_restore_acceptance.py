@@ -77,7 +77,8 @@ class P3ConsentTests(unittest.TestCase):
                 UNITS=("a", "b"),
                 service_properties=lambda unit: {"LoadState":"loaded", "ActiveState":"inactive", "UnitFileState":"disabled"},
                 stopped_units=lambda state: True,
-                daemon_running=lambda state: False,
+                daemon_running=lambda state: True,
+                run_readonly=lambda *args, **kw: (0, ""),
             )
             owner = SimpleNamespace(verify=lambda: SimpleNamespace(uuid=p3.ORIGINAL_UUID,source=str(device)))
             with mock.patch.object(p3,"STATE", root):
@@ -86,6 +87,15 @@ class P3ConsentTests(unittest.TestCase):
                 (root/"data"/"db.sqlite3").write_bytes(b"original")
                 self.assertFalse(p3.confirm_isolated(p1, owner, require_empty_database=True))
                 self.assertTrue(p3.confirm_isolated(p1, owner, require_empty_database=False))
+                (root / "data" / "db.sqlite3").unlink()
+                (root / "data" / "db.sqlite3-wal").write_bytes(b"uncommitted data")
+                self.assertFalse(p3.confirm_isolated(p1, owner, require_empty_database=True))
+                (root / "data" / "db.sqlite3-wal").unlink()
+                (root / "data" / "db.sqlite3-shm").write_bytes(b"sidecar")
+                self.assertFalse(p3.confirm_isolated(p1, owner, require_empty_database=True))
+                (root / "data" / "db.sqlite3-shm").unlink()
+                p1.daemon_running = lambda state: False
+                self.assertFalse(p3.confirm_isolated(p1, owner, require_empty_database=False))
             wrong=SimpleNamespace(verify=lambda: SimpleNamespace(uuid="different",source=str(device)))
             self.assertFalse(p3.confirm_isolated(p1, wrong, require_empty_database=False))
 
