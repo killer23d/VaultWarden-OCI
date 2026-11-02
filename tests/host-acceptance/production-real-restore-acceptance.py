@@ -210,7 +210,10 @@ def main() -> int:
 
     def interrupted(signum, frame):
         raise KeyboardInterrupt()
-    old_signal = signal.signal(signal.SIGTERM, interrupted)
+    protected_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    old_signals = {sig: signal.getsignal(sig) for sig in protected_signals}
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     try:
         if platform.node().split(".")[0] != HOST or platform.machine() not in {"aarch64", "arm64"}:
             gate.record("BLOCKED", "Unexpected target host or CPU")
@@ -339,6 +342,14 @@ def main() -> int:
                     return gate.finish()
 
                 # From here forward a failure requires investigation; never auto-retry.
+                # A user interrupt during the product promotion could bypass its
+                # Exception-based rollback handler. Defer ordinary parent-process
+                # interrupt signals until verification/reporting is complete.
+                deferred_interrupts: list[int] = []
+                def defer_interrupt(signum, frame):
+                    deferred_interrupts.append(signum)
+                for sig in protected_signals:
+                    signal.signal(sig, defer_interrupt)
                 stage = "installed product restore transaction"
                 create_empty_backup_dir_after_consent(STATE / "backups", STATE)
                 gate.restore_invoked = True
@@ -357,6 +368,8 @@ def main() -> int:
                 if not okay:
                     return gate.finish()
                 gate.record("PASS", "All application/timer/Worker/DNS services remain dormant; no remote uploads/pruning or reboot")
+                if deferred_interrupts:
+                    gate.record("PENDING", "Operator interrupt deferred during the restore transaction; review host before any live startup")
                 gate.record("NOT RUN", "Live rc.12 Caddy/TLS, CrowdSec, Cloudflare, SMTP, authenticated client, timer/backup and reboot remain separate approval gates")
                 gate.record("PENDING", "Original off-host encrypted ZIP/private key and passphrase still require independent custody attestation")
                 gate.postverified = True
@@ -370,7 +383,8 @@ def main() -> int:
         gate.record("BLOCKED", f"Failure at {stage}; private exception details withheld; do not automatically retry")
         return gate.finish()
     finally:
-        signal.signal(signal.SIGTERM, old_signal)
+        for sig, handler in old_signals.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
