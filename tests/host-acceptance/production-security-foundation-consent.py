@@ -141,7 +141,9 @@ def class_doctor(data: str, return_code: int | None, allowed_ids: tuple[str, ...
         if not isinstance(entry, dict):
             return "invalid_check", {}
         name, status = entry.get("id"), entry.get("status")
-        if name not in allowed_ids or name in checks or status not in {"PASS", "WARN", "FAIL", "SKIP"}:
+        if (not isinstance(name, str) or not isinstance(status, str)
+                or name not in allowed_ids or name in checks
+                or status not in {"PASS", "WARN", "FAIL", "SKIP"}):
             return "unexpected_or_duplicate_check_id", {}
         checks[name] = status
     if set(checks) != set(allowed_ids):
