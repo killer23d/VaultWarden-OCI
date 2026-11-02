@@ -85,7 +85,7 @@ class Gate:
     def finish(self) -> int:
         if self.blocked or self.restore_invoked and not self.postverified:
             status, code = "BLOCKED", 2
-        elif self.postverified and self.promoted:
+        elif self.restore_invoked and self.postverified and self.promoted:
             status, code = "RESTORED", 0
         else:
             status, code = "CANCELLED" if self.cancelled else "PENDING", 0
@@ -262,7 +262,11 @@ def main() -> int:
                 return gate.finish()
             file = private / "pinned-recovery.vwrec"
             try:
-                digest, size = p2.stream_exact_ciphertext(file, env=p1.root_command_env())
+                digest, size = p2.stream_exact_ciphertext(
+                    file,
+                    argv=("rclone", "cat", ARCHIVE, "--retries", "1"),
+                    env=p1.root_command_env(),
+                )
             except Exception:
                 gate.record("BLOCKED", "Bounded Box readback failed (private details withheld)")
                 return gate.finish()
