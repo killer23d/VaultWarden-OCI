@@ -99,7 +99,7 @@ class P3ConsentTests(unittest.TestCase):
             wrong=SimpleNamespace(verify=lambda: SimpleNamespace(uuid="different",source=str(device)))
             self.assertFalse(p3.confirm_isolated(p1, wrong, require_empty_database=False))
 
-    def _exercise_mocked_full_gate(self, authorization: str) -> tuple[str, int, int]:
+    def _exercise_mocked_full_gate(self, authorization: str, *, deliver_interrupt: bool = False) -> tuple[str, int, int]:
         """Real P3 control flow with all filesystem/cloud/crypto mutation mocked."""
         from vaultwarden_oci import recovery, recovery_ux, runtime, secrets, storage
         with tempfile.TemporaryDirectory() as folder:
@@ -148,7 +148,12 @@ class P3ConsentTests(unittest.TestCase):
                 def isatty(self):
                     return True
             tty = TTY()
-            restore_mock=mock.Mock(return_value={"format_version":2})
+            observed_signal_handlers: dict[int, object] = {}
+            def mocked_restore(*args, **kwargs):
+                if deliver_interrupt:
+                    observed_signal_handlers[p3.signal.SIGINT](p3.signal.SIGINT, None)
+                return {"format_version":2}
+            restore_mock=mock.Mock(side_effect=mocked_restore)
             create_mock=mock.Mock()
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(p3.os,"geteuid",return_value=0))
@@ -167,7 +172,10 @@ class P3ConsentTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(p3,"create_empty_backup_dir_after_consent",create_mock))
                 stack.enter_context(mock.patch.object(p3,"verify_promoted",return_value=(True,"mock verified")))
                 stack.enter_context(mock.patch.object(p3,"EXPECTED_SHA",digest))
-                stack.enter_context(mock.patch.object(p3.signal,"signal"))
+                stack.enter_context(mock.patch.object(
+                    p3.signal, "signal",
+                    side_effect=lambda number, handler: observed_signal_handlers.__setitem__(number, handler)
+                ))
                 stack.enter_context(mock.patch.object(p3.tempfile,"TemporaryDirectory",
                     side_effect=lambda *a,**k: old_tmp(dir=root,prefix="p3-test-")))
                 stack.enter_context(mock.patch.object(runtime,"load_config",return_value=cfg))
@@ -200,6 +208,13 @@ class P3ConsentTests(unittest.TestCase):
         self.assertEqual(count,1)
         self.assertIn("RESTORED",result)
         self.assertIn("start=False",result)
+
+    def test_parent_sigint_is_deferred_during_actual_restore(self):
+        report,code,invocations=self._exercise_mocked_full_gate("RESTORE",deliver_interrupt=True)
+        self.assertEqual(code,0)
+        self.assertEqual(invocations,1)
+        self.assertIn("Operator interrupt deferred during the restore transaction",report)
+        self.assertIn("RESTORED",report)
 
 
 if __name__=="__main__":
