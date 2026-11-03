@@ -194,6 +194,14 @@ The operator ran reviewed PR #390 candidate `b9cf37f94ed129b8144302accf6db08863d
 
 **Next isolated live-acceptance preparation:** independently select an isolated dev hostname/origin and prove routing/OCI ingress before separately authorizing the product-owned Worker current-invocation Fail Open, Caddy/Vaultwarden first start, DNS-01 certificate and tests. Do not reuse the shared production hostname or existing Box backup folder for new test writes. Keep the appliance stopped until approved. Full live rc.12 operation, naturally scheduled backup, reboot persistence, rollback and production cutover remain **NOT RUN**.
 
+## P7 reboot persistence gate prepared (host NOT RUN, 2026-11-03 UTC)
+
+P6 accepted the restored rc.12 security foundation but found an Ubuntu reboot-required marker. The **new P7 disposable-host candidate** tests reboot persistence without activating a shared public hostname, Worker, DNS, Caddy, Vaultwarden, Box or timers. Its three separate modes are **prepare** (read-only snapshot/one private checkpoint), **reboot** (fresh same-boot integrity checks plus exact typed consent requiring ACTIVE OCI console before calling systemctl reboot only once), and **verify** (different kernel boot ID and unchanged protected config/operational Age/SOPS/volume markers/restored SQLite/source, all original stopped units, CrowdSec engine/INPUT bouncer, inactive/disabled Worker and strict 27-check product doctor).
+
+Docker may recreate DOCKER-USER across reboot. If the Cloudflare 443 CIDR enforcement check fails on an otherwise isolated, listener-free host, the verifier must report **PENDING** and **HOLD** rather than auto-installing firewall rules or falsely passing. Any unexpected doctor, CrowdSec service, storage or checksum failure is **BLOCKED**, preserving the VM. Before a later live startup, re-establishment of the Cloudflare-only origin guard must be independently proven through the product-owned start path and separate operator authorization. Reboot persistence is **not** equivalent to public ingress isolation or production GO.
+
+Operator runbook: see tests/host-acceptance/README.md and docs/ACCEPTANCE-HANDOFF.md. Full rc.12 live/security/client/SMTP/backup/timer, external OCI NSG, off-host kit custody, rollback and production cutover remain **NOT RUN**. Do not trigger either the reboot or post-boot phase merely because the source gate is merged; first obtain the real P7 prepare summary and verify OCI console recovery access.
+
 ## Acceptance status and path selection
 
 The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes remain historical PASS. Full rc.12 live operation, an uninterrupted fresh rc.12 install, production update/restore, current offsite readback, release-specific coherent rollback, cutover and production monitoring are **NOT RUN**. Do not transfer the historical VM's result to production.
