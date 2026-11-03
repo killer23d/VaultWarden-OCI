@@ -155,6 +155,65 @@ def class_doctor(data: str, return_code: int | None, allowed_ids: tuple[str, ...
     return "valid", checks
 
 
+
+def safe_doctor_shape(raw: str, allowed_ids: tuple[str, ...]) -> str:
+    """Report shape only. Unrecognized IDs, messages and statuses are never echoed.
+
+    The accepted rc.12 source declares exactly 26 check IDs. Detect whether a
+    mismatch is extra/missing IDs, duplicate IDs, or an invalid status without
+    changing the actual fail-closed doctor contract or displaying raw JSON.
+    """
+    expected = set(allowed_ids)
+    if len(expected) != len(allowed_ids):
+        return "invalid_approved_registry"
+    if len(raw) > 256 * 1024:
+        return "doctor_output_oversized"
+    try:
+        obj = json.loads(raw)
+    except (TypeError, ValueError):
+        return "doctor_output_not_json"
+    if not isinstance(obj, dict) or not isinstance(obj.get("checks"), list):
+        return "doctor_output_invalid_schema"
+    rows = obj["checks"]
+    seen: dict[str, int] = {}
+    unknown_hashes: set[str] = set()
+    bad_types = 0
+    bad_status = 0
+    invalid_rows = 0
+    invalid_status_ids: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            invalid_rows += 1
+            continue
+        identifier = item.get("id")
+        status = item.get("status")
+        if not isinstance(identifier, str):
+            bad_types += 1
+            continue
+        if identifier in expected:
+            seen[identifier] = seen.get(identifier, 0) + 1
+        else:
+            # A digest permits deterministic comparison with code without
+            # disclosing an unknown, potentially sensitive dynamic ID value.
+            unknown_hashes.add(hashlib.sha256(identifier.encode("utf-8", "replace")).hexdigest()[:12])
+        if not isinstance(status, str) or status not in {"PASS", "WARN", "FAIL", "SKIP"}:
+            bad_status += 1
+            if identifier in expected:
+                invalid_status_ids.add(identifier)
+    duplicates = sorted(k for k, count in seen.items() if count > 1)
+    missing = sorted(expected - seen.keys())
+    return (
+        f"observed_checks={len(rows)} expected_checks={len(expected)} "
+        f"unique_expected_seen={len(seen)} unknown_id_count={len(unknown_hashes)} "
+        f"unknown_id_hashes={','.join(sorted(unknown_hashes)[:8]) or 'none'} "
+        f"duplicate_expected_ids={','.join(duplicates) or 'none'} "
+        f"missing_expected_ids={','.join(missing) or 'none'} "
+        f"invalid_status_count={bad_status} "
+        f"invalid_status_expected_ids={','.join(sorted(invalid_status_ids)) or 'none'} "
+        f"invalid_id_type_count={bad_types} invalid_row_count={invalid_rows}"
+    )
+
+
 def run_private(args: list[str], output: Path, label: str, seconds: int, *, env: dict[str, str] | None = None) -> int | None:
     """Raw tool stdout/stderr is never printed or added to the safe summary."""
     if not re.fullmatch(r"[a-z0-9_-]{1,64}", label):
@@ -173,8 +232,8 @@ def run_private(args: list[str], output: Path, label: str, seconds: int, *, env:
             return None
 
 
-def diagnose_doctor(output: Path, label: str, *, seconds: int = 120) -> tuple[str, dict[str, str]]:
-    """Inspect installed doctor without exposing potential private error messages."""
+def diagnose_doctor(output: Path, label: str, *, seconds: int = 120) -> tuple[str, dict[str, str], str]:
+    """Inspect installed doctor; return trusted IDs plus safe shape, never raw text."""
     from vaultwarden_oci import cli
     try:
         run = subprocess.run(
@@ -182,11 +241,15 @@ def diagnose_doctor(output: Path, label: str, *, seconds: int = 120) -> tuple[st
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
             cwd="/", check=False, timeout=seconds,
         )
-        # Never persist doctor text: operational messages can contain secrets.
+        # Never persist doctor output or print exception detail: messages can
+        # contain credentials, hostnames, operator addresses or other secrets.
         raw = run.stdout[:256 * 1024 + 1].decode("utf-8", "replace")
-        return class_doctor(raw, run.returncode, tuple(cli.DOCTOR_CHECK_IDS))
+        approved = tuple(cli.DOCTOR_CHECK_IDS)
+        classification, checks = class_doctor(raw, run.returncode, approved)
+        shape = "not_needed" if classification == "valid" else safe_doctor_shape(raw, approved)
+        return classification, checks, shape
     except (OSError, subprocess.TimeoutExpired):
-        return "command_unavailable_or_timeout", {}
+        return "command_unavailable_or_timeout", {}, "doctor_command_unavailable_or_timeout"
 
 
 def sha256_file(path: Path) -> str:
@@ -298,12 +361,13 @@ def main() -> int:
         gate.add("PASS", "CrowdSec engine/INPUT bouncer and Cloudflare Worker not previously installed or active")
 
         phase = "pre-change doctor classification"
-        diagnosis, statuses = diagnose_doctor(out, "before")
+        diagnosis, statuses, structure = diagnose_doctor(out, "before")
         gate.add("PASS" if diagnosis == "valid" else "PENDING",
                  "Pre-foundation doctor JSON classification=" + diagnosis
                  + (f" failing_ids={','.join(sorted(k for k, v in statuses.items() if v == 'FAIL'))}"
                     if statuses else " (private error text withheld)"))
         if diagnosis != "valid":
+            gate.add("PENDING", "Doctor safe structure: " + structure)
             gate.add("PENDING", "Doctor structural diagnostic unresolved: no firewall, package, or service changes authorized")
             gate.add("NOT RUN", "P5 mutation and activation held before operator consent, pending doctor classification repair")
             return gate.finish()
@@ -362,9 +426,9 @@ def main() -> int:
             gate.add("BLOCKED", "Post-security restored DB, inactive appliance, Worker or isolation proof failed")
             return gate.finish()
         from vaultwarden_oci import cli
-        diagnosis, checks = diagnose_doctor(out, "after")
+        diagnosis, checks, structure = diagnose_doctor(out, "after")
         if diagnosis != "valid":
-            gate.add("BLOCKED", "Post-security doctor cannot be safely parsed: "+diagnosis+"; private details retained")
+            gate.add("BLOCKED", "Post-security doctor cannot be safely parsed: "+diagnosis+"; safe_shape="+structure+"; no raw output disclosed")
             return gate.finish()
         failed = tuple(sorted(key for key in REQUIRED_DOCTOR if checks.get(key) != "PASS"))
         if failed:

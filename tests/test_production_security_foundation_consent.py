@@ -46,6 +46,74 @@ class SecurityFoundationTests(unittest.TestCase):
         invalid=json.dumps({"schema_version":1,"overall":"FAIL","checks":[{"id":[],"status":"FAIL"}]})
         self.assertEqual(p5.class_doctor(invalid,1,keys)[0],"unexpected_or_duplicate_check_id")
 
+    def test_safe_doctor_shape_counts_unknown_duplicate_and_missing_without_raw_ids(self):
+        allowed = ("runtime.docker", "crowdsec.engine", "edge.cloudflare.cidrs")
+        dangerous = "PRIVATE-TOKEN-DO-NOT-EMIT@domain.example"
+        raw = json.dumps({
+            "schema_version": 1, "overall": "FAIL",
+            "checks": [
+                {"id": "runtime.docker", "status": "PASS", "message": "SECRET-VALUE"},
+                {"id": "runtime.docker", "status": "FAIL", "message": "SECRET-VALUE"},
+                {"id": dangerous, "status": "FAIL", "message": "SECRET-VALUE"},
+                {"id": "crowdsec.engine", "status": "INVALID-SECRET-STATUS", "message": "SECRET-VALUE"},
+            ],
+        })
+        classification, parsed = p5.class_doctor(raw, 1, allowed)
+        self.assertEqual(classification, "unexpected_or_duplicate_check_id")
+        self.assertEqual(parsed, {})
+        safe = p5.safe_doctor_shape(raw, allowed)
+        for expected in (
+            "observed_checks=4", "expected_checks=3", "unknown_id_count=1",
+            "duplicate_expected_ids=runtime.docker",
+            "missing_expected_ids=edge.cloudflare.cidrs",
+            "invalid_status_count=1",
+            "invalid_status_expected_ids=crowdsec.engine",
+        ):
+            self.assertIn(expected, safe)
+        for forbidden in (dangerous, "SECRET-VALUE", "INVALID-SECRET-STATUS"):
+            self.assertNotIn(forbidden, safe)
+
+    def test_safe_doctor_shape_malformed_and_empty_are_categorized(self):
+        self.assertEqual(p5.safe_doctor_shape("not json", ("host.os",)), "doctor_output_not_json")
+        self.assertEqual(p5.safe_doctor_shape("{}", ("host.os",)), "doctor_output_invalid_schema")
+        self.assertEqual(p5.safe_doctor_shape("{}", ("host.os", "host.os")), "invalid_approved_registry")
+        unknown = json.dumps({"checks": [{"id": ["SECRET"], "status": "PASS"}]})
+        safe = p5.safe_doctor_shape(unknown, ("host.os",))
+        self.assertIn("invalid_id_type_count=1", safe)
+        self.assertNotIn("SECRET", safe)
+
+    def test_checked_in_product_registry_contract_accepts_unique_ids(self):
+        # Import state in the full test suite may be monkeypatched by other
+        # tests. Parse the actual checked-in registry declaration to assert
+        # its stable 26 canonical names independently of that shared state.
+        import ast
+        from vaultwarden_oci import cli
+        tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+        assignment = next(
+            stmt for stmt in tree.body if isinstance(stmt, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "DOCTOR_CHECK_IDS"
+                    for target in stmt.targets)
+        )
+        expected = tuple(ast.literal_eval(assignment.value))
+        self.assertEqual(len(expected), 26)
+        self.assertEqual(len(set(expected)), len(expected))
+        fixture = json.dumps({
+            "schema_version": 1,
+            "overall": "FAIL",
+            "checks": [
+                {"id": name, "status": ("FAIL" if name == "crowdsec.engine" else "PASS"),
+                 "message": "never include doctor messages in the summary"}
+                for name in expected
+            ],
+        })
+        classification, observed = p5.class_doctor(fixture, 1, expected)
+        self.assertEqual(classification, "valid")
+        self.assertEqual(len(observed), len(expected))
+        self.assertEqual(
+            p5.safe_doctor_shape(fixture, expected).split()[0],
+            f"observed_checks={len(expected)}",
+        )
+
     def test_gate_requires_real_foundation_and_warns_on_partial_state(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp)
@@ -162,7 +230,9 @@ class SecurityFoundationTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(secrets,"validate_encrypted",
                     return_value={"cloudflare_remediation_token":"secret-fixture"}))
                 stack.enter_context(mock.patch.object(p5,"diagnose_doctor",side_effect=[
-                    (doctor,{})] + ([("valid",{name:"PASS" for name in p5.REQUIRED_DOCTOR})] if post_valid else [])))
+                    (doctor,{}, "observed_checks=27 expected_checks=26 unknown_id_count=1")] +
+                    ([("valid",{name:"PASS" for name in p5.REQUIRED_DOCTOR},"not_needed")]
+                     if post_valid else [])))
                 runner=stack.enter_context(mock.patch.object(p5,"run_private",return_value=0))
                 stack.enter_context(mock.patch("builtins.input",return_value=consent))
                 stack.enter_context(mock.patch.object(p5.signal,"signal"))
