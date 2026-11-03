@@ -82,11 +82,21 @@ class SecurityFoundationTests(unittest.TestCase):
         self.assertIn("invalid_id_type_count=1", safe)
         self.assertNotIn("SECRET", safe)
 
-    def test_installed_product_registry_contract_accepts_26_unique_ids(self):
+    def test_checked_in_product_registry_contract_accepts_unique_ids(self):
+        # Import state in the full test suite may be monkeypatched by other
+        # tests. Parse the actual checked-in registry declaration to assert
+        # its stable 26 canonical names independently of that shared state.
+        import ast
         from vaultwarden_oci import cli
-        expected = tuple(cli.DOCTOR_CHECK_IDS)
+        tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+        assignment = next(
+            stmt for stmt in tree.body if isinstance(stmt, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "DOCTOR_CHECK_IDS"
+                    for target in stmt.targets)
+        )
+        expected = tuple(ast.literal_eval(assignment.value))
         self.assertEqual(len(expected), 26)
-        self.assertEqual(len(set(expected)), 26)
+        self.assertEqual(len(set(expected)), len(expected))
         fixture = json.dumps({
             "schema_version": 1,
             "overall": "FAIL",
@@ -98,8 +108,11 @@ class SecurityFoundationTests(unittest.TestCase):
         })
         classification, observed = p5.class_doctor(fixture, 1, expected)
         self.assertEqual(classification, "valid")
-        self.assertEqual(len(observed), 26)
-        self.assertEqual(p5.safe_doctor_shape(fixture, expected).split()[0], "observed_checks=26")
+        self.assertEqual(len(observed), len(expected))
+        self.assertEqual(
+            p5.safe_doctor_shape(fixture, expected).split()[0],
+            f"observed_checks={len(expected)}",
+        )
 
     def test_gate_requires_real_foundation_and_warns_on_partial_state(self):
         with tempfile.TemporaryDirectory() as temp:
