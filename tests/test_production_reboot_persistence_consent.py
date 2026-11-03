@@ -107,8 +107,8 @@ class RebootPersistenceTests(unittest.TestCase):
             p7.verified_hashes(cp, (a,), {str(a): "a"})
 
     def test_postboot_origin_filter_missing_is_pending_not_automatically_repaired(self):
-        checks = dict.fromkeys((*p7.helper(p7.P6_FILE, "test_p6").FOUNDATION_IDS,
-                                "storage.dedicated", "runtime.paths", "crowdsec.cloudflare"), "PASS")
+        p5_module = p7.helper(p7.P5_FILE, "p7_test_p5_ids")
+        checks = dict.fromkeys(p5_module.product_doctor_ids(), "PASS")
         checks["crowdsec.cloudflare"] = "FAIL"
         checks["runtime.paths"] = "FAIL"
         checks["edge.cloudflare.iptables"] = "FAIL"
@@ -127,9 +127,8 @@ class RebootPersistenceTests(unittest.TestCase):
 
     def test_unexpected_postboot_doctor_failure_is_blocked(self):
         p6 = p7.helper(p7.P6_FILE, "test_p6_third")
-        keys = (*p6.FOUNDATION_IDS, "storage.dedicated", "runtime.paths",
-                "crowdsec.cloudflare", "secrets.decrypt")
-        checks = dict.fromkeys(keys, "PASS")
+        p5_module = p7.helper(p7.P5_FILE, "p7_test_p5_second_ids")
+        checks = dict.fromkeys(p5_module.product_doctor_ids(), "PASS")
         checks["crowdsec.cloudflare"] = "FAIL"
         checks["runtime.paths"] = "FAIL"
         checks["edge.cloudflare.iptables"] = "FAIL"
