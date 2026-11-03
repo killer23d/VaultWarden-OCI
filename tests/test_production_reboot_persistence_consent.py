@@ -142,6 +142,20 @@ class RebootPersistenceTests(unittest.TestCase):
             with self.assertRaises(p7.Blocked):
                 p7.validate_doctor(p5, p6, object(), object(), Path(d), gate, after_boot=True)
 
+    def test_stopped_docker_containers_block_reboot_even_without_running_listeners(self):
+        seen = []
+        def run(argv, timeout=20):
+            seen.append(argv)
+            return (0, "")
+        self.assertTrue(p7.empty_docker_restart_surface(SimpleNamespace(run_readonly=run)))
+        self.assertEqual(seen[0], ["docker", "ps", "-a", "--format", "{{.ID}}"])
+        self.assertFalse(p7.empty_docker_restart_surface(SimpleNamespace(
+            run_readonly=lambda *a, **k: (0, "stopped-container-id\n"),
+        )))
+        self.assertFalse(p7.empty_docker_restart_surface(SimpleNamespace(
+            run_readonly=lambda *a, **k: (None, ""),
+        )))
+
     def test_prepare_mode_never_calls_reboot_or_consent(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
