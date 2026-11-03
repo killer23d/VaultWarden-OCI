@@ -49,3 +49,28 @@ Next `production-postrestore-preactivation.py` is the **broad, read-only P4** su
 The new `production-real-restore-acceptance.py` is the **P3 consented destructive test-VM recovery** instrument. It must only run on the same original disposable host. It inspects immutable release/disk/isolation, securely re-verifies original Box ciphertext/identity/SQLite in protected tmpfs, and prompts for an exact typed `RESTORE` after the target/state description. **Everything else cancels before app data is modified**. Only after consent does it create the absent staging directory and invoke the installed recovery engine with `start=False`; post-restore it checks restored SQLite, SOPS, backup policy and stopped services. It never activates DNS/Worker/Caddy/SMTP or timers and never uploads/prunes the Box object. It is not a production deployment or a general-purpose recovery command. See [P3 in production readiness](../../docs/PRODUCTION-READINESS.md).
 
 The new **P2 cryptographic rehearsal** is `production-cryptographic-readiness.py` (not a general production tool). It independently checks the exact accepted Box recovery ciphertext plus the matching **offline private** identity, Age decryption, manifest/checksums, SOPS, and SQLite integrity using swap-free `/run` tmpfs. It has a hidden-input chooser with a safe cancel path, never restores live data and does not automatically configure root Box, install packages, edit Cloudflare, send mail or start timers. An encrypted ZIP requires the original protected file and `7zz`, which may be missing. Run only as a reviewed, pinned acceptance-host operation; see [Production readiness, P2](../../docs/PRODUCTION-READINESS.md).
+
+## P7: original rc.12 disposable-host reboot persistence
+
+P7 is prepared on a dedicated acceptance branch; the original restored VM has **not been rebooted by P7**. The real P6 result was 80 focused tests OK, read-only HOLD/exit 0, five CrowdSec/Cloudflare foundation doctor checks PASS, nine missing startup-only paths, zero unsafe paths and an Ubuntu reboot-required marker. The public domain bw.lazymocha.com is shared, so do **not** start Vaultwarden/Caddy or the Cloudflare Worker merely to complete reboot testing.
+
+On the reviewed branch, use one **clean exact-commit checkout** on ubuntu@vaultwarden-oci-6-vnic; keep that same directory through the reboot. No checked-out source change or manual file edits are allowed. First run:
+
+    python3 -B -m unittest discover -s tests -p 'test_production_*.py'
+    sudo -n python3 -B -E tests/host-acceptance/production-reboot-persistence-consent.py prepare
+
+This **prepare** phase is read-only apart from creating root-private P7 evidence and one SHA-256/boot-ID checkpoint under ~/vwoci-acceptance. A safe PREPARED/exit 0 is not reboot authorization. Paste the sanitized prepare summary and stop. Do not paste the private JSON checkpoint or raw doctor output.
+
+**Only after separate approval and verification of an ACTIVE OCI serial console recovery session** may the operator run the separately approved reboot mode using the same checkout:
+
+    sudo -n python3 -B -E tests/host-acceptance/production-reboot-persistence-consent.py reboot
+
+The script independently checks unchanged same-boot checkpoint plus security/data isolation and demands exact typed authorization: P7 REBOOT vaultwarden-oci-6-vnic OCI CONSOLE READY. Otherwise it cancels. It records reboot-requested before the single systemctl reboot call. SSH disconnect is expected; the request cannot prove boot success. Do not rerun reboot after interruption or uncertain status.
+
+**After reboot and manual reconnection**, use the same checkout:
+
+    sudo -n python3 -B -E tests/host-acceptance/production-reboot-persistence-consent.py verify
+
+Verify requires a different kernel boot ID, same original release/volume/SQLite/SOPS/Age/config markers and acceptance source checksums, unchanged stopped app/DNS/four timers and no HTTP listeners, active+enabled CrowdSec engine and INPUT-only host firewall bouncer, disabled+inactive Cloudflare Worker, and safe 27-ID doctor classification. No automatic firewall repair or service startup. Docker may lose its Cloudflare-only ingress rules on restart; if so, verify must return PENDING/HOLD with no public listeners, never a false production PASS. A current reboot-required marker also needs independent classification; it is not automatically proof of failure or success. A VERIFIED result proves only the stopped-host reboot baseline.
+
+**P8 and later remain separate:** independently establish an isolated dev hostname and OCI public ingress/NSG route before permitting current-invocation Worker Fail Open, live Caddy/Vaultwarden TLS and client checks, SMTP, isolated Box backup and naturally scheduled timers. No release upgrade/restore, DNS change or production cutover in P7.
