@@ -237,6 +237,14 @@ def validate_doctor(p5, p6, runtime, secrets, evidence: Path, report: Report, *,
     report.add("PASS", "Cloudflare Worker still requires a NEW invocation-specific Fail Open attestation")
 
 
+def empty_docker_restart_surface(p1) -> bool:
+    """A stopped restart-policy container can resurrect after Docker reboots."""
+    code, output = p1.run_readonly(
+        ["docker", "ps", "-a", "--format", "{{.ID}}"], timeout=20,
+    )
+    return code == 0 and not output.strip()
+
+
 def host_snapshot(report: Report, *, after_boot: bool) -> tuple[tuple[Path, ...], dict[str, str]]:
     phase = "immutable release"
     p5 = helper(P5_FILE, "p7_p5")
@@ -261,7 +269,9 @@ def host_snapshot(report: Report, *, after_boot: bool) -> tuple[tuple[Path, ...]
         phase = "isolation"
         if not p5.exact_isolation(p1, p4, storage, expect_security_installed=True):
             raise Blocked("original volume, SQLite, inactive app/ports/timers, Docker or Worker isolation changed")
-        report.add("PASS", "Original ext4 disk/SQLite SHA, no app/DNS/four timers, no HTTP listeners/containers")
+        if not empty_docker_restart_surface(p1):
+            raise Blocked("Docker has a retained container or cannot inspect full inventory; cold reboot could resurrect listeners")
+        report.add("PASS", "Original ext4 disk/SQLite SHA, disabled app/DNS/four timers, no HTTP listeners or retained Docker containers")
         cfg = runtime.load_config()
         if (cfg.domain != p6.EXPECTED_SHARED_DOMAIN
                 or not p1.matches_offline_recipient(cfg.offline_recovery_recipient)
