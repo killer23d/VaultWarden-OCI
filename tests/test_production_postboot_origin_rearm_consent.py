@@ -141,6 +141,7 @@ class PostbootOriginRearmTests(unittest.TestCase):
             p7 = SimpleNamespace(
                 safe_base=lambda: root,
                 read_boot_id=lambda: "after",
+                INSTALLED=Path("/opt/vaultwarden-oci/releases/0.1.0-rc.12"),
                 Blocked=RuntimeError,
             )
             def fake_preflight(*a):
@@ -202,7 +203,7 @@ class PostbootOriginRearmTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertTrue(attempt)
         self.assertNotIn("postflight", events)
-        self.assertIn("Partial firewall mutation", summary)
+        self.assertIn("Possible partial firewall mutation", summary)
 
     def test_existing_marker_denies_rearm_but_diagnose_still_allowed(self):
         status, events, output, summary, attempt = self._run_main(
