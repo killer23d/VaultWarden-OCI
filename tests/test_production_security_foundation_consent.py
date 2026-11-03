@@ -220,6 +220,22 @@ class SecurityFoundationTests(unittest.TestCase):
             state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
             self.assertEqual(state, "BLOCKED")
             self.assertIn("data.vaultwarden=symlink", summary)
+            paths.data.unlink()
+
+            paths.compose.parent.mkdir(parents=True, exist_ok=True)
+            paths.compose.write_bytes(b"fake-rendered-content")
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "BLOCKED")
+            self.assertIn("rendered-files=partially-materialized", summary)
+            paths.compose.unlink()
+
+            token_path = secret_paths.file("cloudflare_api_token")
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_bytes(b"fake-token-not-for-output")
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "BLOCKED")
+            self.assertIn("required-volatile-secrets=partially-materialized", summary)
+            self.assertNotIn("fake-token-not-for-output", summary)
 
     def test_stopped_runtime_service_identity_collision_blocks(self):
         with tempfile.TemporaryDirectory() as folder:
