@@ -114,6 +114,51 @@ class SecurityFoundationTests(unittest.TestCase):
             f"observed_checks={len(expected)}",
         )
 
+    def test_installed_update_cli_registers_dedicated_storage_in_doctor(self):
+        ids = p5.product_doctor_ids()
+        self.assertEqual(len(ids), 27)
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertEqual(ids[ids.index("runtime.paths") + 1], "storage.dedicated")
+        data = json.dumps({
+            "schema_version": 1, "overall": "FAIL", "checks": [
+                {"id": key, "status": ("FAIL" if key == "crowdsec.engine" else "PASS"),
+                 "message": "DO NOT LEAK TOKEN"}
+                for key in ids
+            ],
+        })
+        classification, statuses = p5.class_doctor(data, 1, ids)
+        self.assertEqual(classification, "valid")
+        self.assertEqual(len(statuses), 27)
+        self.assertEqual(statuses["storage.dedicated"], "PASS")
+        unexpected = json.loads(data)
+        unexpected["checks"].append({
+            "id": "additional-not-approved-check", "status": "FAIL", "message": "private"
+        })
+        self.assertEqual(
+            p5.class_doctor(json.dumps(unexpected), 1, ids)[0],
+            "unexpected_or_duplicate_check_id",
+        )
+
+    def test_installed_product_doctor_sanitization_parses_full_registry(self):
+        ids = p5.product_doctor_ids()
+        raw = json.dumps({
+            "schema_version": 1, "overall": "FAIL",
+            "checks": [
+                {"id": key, "status": ("FAIL" if key == "crowdsec.engine" else "PASS"),
+                 "message": "SECRET-NOT-FOR-OUTPUT"}
+                for key in ids
+            ],
+        }).encode("utf-8")
+        with mock.patch.object(p5.subprocess, "run", return_value=SimpleNamespace(
+            stdout=raw, returncode=1
+        )):
+            classification, checks, shape = p5.diagnose_doctor(Path("/tmp"), "fixture")
+        self.assertEqual(classification, "valid")
+        self.assertEqual(shape, "not_needed")
+        self.assertEqual(len(checks), 27)
+        self.assertEqual(checks["storage.dedicated"], "PASS")
+        self.assertNotIn("SECRET-NOT-FOR-OUTPUT", str(checks))
+
     def test_gate_requires_real_foundation_and_warns_on_partial_state(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp)
@@ -192,7 +237,8 @@ class SecurityFoundationTests(unittest.TestCase):
                 p1.listening_ports=lambda:{443}
                 self.assertFalse(p5.exact_isolation(p1,p4,storage,expect_security_installed=False))
 
-    def mocked_main(self, *, doctor: str, consent: str, post_valid: bool = True) -> tuple[int,str,int]:
+    def mocked_main(self, *, doctor: str, consent: str, post_valid: bool = True,
+                    diagnose_only: bool = False, storage_ok: bool = True) -> tuple[int,str,int]:
         from vaultwarden_oci import runtime, secrets
         class Tty(io.StringIO):
             def isatty(self):return True
@@ -215,7 +261,8 @@ class SecurityFoundationTests(unittest.TestCase):
             tty=Tty()
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(p5.os,"geteuid",return_value=0))
-                stack.enter_context(mock.patch.object(p5.sys,"argv",["p5.py"]))
+                stack.enter_context(mock.patch.object(p5.sys,"argv",
+                    ["p5.py","--diagnose-only"] if diagnose_only else ["p5.py"]))
                 stack.enter_context(mock.patch.object(p5.sys,"stdin",tty))
                 stack.enter_context(mock.patch.object(p5.sys,"path",list(sys.path)))
                 stack.enter_context(mock.patch.object(p5.sys,"version_info",(3,14,0)))
@@ -230,14 +277,18 @@ class SecurityFoundationTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(secrets,"validate_encrypted",
                     return_value={"cloudflare_remediation_token":"secret-fixture"}))
                 stack.enter_context(mock.patch.object(p5,"diagnose_doctor",side_effect=[
-                    (doctor,{}, "observed_checks=27 expected_checks=26 unknown_id_count=1")] +
-                    ([("valid",{name:"PASS" for name in p5.REQUIRED_DOCTOR},"not_needed")]
+                    (doctor,{"storage.dedicated":"PASS" if storage_ok else "FAIL"},
+                     "observed_checks=27 expected_checks=26 unknown_id_count=1")] +
+                    ([("valid",{**{name:"PASS" for name in p5.REQUIRED_DOCTOR},
+                               "storage.dedicated":"PASS"},"not_needed")]
                      if post_valid else [])))
                 runner=stack.enter_context(mock.patch.object(p5,"run_private",return_value=0))
-                stack.enter_context(mock.patch("builtins.input",return_value=consent))
+                prompt = stack.enter_context(mock.patch("builtins.input",return_value=consent))
                 stack.enter_context(mock.patch.object(p5.signal,"signal"))
                 stack.enter_context(contextlib.redirect_stdout(tty))
                 result=p5.main()
+            if diagnose_only:
+                self.assertEqual(prompt.call_count, 0, "diagnostic mode must never offer destructive consent")
             summary=(evidence/"summary.txt").read_text()
             return result,summary,runner.call_count
 
@@ -261,6 +312,25 @@ class SecurityFoundationTests(unittest.TestCase):
         self.assertIn("FOUNDATION",report)
         self.assertIn("CrowdSec engine/Hub/host INPUT firewall doctor checks all PASS",report)
         self.assertNotIn("secret-fixture",report)
+
+    def test_doctor_only_mode_does_not_prompt_or_modify_even_when_valid(self):
+        code,report,calls=self.mocked_main(
+            doctor="valid",consent=p5.CONSENT,diagnose_only=True
+        )
+        self.assertEqual(code,0)
+        self.assertEqual(calls,0)
+        self.assertIn("Complete installed product doctor registry validated: 27",report)
+        self.assertIn("Doctor-only mode completed",report)
+        self.assertNotIn("FOUNDATION P5",report)
+
+    def test_storage_doctor_failure_prevents_authorization_and_mutation(self):
+        code,report,calls=self.mocked_main(
+            doctor="valid",consent=p5.CONSENT,storage_ok=False
+        )
+        self.assertEqual(code,2)
+        self.assertEqual(calls,0)
+        self.assertIn("dedicated-storage doctor check did not PASS",report)
+
 
 if __name__=="__main__":
     unittest.main()

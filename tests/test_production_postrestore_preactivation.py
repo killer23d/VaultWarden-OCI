@@ -52,6 +52,30 @@ class PostrestoreReadinessTests(unittest.TestCase):
         self.assertIsNone(p4.doctor_statuses(good.replace("crowdsec.engine","unknown\nkey"),1,ids))
         self.assertIsNone(p4.doctor_statuses("not-json",0,ids))
 
+    def test_complete_installed_doctor_storage_registry_and_extra_id_refusal(self):
+        from vaultwarden_oci import cli, update_cli
+        registry = tuple(cli.DOCTOR_CHECK_IDS)
+        self.assertEqual(len(registry), 27)
+        self.assertEqual(len(set(registry)), 27)
+        self.assertEqual(
+            registry[registry.index("runtime.paths") + 1],
+            update_cli._STORAGE_DOCTOR_ID,
+        )
+        doctor = {
+            "schema_version": 1, "overall": "FAIL",
+            "checks": [
+                {"id": name, "status": "FAIL" if name == "crowdsec.engine" else "PASS",
+                 "message": "private doctor details are not copied to reports"}
+                for name in registry
+            ],
+        }
+        import json
+        safe = p4.doctor_statuses(json.dumps(doctor), 1, registry)
+        self.assertEqual(len(safe), 27)
+        self.assertEqual(safe["storage.dedicated"], "PASS")
+        doctor["checks"].append({"id": "unreviewed.extra", "status": "FAIL"})
+        self.assertIsNone(p4.doctor_statuses(json.dumps(doctor), 1, registry))
+
     def test_strict_metadata_does_not_follow_symlinks_or_permit_extra_modes(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

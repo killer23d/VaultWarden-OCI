@@ -201,7 +201,10 @@ def main() -> int:
             gate.record("BLOCKED", "Installed systemd unit content differs from approved release")
             return gate.finish()
         gate.record("PASS", f"Installed rc.12 file integrity ({file_count}) and all systemd units reverified")
-        from vaultwarden_oci import cli, runtime, secrets, storage
+        # The installed vwctl doctor passes through update_cli, which registers
+        # the fail-closed storage.dedicated check in the canonical CLI registry.
+        # Mirror that non-mutating in-memory import before validating JSON.
+        from vaultwarden_oci import cli, runtime, secrets, storage, update_cli
         phase = "dedicated restored state"
         identity = storage.verify()
         if (identity.uuid != EXPECTED_UUID or identity.fs_type != "ext4"
@@ -355,7 +358,13 @@ def main() -> int:
                 [sys.executable, "-B", "-E", str(INSTALLED / "vwctl"), "doctor", "--json"],
                 timeout=100,
             )
-            parsed = doctor_statuses(stdout, rc, tuple(cli.DOCTOR_CHECK_IDS))
+            approved = tuple(cli.DOCTOR_CHECK_IDS)
+            if (len(approved) != 27 or len(set(approved)) != 27
+                    or update_cli._STORAGE_DOCTOR_ID != "storage.dedicated"
+                    or approved.index("storage.dedicated") != approved.index("runtime.paths") + 1):
+                gate.record("BLOCKED", "Installed product doctor check registry differs from reviewed rc.12 contract")
+                return gate.finish()
+            parsed = doctor_statuses(stdout, rc, approved)
             if parsed is None:
                 gate.record("PENDING", "Product doctor could not be safely parsed; no diagnostic values published")
             else:

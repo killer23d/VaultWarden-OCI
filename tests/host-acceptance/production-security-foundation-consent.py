@@ -214,6 +214,26 @@ def safe_doctor_shape(raw: str, allowed_ids: tuple[str, ...]) -> str:
     )
 
 
+
+def product_doctor_ids() -> tuple[str, ...]:
+    """Obtain the installed product's complete, canonical doctor registry.
+
+    The installed vwctl entrypoint imports update_cli before invoking the
+    product doctor. update_cli registers the mandatory storage.dedicated
+    check in cli.DOCTOR_CHECK_IDS. The acceptance process must do exactly
+    the same in-memory registration, with no on-disk modifications.
+    """
+    from vaultwarden_oci import cli, update_cli
+
+    names = tuple(cli.DOCTOR_CHECK_IDS)
+    extra = update_cli._STORAGE_DOCTOR_ID
+    if (extra != "storage.dedicated" or len(names) != 27
+            or len(set(names)) != len(names)
+            or extra not in names or names.index(extra) != names.index("runtime.paths") + 1):
+        raise ValueError("installed product doctor registry differs from the reviewed rc.12 contract")
+    return names
+
+
 def run_private(args: list[str], output: Path, label: str, seconds: int, *, env: dict[str, str] | None = None) -> int | None:
     """Raw tool stdout/stderr is never printed or added to the safe summary."""
     if not re.fullmatch(r"[a-z0-9_-]{1,64}", label):
@@ -234,7 +254,10 @@ def run_private(args: list[str], output: Path, label: str, seconds: int, *, env:
 
 def diagnose_doctor(output: Path, label: str, *, seconds: int = 120) -> tuple[str, dict[str, str], str]:
     """Inspect installed doctor; return trusted IDs plus safe shape, never raw text."""
-    from vaultwarden_oci import cli
+    try:
+        approved = product_doctor_ids()
+    except (ImportError, AttributeError, RuntimeError, ValueError):
+        return "invalid_installed_doctor_registry", {}, "registered_check_set_not_approved"
     try:
         run = subprocess.run(
             [sys.executable, "-B", "-E", str(INSTALLED / "vwctl"), "doctor", "--json"],
@@ -244,7 +267,6 @@ def diagnose_doctor(output: Path, label: str, *, seconds: int = 120) -> tuple[st
         # Never persist doctor output or print exception detail: messages can
         # contain credentials, hostnames, operator addresses or other secrets.
         raw = run.stdout[:256 * 1024 + 1].decode("utf-8", "replace")
-        approved = tuple(cli.DOCTOR_CHECK_IDS)
         classification, checks = class_doctor(raw, run.returncode, approved)
         shape = "not_needed" if classification == "valid" else safe_doctor_shape(raw, approved)
         return classification, checks, shape
@@ -305,8 +327,10 @@ def exact_isolation(p1, p4, storage, *, expect_security_installed: bool) -> bool
 
 
 def main() -> int:
-    if len(sys.argv) != 1 or os.geteuid() != 0 or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print("BLOCKED: sudo -n from ubuntu in interactive terminal is required", file=sys.stderr)
+    diagnose_only = sys.argv[1:] == ["--diagnose-only"]
+    if (sys.argv[1:] not in ([], ["--diagnose-only"]) or os.geteuid() != 0
+            or not (sys.stdin.isatty() and sys.stdout.isatty())):
+        print("BLOCKED: sudo -n from ubuntu in interactive terminal; only optional --diagnose-only", file=sys.stderr)
         return 2
     try:
         out = evidence_root()
@@ -370,6 +394,14 @@ def main() -> int:
             gate.add("PENDING", "Doctor safe structure: " + structure)
             gate.add("PENDING", "Doctor structural diagnostic unresolved: no firewall, package, or service changes authorized")
             gate.add("NOT RUN", "P5 mutation and activation held before operator consent, pending doctor classification repair")
+            return gate.finish()
+        if statuses.get("storage.dedicated") != "PASS":
+            gate.add("BLOCKED", "Installed product dedicated-storage doctor check did not PASS; no host mutation permitted")
+            return gate.finish()
+        gate.add("PASS", "Complete installed product doctor registry validated: 27 unique checks including storage.dedicated")
+        if diagnose_only:
+            gate.add("PENDING", "Doctor-only mode completed; security foundation remains unconfigured and requires later explicit consent")
+            gate.add("NOT RUN", "No consent requested; no firewall, package, CrowdSec, Worker, app, timer or Box mutation")
             return gate.finish()
         gate.add("NOT RUN", "No pre-consent Cloudflare CIDR/firewall, CrowdSec package or runtime mutation")
         print("\n=== SECURITY FOUNDATION: DISPOSABLE VM ONLY ===")
