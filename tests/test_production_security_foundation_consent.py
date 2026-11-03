@@ -82,6 +82,25 @@ class SecurityFoundationTests(unittest.TestCase):
         self.assertIn("invalid_id_type_count=1", safe)
         self.assertNotIn("SECRET", safe)
 
+    def test_installed_product_registry_contract_accepts_26_unique_ids(self):
+        from vaultwarden_oci import cli
+        expected = tuple(cli.DOCTOR_CHECK_IDS)
+        self.assertEqual(len(expected), 26)
+        self.assertEqual(len(set(expected)), 26)
+        fixture = json.dumps({
+            "schema_version": 1,
+            "overall": "FAIL",
+            "checks": [
+                {"id": name, "status": ("FAIL" if name == "crowdsec.engine" else "PASS"),
+                 "message": "never include doctor messages in the summary"}
+                for name in expected
+            ],
+        })
+        classification, observed = p5.class_doctor(fixture, 1, expected)
+        self.assertEqual(classification, "valid")
+        self.assertEqual(len(observed), 26)
+        self.assertEqual(p5.safe_doctor_shape(fixture, expected).split()[0], "observed_checks=26")
+
     def test_gate_requires_real_foundation_and_warns_on_partial_state(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp)
