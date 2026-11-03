@@ -128,6 +128,47 @@ class PostbootOriginRearmTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 p7r.preflight(fake, p7r.Report(Path(d), "diagnose"))
 
+    def test_postflight_requires_all_foundation_checks_and_no_unexpected_failures(self):
+        from vaultwarden_oci import cli
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d)
+            paths = (Path("/original/source"),)
+            hashes = {str(paths[0]): "unchanged"}
+            current = dict.fromkeys((
+                "edge.cloudflare.cidrs", "edge.cloudflare.iptables",
+                "crowdsec.engine", "crowdsec.hub", "crowdsec.firewall",
+                "storage.dedicated", "crowdsec.cloudflare", "runtime.paths",
+            ), "PASS")
+            current["crowdsec.cloudflare"] = "FAIL"
+            current["runtime.paths"] = "FAIL"
+            for i in range(19):
+                current["approved-test-key-" + str(i)] = "PASS"
+            self.assertEqual(len(current), 27)
+            fake_p5 = SimpleNamespace(
+                REQUIRED_DOCTOR=(
+                    "edge.cloudflare.cidrs", "edge.cloudflare.iptables",
+                    "crowdsec.engine", "crowdsec.hub", "crowdsec.firewall",
+                ),
+                diagnose_doctor=lambda *a, **k: ("valid", current, "not_needed"),
+            )
+            fake_p7 = SimpleNamespace(
+                Report=lambda *a: SimpleNamespace(rows=[("PASS", "Runtime is still dormant")]),
+                host_snapshot=lambda *a, **k: (paths, hashes),
+                verified_hashes=lambda *a: None,
+                Blocked=RuntimeError,
+            )
+            gate = p7r.Report(output, "rearm")
+            p7r.postflight(fake_p7, fake_p5, gate, {"sha256": hashes}, paths)
+            self.assertTrue(any("re-established" in msg for _, msg in gate.rows))
+            self.assertTrue(any("Original P7 HOLD" in msg for _, msg in gate.rows))
+            current["edge.cloudflare.iptables"] = "FAIL"
+            with self.assertRaises(RuntimeError):
+                p7r.postflight(fake_p7, fake_p5, gate, {"sha256": hashes}, paths)
+            current["edge.cloudflare.iptables"] = "PASS"
+            current["secrets.decrypt"] = "FAIL"
+            with self.assertRaises(RuntimeError):
+                p7r.postflight(fake_p7, fake_p5, gate, {"sha256": hashes}, paths)
+
     def _run_main(self, mode: str, *, consent: str | None = None, result: int = 0,
                   prior_attempt: bool = False):
         with tempfile.TemporaryDirectory() as d:
