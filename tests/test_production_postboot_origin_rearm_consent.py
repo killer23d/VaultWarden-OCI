@@ -138,10 +138,11 @@ class PostbootOriginRearmTests(unittest.TestCase):
                 "edge.cloudflare.cidrs", "edge.cloudflare.iptables",
                 "crowdsec.engine", "crowdsec.hub", "crowdsec.firewall",
                 "storage.dedicated", "crowdsec.cloudflare", "runtime.paths",
+                "secrets.decrypt",
             ), "PASS")
             current["crowdsec.cloudflare"] = "FAIL"
             current["runtime.paths"] = "FAIL"
-            for i in range(19):
+            for i in range(18):
                 current["approved-test-key-" + str(i)] = "PASS"
             self.assertEqual(len(current), 27)
             fake_p5 = SimpleNamespace(
