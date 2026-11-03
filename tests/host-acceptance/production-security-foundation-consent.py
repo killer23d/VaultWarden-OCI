@@ -282,6 +282,89 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+
+def inspect_stopped_runtime_paths(runtime, secrets) -> tuple[str, str]:
+    """Categorize installed runtime.paths without reading any file content.
+
+    Use only product-owned constant Paths, UID/GID/mode contracts. Never make
+    directories, materialize secrets, start Docker, or reveal raw error text.
+    MISSING is PENDING because installed runtime.ensure_paths() normally
+    materializes generated paths at a later, separately authorized startup.
+    Wrong type, symlink, identity or permissions are BLOCKED, not normalized.
+    """
+    paths = runtime.Paths()
+    secret_paths = paths.secret_paths()
+    dir_entries = (
+        ("run.root", paths.run, 0, 0, 0o700),
+        ("run.transient", paths.transient, 0, 0, 0o700),
+        ("run.secrets", paths.secret_root, 0, 0, 0o700),
+        ("data.vaultwarden", paths.data, runtime.VAULTWARDEN_UID, runtime.VAULTWARDEN_GID, 0o700),
+        ("log.vaultwarden.dir", paths.vaultwarden_log_path, runtime.VAULTWARDEN_UID, runtime.VAULTWARDEN_GID, 0o700),
+        ("data.caddy", paths.caddy_data, runtime.CADDY_UID, runtime.CADDY_GID, 0o700),
+        ("config.caddy", paths.caddy_config, runtime.CADDY_UID, runtime.CADDY_GID, 0o700),
+        ("log.caddy.dir", paths.caddy_log_path, runtime.CADDY_UID, runtime.CADDY_GID, 0o700),
+        ("run.vaultwarden-secrets", secret_paths.vaultwarden, 0, runtime.VAULTWARDEN_GID, 0o750),
+        ("run.caddy-secrets", secret_paths.caddy, 0, runtime.CADDY_GID, 0o750),
+    )
+    file_entries = (
+        ("run.lock", paths.lock, 0, 0, 0o600),
+        ("log.vaultwarden.file", paths.vaultwarden_log_file, runtime.VAULTWARDEN_UID, runtime.VAULTWARDEN_GID, 0o600),
+        ("render.compose", paths.compose, 0, 0, 0o600),
+        ("render.Caddyfile", paths.caddyfile, 0, 0, 0o444),
+        ("render.Dockerfile", paths.dockerfile, 0, 0, 0o600),
+        *(
+            ("secret.required." + key, secret_paths.file(key),
+             0,
+             runtime.CADDY_GID if key == "cloudflare_api_token" else runtime.VAULTWARDEN_GID,
+             0o440)
+            for key in secrets.REQUIRED
+        ),
+    )
+
+    missing: list[str] = []
+    unsafe: list[str] = []
+    for kind, entries in (("dir", dir_entries), ("file", file_entries)):
+        for label, path, uid, gid, expected_mode in entries:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                missing.append(label)
+                continue
+            except OSError:
+                unsafe.append(label + "=inspection-error")
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                unsafe.append(label + "=symlink")
+            elif not (stat.S_ISDIR(info.st_mode) if kind == "dir" else stat.S_ISREG(info.st_mode)):
+                unsafe.append(label + "=wrong-type")
+            elif (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (uid, gid, expected_mode):
+                unsafe.append(label + "=wrong-owner-or-mode")
+
+    identity_collision = runtime._service_identity_error() is not None
+    actual = runtime.runtime_paths_check(paths).status
+    if actual not in {"PASS", "FAIL", "SKIP"}:
+        return "BLOCKED", "product=invalid-status"
+    if identity_collision:
+        unsafe.append("service-uid-or-gid=reserved-host-collision")
+    if unsafe:
+        state = "BLOCKED"
+    elif actual == "PASS" and missing:
+        state = "BLOCKED"  # product and independent inventory disagree
+        unsafe.append("cross-check=product-pass-with-missing-path")
+    elif actual == "PASS":
+        state = "PASS"
+    elif missing:
+        state = "PENDING"
+    else:
+        state = "BLOCKED"
+        unsafe.append("cross-check=unclassified-product-failure")
+    return state, (
+        f"product={actual} missing_count={len(missing)} "
+        f"missing_labels={','.join(missing) or 'none'} "
+        f"unsafe_count={len(unsafe)} "
+        f"unsafe_labels={','.join(unsafe) or 'none'}"
+    )
+
 def exact_isolation(p1, p4, storage, *, expect_security_installed: bool) -> bool:
     if not CURRENT.is_symlink() or CURRENT.resolve(strict=True) != INSTALLED:
         return False
@@ -399,6 +482,17 @@ def main() -> int:
             gate.add("BLOCKED", "Installed product dedicated-storage doctor check did not PASS; no host mutation permitted")
             return gate.finish()
         gate.add("PASS", "Complete installed product doctor registry validated: 27 unique checks including storage.dedicated")
+        path_status, path_summary = inspect_stopped_runtime_paths(runtime, secrets)
+        gate.add(path_status, "Stopped-host runtime.paths inventory: " + path_summary)
+        if path_status == "BLOCKED":
+            gate.add("NOT RUN", "Unsafe runtime path metadata detected; security foundation authorization suppressed")
+            return gate.finish()
+        if statuses.get("runtime.paths") == "PASS" and path_status != "PASS":
+            gate.add("BLOCKED", "Product reported runtime.paths PASS but independent stopped-host inventory disagrees")
+            return gate.finish()
+        if statuses.get("runtime.paths") == "FAIL" and path_status == "PASS":
+            gate.add("BLOCKED", "Runtime path doctor FAIL without a matching independent stopped-host reason")
+            return gate.finish()
         if diagnose_only:
             gate.add("PENDING", "Doctor-only mode completed; security foundation remains unconfigured and requires later explicit consent")
             gate.add("NOT RUN", "No consent requested; no firewall, package, CrowdSec, Worker, app, timer or Box mutation")
