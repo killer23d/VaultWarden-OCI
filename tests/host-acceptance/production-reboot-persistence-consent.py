@@ -285,6 +285,15 @@ def host_snapshot(report: Report, *, after_boot: bool) -> tuple[tuple[Path, ...]
         if rc != 0 or audit.strip():
             raise Blocked("post-P5 dpkg database reports partial package changes")
         report.add("PASS", "dpkg package audit clean")
+        rc, value = p1.run_readonly(
+            ["timedatectl", "show", "-p", "NTPSynchronized", "--value"], timeout=12,
+        )
+        report.add("PASS" if rc == 0 and value.strip() == "yes" else "PENDING",
+                   "NTP synchronized" if rc == 0 and value.strip() == "yes" else "NTP not confirmed")
+        reboot_marker = Path("/var/run/reboot-required").exists()
+        report.add("PENDING" if reboot_marker else "PASS",
+                   "Ubuntu reboot-required marker present; classify after approved boot"
+                   if reboot_marker else "No Ubuntu reboot-required marker")
         paths = tracked_paths(secrets, storage, p5)
         protected = hash_protected(paths)
         if protected[str(p5.STATE / "data/db.sqlite3")] != p5.DB_SHA:
@@ -381,7 +390,7 @@ def main() -> int:
                 "sha256": protected,
             }
             write_checkpoint(marker, checkpoint, create=True)
-            report.add("PENDING", "Reboot-required marker from P6 must be cleared or classified by a separately approved reboot; no reboot now")
+            report.add("PENDING", "Reboot is not authorized by prepare; review checkpoint summary before separately consenting")
             report.add("PENDING", "OCI serial console recovery access must be independently verified before reboot")
             report.add("NOT RUN", "No reboot, app/Worker/Caddy/DNS, Box, SMTP or timer mutation")
             return report.finish("PREPARED")
