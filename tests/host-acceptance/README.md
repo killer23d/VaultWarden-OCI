@@ -74,3 +74,23 @@ The script independently checks unchanged same-boot checkpoint plus security/dat
 Verify requires a different kernel boot ID, same original release/volume/SQLite/SOPS/Age/config markers and acceptance source checksums, unchanged stopped app/DNS/four timers, no HTTP listeners and **no retained Docker containers (including stopped restart-policy containers)**, active+enabled CrowdSec engine and INPUT-only host firewall bouncer, disabled+inactive Cloudflare Worker, and safe 27-ID doctor classification. No automatic firewall repair or service startup. Docker may lose its Cloudflare-only ingress rules on restart; if so, verify must return PENDING/HOLD with no public listeners, never a false production PASS. A current reboot-required marker also needs independent classification; it is not automatically proof of failure or success. A VERIFIED result proves only the stopped-host reboot baseline.
 
 **P8 and later remain separate:** independently establish an isolated dev hostname and OCI public ingress/NSG route before permitting current-invocation Worker Fail Open, live Caddy/Vaultwarden TLS and client checks, SMTP, isolated Box backup and naturally scheduled timers. No release upgrade/restore, DNS change or production cutover in P7.
+
+## Real P7 cold reboot result and P7R follow-up
+
+On 2026-11-03, the operator ran P7 from exact pinned candidate 87be10bc874182b7016b0990ea1afe4e06eb67f7 on original disposable vaultwarden-oci-6-vnic. **95 focused tests PASS**, prepare PREPARED/exit 0, explicit OCI-console-attested reboot, and real post-boot verify **HOLD/exit 0**. The kernel boot ID changed; original SQLite/SOPS/Age/volume/rc.12 files and systemd units remained intact, CrowdSec engine and host INPUT-only bouncer boot-started, Worker stayed disabled/inactive, and there were no app containers or HTTP listeners. The reboot-required marker cleared. Missing volatile/generated paths increased to 13 (expected under /run) with **zero unsafe paths**. Root-private verified summary: ~/vwoci-acceptance/p7-reboot-persistence-20261103T232232Z-34185/verify.summary.txt.
+
+The Cloudflare Docker DOCKER-USER HTTPS policy did **not** persist across reboot; do not represent that as PASS. The installed product deliberately keeps Caddy restart disabled and refreshes the Cloudflare filter before publishing a Docker Compose port on supported vwctl start. The actual stopped reboot therefore remains a safe HOLD; do **not** introduce an independent nftables/DOCKER-USER manager or start Caddy merely to force the doctor status to PASS.
+
+New P7R acceptance helper: production-postboot-origin-rearm-consent.py. To preserve the original P7 checkpoint hash, **fast-forward the ORIGINAL checkout in place**, not a new clone and not a manually edited script. The P7 checkpoint includes exact absolute hashes/paths for that checkout's P5/P6/P7 scripts. These original helper files must remain byte-for-byte unchanged. Confirm the updated candidate commit and clean git status before continuing.
+
+First call diagnostic-only (one sanitized summary; no firewall change):
+
+    sudo -n python3 -B -E tests/host-acceptance/production-postboot-origin-rearm-consent.py --diagnose-only
+
+If the diagnostic classifies the original reboot checkpoint, source/data hashes, missing ingress rules and the host as safe, a **separate, operator-reviewed authorization** can run:
+
+    sudo -n python3 -B -E tests/host-acceptance/production-postboot-origin-rearm-consent.py --rearm
+
+P7R rechecks all previously accepted immutable rc.12/disk/SQLite/SOPS/Worker/CrowdSec and stopped-app boundaries, then requires the exact typed P7R REARM vaultwarden-oci-6-vnic OCI CONSOLE READY phrase after the operator verifies an ACTIVE OCI serial-console connection. It creates a root-private exclusive **attempt marker before any mutation**, calls only the installed vwctl edge refresh once, and validates the five security foundation checks plus restored disk/SQLite, inactive Worker/app/DNS/four timers and no containers/listeners. If a mutation fails or is interrupted, **do not rerun** until independently investigated. No Cloudflare API record/Worker route, Box write, SMTP, Vaultwarden/Caddy start, reboot or timer action.
+
+A successful P7R REARMED is specifically **post-boot product-owned re-establishment**, never proof that the firewall survived the earlier reboot. Do not run original P7 verify again after rearm to retroactively misclassify the earlier HOLD. The next isolated live gate remains pending OCI public ingress/NSG, distinct hostname and off-host private recovery-kit custody.
