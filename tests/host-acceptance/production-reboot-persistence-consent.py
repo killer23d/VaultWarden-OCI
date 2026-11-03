@@ -298,6 +298,10 @@ def host_snapshot(report: Report, *, after_boot: bool) -> tuple[tuple[Path, ...]
         raise Blocked("unclassified host snapshot error during " + phase) from exc
 
 
+def check_consent(value: str) -> bool:
+    return value == CONSENT
+
+
 def run_reboot() -> bool:
     # This is the only deliberately mutating OS command in P7. Never retry it
     # automatically, and never run it from prepare or verify.
@@ -394,7 +398,7 @@ def main() -> int:
         print(CONSENT)
         stage = "typed operator reboot consent"
         answer = input("Authorization [CANCEL]: ")
-        if answer != CONSENT:
+        if not check_consent(answer):
             report.add("PENDING", "Operator cancelled; no reboot command executed")
             return report.finish("CANCELLED")
         checkpoint["phase"] = "reboot-requested"
