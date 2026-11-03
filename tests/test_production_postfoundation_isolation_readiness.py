@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -85,11 +87,14 @@ class PostfoundationIsolationTests(unittest.TestCase):
             report.add("GO", "unsupported status")
 
     def test_main_rejects_arguments_and_does_not_write(self):
+        private_stderr = io.StringIO()
         with mock.patch.object(p6.sys, "argv", [str(SCRIPT), "--start"]), \
              mock.patch.object(p6.os, "geteuid", return_value=0), \
              mock.patch.dict(p6.os.environ, {"SUDO_USER": "ubuntu"}), \
-             mock.patch.object(p6, "private_evidence", side_effect=AssertionError("must not write")):
+             mock.patch.object(p6, "private_evidence", side_effect=AssertionError("must not write")), \
+             contextlib.redirect_stderr(private_stderr):
             self.assertEqual(p6.main(), 2)
+        self.assertIn("BLOCKED: run without arguments", private_stderr.getvalue())
 
     def test_no_mutation_or_consent_functions_in_p6_ast(self):
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
