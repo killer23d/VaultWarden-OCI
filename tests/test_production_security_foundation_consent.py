@@ -159,6 +159,97 @@ class SecurityFoundationTests(unittest.TestCase):
         self.assertEqual(checks["storage.dedicated"], "PASS")
         self.assertNotIn("SECRET-NOT-FOR-OUTPUT", str(checks))
 
+    def test_stopped_runtime_inventory_missing_paths_is_pending_without_writes(self):
+        import stat
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = SimpleNamespace(
+                run=root / "run",
+                transient=root / "run/transient",
+                secret_root=root / "run/secrets",
+                lock=root / "run/lock",
+                data=root / "state/data",
+                vaultwarden_log_path=root / "state/vaultwarden/log",
+                vaultwarden_log_file=root / "state/vaultwarden/log/vaultwarden.log",
+                caddy_data=root / "state/caddy/data",
+                caddy_config=root / "state/caddy/config",
+                caddy_log_path=root / "state/caddy/log",
+                compose=root / "run/transient/compose.yaml",
+                caddyfile=root / "run/transient/Caddyfile",
+                dockerfile=root / "run/transient/Caddy.Dockerfile",
+            )
+            secret_paths = SimpleNamespace(
+                vaultwarden=root / "run/secrets/vaultwarden",
+                caddy=root / "run/secrets/caddy",
+                file=lambda key: (
+                    root / "run/secrets/caddy" if key == "cloudflare_api_token"
+                    else root / "run/secrets/vaultwarden"
+                ) / key,
+            )
+            paths.secret_paths = lambda: secret_paths
+            owner_uid = os.getuid()
+            owner_gid = os.getgid()
+            fake_runtime = SimpleNamespace(
+                Paths=lambda: paths,
+                VAULTWARDEN_UID=owner_uid, VAULTWARDEN_GID=owner_gid,
+                CADDY_UID=owner_uid, CADDY_GID=owner_gid,
+                _service_identity_error=lambda: None,
+                runtime_paths_check=lambda p: SimpleNamespace(status="FAIL"),
+            )
+            fake_secrets = SimpleNamespace(
+                REQUIRED=("cloudflare_api_token", "smtp_username", "smtp_password")
+            )
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "PENDING")
+            self.assertIn("missing_labels=run.root", summary)
+            self.assertFalse(paths.run.exists(), "read-only survey must not materialize runtime paths")
+
+            paths.data.mkdir(parents=True, mode=0o700)
+            paths.data.chmod(0o700)
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "PENDING")
+            self.assertNotIn("data.vaultwarden,", summary)
+
+            paths.data.chmod(0o755)
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "BLOCKED")
+            self.assertIn("data.vaultwarden=wrong-owner-or-mode", summary)
+
+            paths.data.rmdir()
+            paths.data.symlink_to(root / "nonexistent")
+            state, summary = p5.inspect_stopped_runtime_paths(fake_runtime, fake_secrets)
+            self.assertEqual(state, "BLOCKED")
+            self.assertIn("data.vaultwarden=symlink", summary)
+
+    def test_stopped_runtime_service_identity_collision_blocks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            p = SimpleNamespace(
+                run=root / "run", transient=root / "transient",
+                secret_root=root / "secret-root", lock=root / "lock",
+                data=root / "data", vaultwarden_log_path=root / "vaultwarden-logs",
+                vaultwarden_log_file=root / "vaultwarden-logs/log",
+                caddy_data=root / "caddy-data", caddy_config=root / "caddy-config",
+                caddy_log_path=root / "caddy-logs", compose=root / "compose",
+                caddyfile=root / "Caddyfile", dockerfile=root / "Dockerfile",
+            )
+            p.secret_paths = lambda: SimpleNamespace(
+                vaultwarden=root / "vw-secret", caddy=root / "caddy-secret",
+                file=lambda key: root / key,
+            )
+            fake = SimpleNamespace(
+                Paths=lambda: p, VAULTWARDEN_UID=123, VAULTWARDEN_GID=123,
+                CADDY_UID=124, CADDY_GID=124,
+                _service_identity_error=lambda: "private host-account details",
+                runtime_paths_check=lambda x: SimpleNamespace(status="FAIL"),
+            )
+            status, detail = p5.inspect_stopped_runtime_paths(
+                fake, SimpleNamespace(REQUIRED=("cloudflare_api_token",))
+            )
+            self.assertEqual(status, "BLOCKED")
+            self.assertIn("service-uid-or-gid=reserved-host-collision", detail)
+            self.assertNotIn("private host-account details", detail)
+
     def test_gate_requires_real_foundation_and_warns_on_partial_state(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp)
@@ -238,7 +329,8 @@ class SecurityFoundationTests(unittest.TestCase):
                 self.assertFalse(p5.exact_isolation(p1,p4,storage,expect_security_installed=False))
 
     def mocked_main(self, *, doctor: str, consent: str, post_valid: bool = True,
-                    diagnose_only: bool = False, storage_ok: bool = True) -> tuple[int,str,int]:
+                    diagnose_only: bool = False, storage_ok: bool = True,
+                    path_state: str = "PENDING") -> tuple[int,str,int]:
         from vaultwarden_oci import runtime, secrets
         class Tty(io.StringIO):
             def isatty(self):return True
@@ -273,12 +365,18 @@ class SecurityFoundationTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(p5,"evidence_root",return_value=evidence))
                 stack.enter_context(mock.patch.object(p5,"module",side_effect=[p1,p4]))
                 stack.enter_context(mock.patch.object(p5,"exact_isolation",return_value=True))
+                stack.enter_context(mock.patch.object(
+                    p5, "inspect_stopped_runtime_paths",
+                    return_value=(path_state, "product=FAIL missing_count=4 missing_labels=run.transient unsafe_count=0 unsafe_labels=none")
+                ))
                 stack.enter_context(mock.patch.object(runtime,"load_config",return_value=config))
                 stack.enter_context(mock.patch.object(secrets,"validate_encrypted",
                     return_value={"cloudflare_remediation_token":"secret-fixture"}))
                 stack.enter_context(mock.patch.object(p5,"diagnose_doctor",side_effect=[
-                    (doctor,{"storage.dedicated":"PASS" if storage_ok else "FAIL"},
-                     "observed_checks=27 expected_checks=26 unknown_id_count=1")] +
+                    (doctor,{
+                        "storage.dedicated":"PASS" if storage_ok else "FAIL",
+                        "runtime.paths":"PASS" if path_state == "PASS" else "FAIL",
+                     }, "observed_checks=27 expected_checks=26 unknown_id_count=1")] +
                     ([("valid",{**{name:"PASS" for name in p5.REQUIRED_DOCTOR},
                                "storage.dedicated":"PASS"},"not_needed")]
                      if post_valid else [])))
@@ -330,6 +428,23 @@ class SecurityFoundationTests(unittest.TestCase):
         self.assertEqual(code,2)
         self.assertEqual(calls,0)
         self.assertIn("dedicated-storage doctor check did not PASS",report)
+
+    def test_runtime_path_unsafe_blocks_before_consent_and_firewall_changes(self):
+        code,report,calls=self.mocked_main(
+            doctor="valid",consent=p5.CONSENT,path_state="BLOCKED"
+        )
+        self.assertEqual(code,2)
+        self.assertEqual(calls,0)
+        self.assertIn("Unsafe runtime path metadata detected",report)
+
+    def test_runtime_path_missing_generated_paths_preserves_diagnostic_hold(self):
+        code,report,calls=self.mocked_main(
+            doctor="valid",consent=p5.CONSENT,path_state="PENDING",diagnose_only=True
+        )
+        self.assertEqual(code,0)
+        self.assertEqual(calls,0)
+        self.assertIn("Stopped-host runtime.paths inventory",report)
+        self.assertIn("Doctor-only mode completed",report)
 
 
 if __name__=="__main__":
