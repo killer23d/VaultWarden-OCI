@@ -346,13 +346,29 @@ def inspect_stopped_runtime_paths(runtime, secrets) -> tuple[str, str]:
         return "BLOCKED", "product=invalid-status"
     if identity_collision:
         unsafe.append("service-uid-or-gid=reserved-host-collision")
+
+    # Rendered files and volatile secret files are valid as a completely
+    # absent group before startup, but never partially materialized.
+    def partial(group: set[str]) -> bool:
+        missing_in_group = sum(label in missing for label in group)
+        return 0 < missing_in_group < len(group)
+
+    render_group = {"render.compose", "render.Caddyfile", "render.Dockerfile"}
+    secret_group = {"secret.required." + key for key in secrets.REQUIRED}
+    if partial(render_group):
+        unsafe.append("rendered-files=partially-materialized")
+    if partial(secret_group):
+        unsafe.append("required-volatile-secrets=partially-materialized")
+
+    optional_missing = render_group | secret_group
+    unexpected_missing = set(missing) - optional_missing
     if unsafe:
         state = "BLOCKED"
-    elif actual == "PASS" and missing:
-        state = "BLOCKED"  # product and independent inventory disagree
-        unsafe.append("cross-check=product-pass-with-missing-path")
     elif actual == "PASS":
-        state = "PASS"
+        # The product explicitly accepts fully absent rendered/secret files.
+        state = "PASS" if not unexpected_missing else "BLOCKED"
+        if unexpected_missing:
+            unsafe.append("cross-check=product-pass-with-required-path-missing")
     elif missing:
         state = "PENDING"
     else:
