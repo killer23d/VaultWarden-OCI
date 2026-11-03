@@ -35,6 +35,16 @@ def consented(value: str) -> bool:
     return value == CONSENT
 
 
+def original_p7():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("p7r_original_p7", P7_FILE)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("original P7 acceptance helper missing")
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
 def new_private_evidence(base: Path) -> Path:
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = base / f"p7r-origin-rearm-{stamp}-{os.getpid()}"
@@ -168,13 +178,7 @@ def main() -> int:
         print("BLOCKED: interactive terminal required for P7R rearm", file=sys.stderr)
         return 2
     try:
-        p7 = __import__("importlib.util")  # The actual source helper is loaded below.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("p7r_original_p7", P7_FILE)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("original P7 acceptance helper missing")
-        p7 = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(p7)
+        p7 = original_p7()
         base = p7.safe_base()
         evidence = new_private_evidence(base)
     except Exception:
