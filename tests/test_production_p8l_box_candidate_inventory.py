@@ -372,6 +372,38 @@ class P8LCandidateTests(unittest.TestCase):
                 self.assertNotIn(AGE_PUBLIC, json.dumps(data))
                 self.assertNotIn(OLD_REMOTE, output.getvalue())
 
+    def test_failed_streams_consume_cumulative_network_budget(self):
+        """Two failed max-size attempts must suppress third Box read."""
+        large = gate.MAX_OBJECT_BYTES
+        items = [
+            {"Path": "recovery-20261029T223200Z-1d319a79.vwrec", "Size": large, "IsDir": False},
+            {"Path": "test/recovery-20261101T100000Z-xyz.vwrec", "Size": large, "IsDir": False},
+            {"Path": "test/recovery-20261103T100000Z-xyz.vwrec", "Size": large, "IsDir": False},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
+                 mock.patch.object(gate.os, "geteuid", return_value=0), \
+                 mock.patch.dict(gate.os.environ, {"SUDO_USER": "ubuntu"}), \
+                 mock.patch.object(gate.platform, "node", return_value=gate.HOST), \
+                 mock.patch.object(gate, "source_approved", return_value=True), \
+                 mock.patch.object(gate, "host_approved", return_value=True), \
+                 mock.patch.object(gate, "evidence_base", return_value=base), \
+                 mock.patch.object(gate, "previous_box_proof", return_value=p8k_record()), \
+                 mock.patch.object(gate, "original_public_pins", return_value=historical()), \
+                 mock.patch.object(gate, "local_isolation", return_value=11), \
+                 mock.patch.object(gate, "root_remote_configured", return_value=True), \
+                 mock.patch.object(gate, "exact_consent", return_value=True), \
+                 mock.patch.object(gate, "read_command", return_value=(0, json.dumps(items))), \
+                 mock.patch.object(gate, "hash_age_stream", side_effect=gate.Blocked("remote lost")) as stream:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(gate.main(), 0)
+                self.assertEqual(stream.call_count, 2)
+                record = json.loads(next(base.glob("p8l-box-source-*/candidates.private.json")).read_text())
+                self.assertEqual(sum(x["status"] == "STREAM_UNAVAILABLE" for x in record["records"]), 2)
+                self.assertEqual(sum(x["status"] == "NOT_READ_CUMULATIVE_SIZE_BOUND" for x in record["records"]), 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()
