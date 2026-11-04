@@ -240,9 +240,11 @@ def stopped_local() -> tuple[object, object]:
         raise Blocked("original release-integrity owner unavailable")
     p1 = importlib.util.module_from_spec(p1_spec)
     p1_spec.loader.exec_module(p1)
-    if not p1.release_integrity(SOURCE, INSTALLED)[0]:
-        raise Blocked("installed immutable rc.12 bytes no longer match original release")
-    if not p1.systemd_unit_integrity(INSTALLED)[0]:
+    content_ok, file_count = p1.release_integrity(SOURCE, INSTALLED)
+    if not content_ok or file_count != 52:
+        raise Blocked("installed 52 immutable rc.12 product file hashes/ownership changed")
+    units_ok, unit_count = p1.systemd_unit_integrity(INSTALLED)
+    if not units_ok or unit_count != 12:
         raise Blocked("12 installed systemd unit bytes/ownership differ")
     proof = storage.verify()
     storage.reject_boot_related(proof.source)
@@ -488,16 +490,26 @@ def postrestore(expected_sha: str, expected_recipient: str) -> tuple[bool, str]:
         valid, digest = sqlite_readonly(restored_db)
         if not valid or digest != expected_sha:
             return False, "restored SQLite integrity or source digest mismatch"
-        for name in ("vaultwarden-oci.target", "vaultwarden-oci.service",
-                     "vaultwarden-oci-health.timer", "vaultwarden-oci-backup.timer",
-                     "vaultwarden-oci-maintenance.timer", "vaultwarden-oci-update-check.timer",
-                     "vaultwarden-oci-dns.service"):
+        from vaultwarden_oci import install
+        if len(install.SYSTEMD_UNITS) != 12:
+            return False, "postrestore installed systemd registry changed"
+        for name in install.SYSTEMD_UNITS:
+            if name == "vaultwarden-oci-notify@.service":
+                continue
             code, raw = command(["/usr/bin/systemctl", "show", name,
                                  "--no-pager", "-p", "ActiveState", "-p", "UnitFileState"])
             state = dict(x.split("=", 1) for x in raw.splitlines() if "=" in x)
             if (code != 0 or state.get("ActiveState") != "inactive"
                     or state.get("UnitFileState") in ("enabled", "enabled-runtime")):
                 return False, "postrestore application/timers/DNS state unexpectedly active"
+        code, notifications = command([
+            "/usr/bin/systemctl", "list-units", "--all", "--no-legend",
+            "--no-pager", "--plain", "--full", "vaultwarden-oci-notify@*.service"])
+        if code != 0 or notifications.strip():
+            return False, "postrestore unexpected instantiated notification unit"
+        code, containers = command(["/usr/bin/docker", "ps", "--format", "{{.ID}}"], timeout=20)
+        if code != 0 or containers.strip():
+            return False, "postrestore Docker application container unexpectedly running"
         code, ports = command(["/usr/bin/ss", "-H", "-lnt"])
         if code != 0:
             return False, "postrestore listener inventory unavailable"
