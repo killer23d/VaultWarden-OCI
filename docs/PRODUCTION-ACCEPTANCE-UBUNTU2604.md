@@ -327,3 +327,8 @@ On a truly fresh and uninstalled host the read-only audit captures hardware/OS b
 Historical rc.11/24.04 evidence reported in the task brief is useful context, not new 26.04 host evidence. No source defect has yet been reproduced; no appliance code change is proposed.
 
 **Final classification (2026-10-31):** Source/feature acceptance for rc.12 = **PASS** (D1R and D2, with initial D1 interruption disclosed); the protected release branch code merge = **COMPLETE** (PR #373 and PR #374). Production deployment/cutover/rollback stage D = **NOT RUN**, so there is **no production cutover GO** until separate operator approval and operational checks. The accepted rc.11 appliance has not been silently upgraded.
+
+
+## P8A current stopped-host acceptance boundary (2026-11-04)
+
+The accepted P7 cold reboot and P7R stopped-host re-arm remain complete. A new review branch prepares P8A read-only isolation readiness on `vaultwarden-oci-6-vnic`; the real P8A result is **NOT RUN** and must not be inferred from tests or PR CI. Consult [P8 isolation acceptance and remaining live-test roadmap](P8-ISOLATION-ACCEPTANCE.md) for the first-start side-effect inventory, authoritative OCI/Cloudflare isolation prerequisites, original offline custody boundary and separate P8B authorization. Do not start the shared `bw.lazymocha.com` origin or write new backups to `bw-backup:bw-backup`. No DNS, Worker Route, SMTP, Box, timer, reboot, restore, update or cutover action is authorized.
