@@ -543,13 +543,17 @@ def main() -> int:
             if len(entries) != 9 or newer != 2:
                 report.add("PENDING", "Box inventory count/date differs from previous P8K; no automatic point selection")
             stage = "read-only bounded SHA and Age header survey"
-            total = 0
+            # Reserve each listed object's maximum stream size BEFORE launch,
+            # including failed/partial reads, so the cumulative 8 GiB limit
+            # covers every attempted remote stream, not only completed ones.
+            reserved_bytes = 0
             for rank, entry in enumerate(entries, 1):
                 listed_size = entry["size"]
-                if listed_size > MAX_BATCH_BYTES - total:
+                if listed_size > MAX_BATCH_BYTES - reserved_bytes:
                     report.add("PENDING", f"Candidate rank={rank} exceeds cumulative 8 GiB stream bound; NOT READ")
                     observations.append({**entry, "status": "NOT_READ_CUMULATIVE_SIZE_BOUND"})
                     continue
+                reserved_bytes += listed_size
                 remote = entry["remote"]
                 try:
                     sha, observed_bytes, age_header = hash_age_stream(remote, size_limit=listed_size)
@@ -557,7 +561,6 @@ def main() -> int:
                     report.add("PENDING", f"Candidate rank={rank} read-only Box SHA stream unavailable; NOT VERIFIED")
                     observations.append({**entry, "status": "STREAM_UNAVAILABLE"})
                     continue
-                total += observed_bytes
                 if observed_bytes != listed_size:
                     report.add("BLOCKED", f"Candidate rank={rank} metadata/stream SIZE MISMATCH; stop before restore")
                     observations.append({**entry, "status": "SIZE_MISMATCH", "sha256": sha, "streamed_bytes": observed_bytes})
