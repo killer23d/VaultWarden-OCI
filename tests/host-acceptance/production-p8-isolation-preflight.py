@@ -100,7 +100,7 @@ def source_checkout_ok(expected: str) -> bool:
     code, branch = git_readonly("branch", "--show-current")
     if code != 0 or branch != BRANCH:
         return False
-    code, dirty = git_readonly("status", "--porcelain=v1", "--untracked-files=all")
+    code, dirty = git_readonly("status", "--porcelain", "--untracked-files=all")
     return code == 0 and not dirty
 
 
