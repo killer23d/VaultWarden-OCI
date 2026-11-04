@@ -178,7 +178,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def imds_json(which: str, *, opener=None):
-    """Only fixed OCI link-local v2 instance/vnics; no proxy or redirect."""
+    """Only fixed OCI link-local metadata endpoints; no proxy or redirect."""
     if which not in {"instance", "vnics"}:
         raise ValueError("unsupported metadata endpoint")
     url = IMDS + "/" + which + "/"
