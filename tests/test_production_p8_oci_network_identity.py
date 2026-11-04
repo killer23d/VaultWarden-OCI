@@ -278,23 +278,26 @@ class NetworkIdentityTests(unittest.TestCase):
             failure = urllib.error.HTTPError(
                 "http://private/path", 429, "sensitive reason", {}, None
             )
-            with mock.patch.object(p8e.sys, "argv", ["p8e", "--expected-commit", "a" * 40]), \
-                 mock.patch.object(p8e.os, "geteuid", return_value=0), \
-                 mock.patch.dict(p8e.os.environ, {"SUDO_USER": "ubuntu"}), \
-                 mock.patch.object(p8e.platform, "node", return_value=p8e.HOST), \
-                 mock.patch.object(p8e.platform, "machine", return_value="aarch64"), \
-                 mock.patch.object(p8e, "reviewed_source", return_value=p7), \
-                 mock.patch.object(p8e, "exact_checkout", return_value=True), \
-                 mock.patch.object(p8e, "accepted_p8a_summary", return_value=True), \
-                 mock.patch.object(p8e, "metadata_json", side_effect=failure):
-                printed = io.StringIO()
-                with contextlib.redirect_stdout(printed):
-                    self.assertEqual(p8e.main(), 0)
-                self.assertIn("HTTP status=429", printed.getvalue())
-                self.assertNotIn("sensitive reason", printed.getvalue())
-                self.assertNotIn("private/path", printed.getvalue())
-                self.assertIn("PENDING", printed.getvalue())
-                self.assertIn("HOLD", printed.getvalue())
+            try:
+                with mock.patch.object(p8e.sys, "argv", ["p8e", "--expected-commit", "a" * 40]), \
+                     mock.patch.object(p8e.os, "geteuid", return_value=0), \
+                     mock.patch.dict(p8e.os.environ, {"SUDO_USER": "ubuntu"}), \
+                     mock.patch.object(p8e.platform, "node", return_value=p8e.HOST), \
+                     mock.patch.object(p8e.platform, "machine", return_value="aarch64"), \
+                     mock.patch.object(p8e, "reviewed_source", return_value=p7), \
+                     mock.patch.object(p8e, "exact_checkout", return_value=True), \
+                     mock.patch.object(p8e, "accepted_p8a_summary", return_value=True), \
+                     mock.patch.object(p8e, "metadata_json", side_effect=failure):
+                    printed = io.StringIO()
+                    with contextlib.redirect_stdout(printed):
+                        self.assertEqual(p8e.main(), 0)
+                    self.assertIn("HTTP status=429", printed.getvalue())
+                    self.assertNotIn("sensitive reason", printed.getvalue())
+                    self.assertNotIn("private/path", printed.getvalue())
+                    self.assertIn("PENDING", printed.getvalue())
+                    self.assertIn("HOLD", printed.getvalue())
+            finally:
+                failure.close()
 
     def test_invalid_invocation_never_queries_imds(self):
         with mock.patch.object(p8e.sys, "argv", ["p8e"]), \
