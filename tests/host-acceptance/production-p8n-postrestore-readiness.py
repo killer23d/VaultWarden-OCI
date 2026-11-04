@@ -41,7 +41,7 @@ REQUIRED = {"host.os", "host.architecture", "storage.dedicated", "secrets.custod
 SECURITY = {"edge.cloudflare.cidrs", "edge.cloudflare.iptables", "crowdsec.engine",
             "crowdsec.hub", "crowdsec.firewall", "crowdsec.cloudflare"}
 CRITICAL_PORTS = {80, 443, 2375, 2376}
-SHA40 = re.compile(r"[0-9a-f]{40}\\Z")
+SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class Blocked(Exception):
