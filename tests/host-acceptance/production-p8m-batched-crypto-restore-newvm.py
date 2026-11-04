@@ -361,7 +361,7 @@ def stream_tmpfs(remote: str, dest: Path, expected_sha: str) -> int:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise Blocked("Box ciphertext read exceeded timeout")
-                readable, _, _ = select.select([process.stdout], [], min(remaining, 90))
+                readable, _, _ = select.select([process.stdout], [], [], min(remaining, 90))
                 if not readable:
                     raise Blocked("Box ciphertext stream stalled")
                 block = os.read(process.stdout.fileno(), 1024 * 1024)
