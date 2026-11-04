@@ -74,12 +74,17 @@ class NetworkIdentityTests(unittest.TestCase):
         for name in ("different-host", "unexpected"):
             data = good_instance()
             data["displayName"] = name
-            with self.assertRaises(p8e.Blocked):
-                p8e.summarize_metadata(data, good_vnics())
+            self.assertFalse(p8e.guest_name_matches(data))
+            self.assertIn("VNICs=1", p8e.summarize_metadata(data, good_vnics())[0])
+        data = good_instance()
+        data["displayName"] = "another-label"
+        data["hostname"] = p8e.HOST + ".oraclevcn.com"
+        self.assertTrue(p8e.guest_name_matches(data))
         data = good_instance()
         data["shape"] = "VM.Standard.E5.Flex"
-        with self.assertRaises(p8e.Blocked):
+        with self.assertRaises(p8e.MetadataContractError) as ctx:
             p8e.summarize_metadata(data, good_vnics())
+        self.assertEqual(ctx.exception.category, "instance_shape_unexpected")
         for ip in ("not_an_ip", "8.8.8.8", "2001:db8::1", None):
             bad = good_vnics()
             bad[0]["privateIp"] = ip
@@ -110,17 +115,20 @@ class NetworkIdentityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             p8e.metadata_json("cloudflare", opener=opener)
         redirected = FakeOpener(good_instance(), url="https://attacker.example/path")
-        with self.assertRaises(p8e.Blocked):
+        with self.assertRaises(p8e.MetadataContractError) as ctx:
             p8e.metadata_json("instance", opener=redirected)
+        self.assertEqual(ctx.exception.category, "redirect_or_wrong_endpoint")
 
     def test_payload_size_and_json_fail_closed(self):
         response = FakeResponse(good_instance())
         response.data = b"{" + b"a" * (p8e.IMDS_MAX_BYTES + 1)
-        with self.assertRaises(p8e.Blocked):
+        with self.assertRaises(p8e.MetadataContractError) as ctx:
             p8e.metadata_json("instance", opener=SimpleNamespace(open=lambda *a, **k: response))
+        self.assertEqual(ctx.exception.category, "oversized_response")
         response.data = b"secrets-not-json"
-        with self.assertRaises(p8e.Blocked):
+        with self.assertRaises(p8e.MetadataContractError) as ctx:
             p8e.metadata_json("instance", opener=SimpleNamespace(open=lambda *a, **k: response))
+        self.assertEqual(ctx.exception.category, "invalid_json")
 
     def test_checkout_pin_and_dirty_refusal(self):
         sha = "a" * 40
@@ -173,6 +181,120 @@ class NetworkIdentityTests(unittest.TestCase):
             self.assertNotIn(term, source)
         self.assertIn("urllib.request.ProxyHandler({})", source)
         self.assertIn("NoRedirect()", source)
+
+
+    def test_metadata_schema_classification_does_not_leak_raw_values(self):
+        cases = [
+            ([], good_vnics(), "instance_not_object"),
+            (good_instance(), {}, "vnics_not_expected_array"),
+            ({**good_instance(), "id": "unsafe"}, good_vnics(), "instance_ocid_invalid"),
+            (good_instance(), [None], "vnic_not_object"),
+            (good_instance(), [{**good_vnics()[0], "vnicId": "bad"}], "vnic_ocid_invalid"),
+            (good_instance(), [{**good_vnics()[0], "privateIp": None}], "vnic_private_ipv4_malformed"),
+            (good_instance(), [{**good_vnics()[0], "privateIp": "1.1.1.1"}], "vnic_private_ipv4_unexpected"),
+            (good_instance(), [{**good_vnics()[0], "publicIp": "sensitive-invalid-ip"}], "vnic_public_ipv4_malformed"),
+            (good_instance(), good_vnics() * 2, "duplicate_vnic_ocid"),
+        ]
+        for instance, vnics, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(p8e.MetadataContractError) as raised:
+                    p8e.summarize_metadata(instance, vnics)
+                self.assertEqual(raised.exception.category, code)
+                self.assertNotIn("1.1.1.1", str(raised.exception))
+                self.assertNotIn("sensitive-invalid-ip", str(raised.exception))
+        with self.assertRaises(ValueError):
+            p8e.MetadataContractError("private_value_from_cloud")
+
+    def test_metadata_diagnostic_failure_exits_blocked_without_dumping_values(self):
+        class FakeHostReport:
+            def __init__(self, *args):
+                self.rows = [("PASS", "All five local origin/CrowdSec security doctor IDs and storage.dedicated PASS")]
+
+        with tempfile.TemporaryDirectory() as name:
+            p7 = SimpleNamespace(
+                safe_base=lambda: Path(name), Report=FakeHostReport,
+                host_snapshot=lambda *args, **kwargs: None,
+            )
+            bad_vnic = [{**good_vnics()[0], "vnicId": "secret-id-value"}]
+            with mock.patch.object(p8e.sys, "argv", ["p8e", "--expected-commit", "a" * 40]), \
+                 mock.patch.object(p8e.os, "geteuid", return_value=0), \
+                 mock.patch.dict(p8e.os.environ, {"SUDO_USER": "ubuntu"}), \
+                 mock.patch.object(p8e.platform, "node", return_value=p8e.HOST), \
+                 mock.patch.object(p8e.platform, "machine", return_value="aarch64"), \
+                 mock.patch.object(p8e, "reviewed_source", return_value=p7), \
+                 mock.patch.object(p8e, "exact_checkout", return_value=True), \
+                 mock.patch.object(p8e, "accepted_p8a_summary", return_value=True), \
+                 mock.patch.object(p8e, "metadata_json", side_effect=[good_instance(), bad_vnic]) as fetch:
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(p8e.main(), 2)
+                self.assertEqual(fetch.call_count, 2)
+                self.assertIn("category=vnic_ocid_invalid", printed.getvalue())
+                self.assertNotIn("secret-id-value", printed.getvalue())
+                self.assertNotIn("ocid1.instance.", printed.getvalue())
+                self.assertIn("BLOCKED", printed.getvalue())
+
+    def test_display_name_mismatch_is_pending_without_weakening_identity_proof(self):
+        class FakeHostReport:
+            def __init__(self, *args):
+                self.rows = [("PASS", "All five local origin/CrowdSec security doctor IDs and storage.dedicated PASS")]
+
+        with tempfile.TemporaryDirectory() as name:
+            p7 = SimpleNamespace(
+                safe_base=lambda: Path(name), Report=FakeHostReport,
+                host_snapshot=lambda *args, **kwargs: None,
+            )
+            inst = good_instance()
+            inst["displayName"] = "some-other-instance-label"
+            with mock.patch.object(p8e.sys, "argv", ["p8e", "--expected-commit", "a" * 40]), \
+                 mock.patch.object(p8e.os, "geteuid", return_value=0), \
+                 mock.patch.dict(p8e.os.environ, {"SUDO_USER": "ubuntu"}), \
+                 mock.patch.object(p8e.platform, "node", return_value=p8e.HOST), \
+                 mock.patch.object(p8e.platform, "machine", return_value="aarch64"), \
+                 mock.patch.object(p8e, "reviewed_source", return_value=p7), \
+                 mock.patch.object(p8e, "exact_checkout", return_value=True), \
+                 mock.patch.object(p8e, "accepted_p8a_summary", return_value=True), \
+                 mock.patch.object(p8e, "metadata_json", side_effect=[inst, good_vnics()]):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(p8e.main(), 0)
+                self.assertIn("display name/hostname differs", printed.getvalue())
+                self.assertIn("PENDING", printed.getvalue())
+                self.assertIn("HOLD", printed.getvalue())
+                self.assertNotIn("some-other-instance-label", printed.getvalue())
+
+    def test_metadata_http_errors_report_numeric_status_only(self):
+        import urllib.error
+
+        class FakeHostReport:
+            def __init__(self, *args):
+                self.rows = [("PASS", "All five local origin/CrowdSec security doctor IDs and storage.dedicated PASS")]
+
+        with tempfile.TemporaryDirectory() as name:
+            p7 = SimpleNamespace(
+                safe_base=lambda: Path(name), Report=FakeHostReport,
+                host_snapshot=lambda *args, **kwargs: None,
+            )
+            failure = urllib.error.HTTPError(
+                "http://private/path", 429, "sensitive reason", {}, None
+            )
+            with mock.patch.object(p8e.sys, "argv", ["p8e", "--expected-commit", "a" * 40]), \
+                 mock.patch.object(p8e.os, "geteuid", return_value=0), \
+                 mock.patch.dict(p8e.os.environ, {"SUDO_USER": "ubuntu"}), \
+                 mock.patch.object(p8e.platform, "node", return_value=p8e.HOST), \
+                 mock.patch.object(p8e.platform, "machine", return_value="aarch64"), \
+                 mock.patch.object(p8e, "reviewed_source", return_value=p7), \
+                 mock.patch.object(p8e, "exact_checkout", return_value=True), \
+                 mock.patch.object(p8e, "accepted_p8a_summary", return_value=True), \
+                 mock.patch.object(p8e, "metadata_json", side_effect=failure):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(p8e.main(), 0)
+                self.assertIn("HTTP status=429", printed.getvalue())
+                self.assertNotIn("sensitive reason", printed.getvalue())
+                self.assertNotIn("private/path", printed.getvalue())
+                self.assertIn("PENDING", printed.getvalue())
+                self.assertIn("HOLD", printed.getvalue())
 
     def test_invalid_invocation_never_queries_imds(self):
         with mock.patch.object(p8e.sys, "argv", ["p8e"]), \
