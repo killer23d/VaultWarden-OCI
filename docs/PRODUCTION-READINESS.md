@@ -233,3 +233,10 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## P8G — NEW VM disk ownership and OCI network evidence
+
+The **NEW** `vaultwarden-oci-7-vnic` passed P8F 118 tests and the real-host read-only P8F returned HOLD/exit 0 at 2026-11-04T20:48:39Z. One blank stable non-boot disk and no appliance/Docker/80/443 listener were found. The guest does not know the attached disk's OCI **volume OCID**, and its local listener inventory cannot prove effective NSG or subnet security-list rules.
+
+A new branch adds `tests/host-acceptance/production-p8g-storage-network-witness.py` for **read-only** disk/device alias and original A1/VNIC fingerprint verification on that VM only. The script captures actual paths and stable aliases into a **private local** operator-only file, and prints only a sanitized alias fingerprint and capacity. It never selects or formats a disk or changes cloud state. Inspect the private file **only on the guest** and match it to the OCI Console attachment. Verify the NEW subnet NSGs/security lists, IPv4/IPv6, TCP 80 denied, TCP 443 only current Cloudflare CIDRs, test DNS/Worker scope and serial-console access independently. See [P8G detailed runbook](P8G-DISK-NETWORK-WITNESS.md). Any later installation/restore requires separate P8H reviewed source and explicit consent; no current P8F or P8G HOLD is an install authorization.
