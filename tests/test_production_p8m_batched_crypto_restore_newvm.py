@@ -246,7 +246,7 @@ class P8MTests(unittest.TestCase):
             report.row("BLOCKED", "postrestore change detected")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(report.finish(), 2)
-            self.assertIn("possible", (Path(name) / "summary.txt").read_text())
+            self.assertIn("uncertain partial", (Path(name) / "summary.txt").read_text())
 
     def test_bad_invocation_rejected_before_host_or_private_evidence(self):
         with mock.patch.object(gate.sys, "argv", [
@@ -286,8 +286,7 @@ class P8MTests(unittest.TestCase):
                      side_effect=lambda *a, **kw: original_temp(dir=scratch, prefix="test-")), \
                  mock.patch.object(recovery_ux, "acquire_offline_identity",
                      return_value=contextlib.nullcontext(None)), \
-                 mock.patch.object(gate, "docker_ready") as docker, \
-                 contextlib.redirect_stdout(io.StringIO()):
+                 mock.patch.object(gate, "docker_ready") as docker:
                 self.assertEqual(gate.main(), 0)
                 docker.assert_not_called()
             self.assertFalse((root / gate.ATTEMPT).exists())
@@ -345,7 +344,8 @@ class P8MTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(gate, "private_dir", return_value=True))
                 stack.enter_context(mock.patch.object(gate, "stream_tmpfs", side_effect=fake_stage))
                 stack.enter_context(mock.patch.object(gate.sys, "stdin", TTY()))
-                stack.enter_context(mock.patch.object(gate.sys, "stdout", TTY()))
+                terminal = TTY()
+                stack.enter_context(mock.patch.object(gate.sys, "stdout", terminal))
                 stack.enter_context(mock.patch.object(gate.tempfile, "TemporaryDirectory",
                     side_effect=lambda *a, **kw: original_temp(dir=scratch, prefix="test-")))
                 stack.enter_context(mock.patch.object(recovery_ux, "acquire_offline_identity", side_effect=fake_choice))
@@ -357,8 +357,6 @@ class P8MTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(gate, "postrestore", return_value=(True, "mock recovered SQLite and stopped app")))
                 stack.enter_context(mock.patch.object(recovery, "restore_recovery", restored))
                 stack.enter_context(mock.patch.object(gate.Path, "lstat", autospec=True, side_effect=lstat))
-                stdout = io.StringIO()
-                stack.enter_context(contextlib.redirect_stdout(stdout))
                 rc = gate.main()
             self.assertEqual(rc, 0)
             self.assertEqual(restored.call_count, 1)
@@ -368,7 +366,7 @@ class P8MTests(unittest.TestCase):
             self.assertIn("RESTORED", summary)
             self.assertIn("start=False", summary)
             self.assertNotIn("AGE-SECRET-KEY", summary)
-            self.assertNotIn("ciphertext", stdout.getvalue().lower())
+            self.assertNotIn("AGE-SECRET-KEY", terminal.getvalue())
 
     def test_expected_crypto_without_docker_is_hold_not_restored(self):
         report = gate.Report(Path("/tmp/not-created"))
