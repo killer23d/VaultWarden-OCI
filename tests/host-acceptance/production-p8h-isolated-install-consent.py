@@ -47,7 +47,7 @@ ALIAS_FINGERPRINT = "b7cd04a730c8"
 EXPECTED_GIB = 50
 IMDS_ORIGIN = "http://169.254.169.254/opc/v2"
 SHA_RE = re.compile(r"[a-f0-9]{40}\Z")
-RECIPIENT_RE = re.compile(r"age1[023456789acdefghjklmnpqrstuvwxyz]{50,70}\Z")
+RECIPIENT_RE = re.compile(r"age1[0-9a-z]{50,70}\Z")
 DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}\Z")
 MAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\Z")
 BYID_PREFIX = ("scsi-", "wwn-", "nvme-", "virtio-")
@@ -401,6 +401,11 @@ def prepared_checkpoint(path: Path, base: Path, pin: str, proof: DiskWitness) ->
     }
     if not isinstance(data, dict) or data != expected:
         raise Blocked("prepared evidence identity, boot, disk, or source changed")
+    lines = private_bytes(path.parent / "summary.txt").decode("utf-8", "replace").splitlines()
+    if (not any(row.startswith("Gate P8H - isolated first-install PREPARE only") for row in lines)
+            or not any(row.startswith("HOLD       Prepared-only; no format/install/restore authorization") for row in lines)
+            or any(row.startswith("BLOCKED") for row in lines)):
+        raise Blocked("prepared read-only HOLD summary is missing or altered")
     if (path.parent / "install-attempted.json").exists() or (path.parent / "install-attempted.json").is_symlink():
         raise Blocked("P8H installation was already attempted; never automatically retry")
     return data
@@ -527,7 +532,13 @@ def installer_call(alias: str, domain: str, email: str, recipient: str,
             )
             log.flush()
             os.fsync(log.fileno())
-            return run.returncode == 0
+            if run.returncode != 0:
+                return False
+            if dry_run:
+                # Require explicit owner confirmation that it did not mutate.
+                message = logfile.read_text(encoding="utf-8", errors="replace")
+                return "dry run: no filesystem, package, config, secret, or systemd changes were made" in message
+            return True
         except (OSError, subprocess.TimeoutExpired):
             return False
 
