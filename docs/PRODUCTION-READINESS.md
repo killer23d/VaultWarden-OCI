@@ -233,3 +233,8 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## P8A current stopped-host acceptance boundary (2026-11-04)
+
+The accepted P7 cold reboot and P7R stopped-host re-arm remain complete. A new review branch prepares P8A read-only isolation readiness on `vaultwarden-oci-6-vnic`; the real P8A result is **NOT RUN** and must not be inferred from tests or PR CI. Consult [P8 isolation acceptance and remaining live-test roadmap](P8-ISOLATION-ACCEPTANCE.md) for the first-start side-effect inventory, authoritative OCI/Cloudflare isolation prerequisites, original offline custody boundary and separate P8B authorization. Do not start the shared `bw.lazymocha.com` origin or write new backups to `bw-backup:bw-backup`. No DNS, Worker Route, SMTP, Box, timer, reboot, restore, update or cutover action is authorized.
