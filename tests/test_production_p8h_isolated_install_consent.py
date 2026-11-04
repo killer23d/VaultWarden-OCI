@@ -440,6 +440,21 @@ class P8HTests(unittest.TestCase):
                 p8.write_exclusive(path, b'{"attempt":2}\n')
             self.assertEqual(path.read_bytes(), b'{"attempt":1}\n')
 
+    def test_prior_install_attempt_in_any_checkpoint_prevents_fresh_prepare(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name)
+            old = base / "p8h-prepare-20261104T211646Z-2520"
+            old.mkdir(mode=0o700)
+            with mock.patch.object(p8, "private_directory", return_value=True):
+                p8.reject_historical_install_attempts(base)
+                (old / "install-attempted.json").write_text('{"attempt":1}')
+                with self.assertRaises(p8.Blocked):
+                    p8.reject_historical_install_attempts(base)
+                (old / "install-attempted.json").unlink()
+                (old / "install-attempted.json").symlink_to("nonexistent")
+                with self.assertRaises(p8.Blocked):
+                    p8.reject_historical_install_attempts(base)
+
     def test_private_evidence_symlink_refused_before_read(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
