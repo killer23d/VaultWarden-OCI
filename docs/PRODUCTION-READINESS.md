@@ -233,3 +233,11 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+## P8J: original recovery-source pin and off-host custody survey
+
+Corrected full P8I-R on new disposable `vaultwarden-oci-7-vnic` passed **122 focused tests and READ-ONLY HOLD/exit 0**, re-confirming the installed/stopped rc.12, dedicated disk, protected SOPS/original public offline Age recipient, no HTTP listener/Docker container or pre-restore DB and disabled Box/retention. Original first P8I/P8I-D BLOCKED remain historical; no host repair was needed. The original restored VM remains unchanged; both hosts share the configured `bw.lazymocha.com` hostname.
+
+New P8J pre-transfer acceptance code, only for NEW `-7-vnic`, binds original P8I-R HOLD, independently hashes the new installed **public** Age recipient against the original-host acceptance pin and reads the historical Box ciphertext object/SHA reference as **literal source metadata only** (no Box API, no token refresh, no artifact transfer). It rechecks stopped services/80/443, disabled remote and retention, no preexisting ZIP/`.vwrec` in known staging folders and classifies swap/`/run` tmpfs. It writes only private new evidence, identifying the original pinned ciphertext as **unverified historical candidate** pending separate off-host readback. The real backup may have changed or have a newer point; no automatic selection or restoration is authorized.
+
+Product verification/restore uses **on-disk temporary decrypted payload**, not all-RAM staging. Plan protected scratch/cleanup/at-rest handling before future decryption or restore. Read [P8J source provenance and consent runbook](P8J-RECOVERY-PROVENANCE-PREFLIGHT.md). Any original ZIP/passphrase/private Age handling, Box readback, recovery, DNS/Worker/ACME, SMTP, Caddy first start or automatic timers requires a later separately reviewed gate and explicit authorization.
