@@ -98,7 +98,7 @@ class NetworkIdentityTests(unittest.TestCase):
         self.assertNotIn("198.51.100.4", line)
         self.assertNotIn("2001:db8", line)
 
-    def test_only_fixed_v2_metadata_paths_with_authorization_header(self):
+    def test_only_fixed_imds_metadata_paths_with_authorization_header(self):
         opener = FakeOpener(good_instance())
         data = p8e.metadata_json("instance", opener=opener)
         self.assertEqual(data["displayName"], p8e.HOST)
