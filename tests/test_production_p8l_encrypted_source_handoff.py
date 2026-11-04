@@ -157,6 +157,35 @@ class OffHostTests(unittest.TestCase):
                 prompt.assert_not_called()
                 cloud.assert_not_called()
 
+    def test_authorized_offhost_box_stream_writes_only_private_encrypted_bytes(self):
+        with tempfile.TemporaryDirectory() as name:
+            folder = Path(name) / "encrypted-handoff"
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, SAMPLE)
+            os.close(write_fd)
+            with os.fdopen(read_fd, "rb") as stream:
+                proc = SimpleNamespace(
+                    stdout=stream,
+                    poll=lambda: 0,
+                    wait=lambda timeout: 0,
+                )
+                with mock.patch.object(offhost.sys, "stdin", mock.Mock(isatty=lambda: True)), \
+                     mock.patch.object(offhost.sys, "stdout", mock.Mock(isatty=lambda: True)), \
+                     mock.patch("builtins.input", return_value=offhost.CONSENT), \
+                     mock.patch.object(offhost.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=b"bw-backup:\n",
+                     )), \
+                     mock.patch.object(offhost.subprocess, "Popen", return_value=proc) as remote, \
+                     mock.patch.object(offhost, "EXPECTED_SHA256", SAMPLE_SHA):
+                    actual, size = offhost.box_to_private_folder(folder)
+            self.assertEqual((actual, size), (SAMPLE_SHA, len(SAMPLE)))
+            final = folder / offhost.NAME
+            self.assertEqual(final.read_bytes(), SAMPLE)
+            self.assertEqual(stat.S_IMODE(final.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+            self.assertEqual(remote.call_args.args[0][:2], ["rclone", "cat"])
+            self.assertEqual(list(folder.iterdir()), [final])
+
     def test_offhost_script_contains_no_decrypt_restore_box_write(self):
         text = OFFHOST.read_text()
         for unsafe in ("rclone copyto", "rclone delete", "age --decrypt",
