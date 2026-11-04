@@ -192,7 +192,12 @@ def box_to_private_folder(directory: Path) -> tuple[str, int]:
             if total > MAX_CIPHERTEXT:
                 raise Blocked("encrypted ciphertext exceeds 4 GiB")
             digest.update(block)
-            os.write(fd, block)
+            view = memoryview(block)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise Blocked("encrypted local write did not complete")
+                view = view[written:]
         if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
             raise Blocked("Box read did not finish successfully")
         if total < 64 or not header.startswith(AGE_HEADER):
