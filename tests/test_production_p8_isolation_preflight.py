@@ -62,7 +62,7 @@ class IsolationPreflightTests(unittest.TestCase):
         good = [(0, pin), (0, p8.BRANCH), (0, "")]
         with mock.patch.object(p8, "git_readonly", side_effect=good):
             self.assertTrue(p8.source_checkout_ok(pin))
-        with mock.patch.object(p8, "git_readonly", side_effect=[(0, pin), (0, "v2")]):
+        with mock.patch.object(p8, "git_readonly", side_effect=[(0, pin), (0, "main")]):
             self.assertFalse(p8.source_checkout_ok(pin))
         with mock.patch.object(p8, "git_readonly", side_effect=[(0, pin), (0, p8.BRANCH), (0, " M file")]):
             self.assertFalse(p8.source_checkout_ok(pin))
