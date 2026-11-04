@@ -437,6 +437,7 @@ class Report:
         self.restored = False
         self.postverified = False
         self.crypto_verified = False
+        self.restoration_requested = False
         self.source = ""
 
     def row(self, status: str, line: str) -> None:
@@ -451,7 +452,7 @@ class Report:
             state, code = "BLOCKED", 2
         elif self.restore_invoked and self.restored and self.postverified:
             state, code = "RESTORED", 0
-        elif self.crypto_verified:
+        elif self.crypto_verified and not self.restoration_requested:
             state, code = "VERIFIED", 0
         else:
             state, code = "HOLD", 0
@@ -535,6 +536,7 @@ def main() -> int:
         print("BLOCKED: root-private acceptance evidence unavailable")
         return 2
     report = Report(folder)
+    report.restoration_requested = restore
     stage = "original P8L-R accepted evidence"
     saved_signals = {s: signal.getsignal(s) for s in
                      (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
