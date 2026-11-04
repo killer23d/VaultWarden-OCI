@@ -68,12 +68,24 @@ def fp(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
+def root_rclone_env() -> dict[str, str]:
+    """Use only root's existing configured remote, never sudo caller overrides."""
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("RCLONE_")
+    }
+    environment["HOME"] = "/root"
+    environment["XDG_CONFIG_HOME"] = "/root/.config"
+    return environment
+
+
 def run(args: list[str], timeout: int = 15) -> tuple[int | None, str]:
     try:
         result = subprocess.run(
             args, cwd="/", stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=timeout, check=False,
+            env=root_rclone_env() if args and args[0] == "rclone" else None,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
@@ -223,8 +235,10 @@ def original_source_pin() -> dict[str, str]:
             if key in result or not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
                 raise Blocked("original historical pin changed or duplicated")
             result[key] = node.value.value
+    relative = result.get("HISTORICAL_REMOTE", "").removeprefix(BOX_PARENT + "/")
     if (set(result) != names or result["HOST"] != "vaultwarden-oci-6-vnic" or
             not REMOTE_RE.fullmatch(result["HISTORICAL_REMOTE"]) or
+            any(part in ("", ".", "..") for part in relative.split("/")) or
             not SHA64_RE.fullmatch(result["HISTORICAL_SHA256"]) or
             not SHA64_RE.fullmatch(result["OFFLINE_RECIPIENT_SHA256"])):
         raise Blocked("original external recovery pin unsafe")
@@ -351,6 +365,7 @@ def bounded_ciphertext_digest(args: list[str], *, seconds: int = 600,
     process = subprocess.Popen(
         args, cwd="/", stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=root_rclone_env(),
     )
     digest = hashlib.sha256()
     total = 0
