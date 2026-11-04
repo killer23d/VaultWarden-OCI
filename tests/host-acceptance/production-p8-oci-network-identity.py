@@ -72,7 +72,10 @@ def exact_checkout(expected: str) -> bool:
 def accepted_p8a_summary(base: Path) -> bool:
     """Validate a specific recorded local acceptance; never follow a symlink."""
     directory = base / P8A_EVIDENCE
-    info = directory.lstat()
+    try:
+        info = directory.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
             or stat.S_IMODE(info.st_mode) != 0o700):
         return False
