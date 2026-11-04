@@ -406,6 +406,34 @@ class P8HTests(unittest.TestCase):
         self.assertIn('"--dry-run"', content)
         self.assertIn("install-attempted.json", content)
 
+
+    def test_exclusive_attempt_marker_is_private_and_nonretryable(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "install-attempted.json"
+            p8.write_exclusive(path, b'{"attempt":1}\n')
+            self.assertEqual(path.read_bytes(), b'{"attempt":1}\n')
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            with self.assertRaises(FileExistsError):
+                p8.write_exclusive(path, b'{"attempt":2}\n')
+            self.assertEqual(path.read_bytes(), b'{"attempt":1}\n')
+
+    def test_private_evidence_symlink_refused_before_read(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            target = root / "original"
+            target.write_text("sensitive")
+            link = root / "redirect"
+            link.symlink_to(target)
+            with self.assertRaises(OSError):
+                p8.private_bytes(link)
+
+    def test_clean_host_rejects_already_existing_appliance_before_systemd(self):
+        with mock.patch.object(p8.Path, "exists", return_value=True), \
+             mock.patch.object(p8, "execute") as subprocess_stub:
+            with self.assertRaises(p8.Blocked):
+                p8.clean_host()
+            subprocess_stub.assert_not_called()
+
     def test_main_bad_invocation_refuses_before_host(self):
         with mock.patch.object(p8.sys, "argv", [
             "p8h", "--expected-commit", "a" * 40, "prepare",
