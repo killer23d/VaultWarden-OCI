@@ -1,6 +1,6 @@
 # P8G — read-only disk attachment and effective-network witness
 
-**Actual P8G: NOT RUN.** This PR changes only acceptance scripts/tests/docs. It does not perform OCI Console provisioning, disk formatting, installation, restore, Cloudflare/DNS/Worker/SMTP/Box operations, service startup, or production cutover. The original restored `vaultwarden-oci-6-vnic` and all accepted P7–P8E evidence remain unchanged.
+**P8G accepted as READ-ONLY HOLD/exit 0** on 2026-11-04 after **117 focused tests PASS**, on the new `vaultwarden-oci-7-vnic` from exact reviewed source `a98a58d02160ac01e9e9ce7bc8ba683a33929915`. No local integrity/disk continuity blockers were observed; **attached OCI volume ownership, effective new-VNIC ingress and test-only Cloudflare authority remain PENDING**. This PR changes only acceptance scripts/tests/docs and cannot authorize OCI provisioning, disk formatting, installation, restore, Cloudflare/DNS/Worker/SMTP/Box operations, service startup or production cutover. The original restored `vaultwarden-oci-6-vnic` and all accepted P7–P8E evidence remain unchanged.
 
 ## Accepted starting evidence: NEW disposable host
 
@@ -60,3 +60,15 @@ A **HOLD/exit 0** from P8G proves only these *local* conditions and leaves all p
 Prepare a separate new P8H reviewed **consent-gated install/restore** source branch. Before the *first* destructive operation, bind the exact approved by-id disk, OCI volume ownership, current boot lineage, expected release, original offline public Age recipient and unmodified test-only hostname. The install stage should require explicit disk-format wording and independently verify a backup/rollback and serial-console safety plan. A later separate live-first-start gate must prove product-owned Cloudflare ingress rules **before Docker publishes Caddy 443**, and must not affect shared DNS/Worker, production Box prefixes or real SMTP recipients without separate approvals.
 
 P8F is accepted; P8G real-host, formatting/install, rc.12 live operation and production cutover remain **NOT RUN**.
+
+
+## Actual P8G new-host results — accepted 2026-11-04 UTC
+
+The operator ran the **exact P8G review commit** `a98a58d02160ac01e9e9ce7bc8ba683a33929915` on `ubuntu@vaultwarden-oci-7-vnic`. **117 focused tests OK**. The real-host script returned **HOLD/exit 0**, writing a new root-private summary at `~/vwoci-acceptance/p8g-disk-network-witness-20261104T205546Z-2275/summary.txt`, plus a separate **PRIVATE** `disk-details.txt`. Do not paste or share that private details file.
+
+- **PASS:** original P8F HOLD evidence and reviewed instance/VNIC fingerprints unchanged; no appliance, Docker state, local TCP 80/443 listeners or guest identity drift; one still-unsigned, unmounted whole non-root disk, capacity **50 GiB**, **2** stable aliases, sanitized first-alias fingerprint `b7cd04a730c8`.
+- **PENDING:** user has **not yet supplied** the independent **NEW host** OCI Console mapping between that private by-id alias and the attached volume (OCID and size), whether the new disk is disposable/non-shared, effective TCP 80 denied and TCP 443 Cloudflare-only under **all** NSGs plus subnet security lists, actual new public IPv4/IPv6 routing, test-only DNS-01 authority, and functioning serial-console access. Prior answers about the **original** restored VM are not new-host proof. The recovery kit/key/passphrase and isolated Box test prefix remain operator attestations and were not exercised.
+- **NOT RUN:** cloud control-plane/API changes, formatting, mount, installation, restore, Caddy, DNS-01, Worker, SMTP, Box, timers, reboot or cutover.
+
+**Acceptance decision:** P8G read-only identity and disk-state survey **ACCEPTED**, but destructive installation authorization remains **BLOCKED on independent provider-side evidence**. The next decision is not another uncontrolled guest repair: inspect `disk-details.txt` **locally** and attest the OCI attachment, network and DNS controls. Only after affirmative review should a distinct source branch prepare a *separately consented* installation/recovery gate with explicit approved by-id device and independent pre-mutation guards.
+
