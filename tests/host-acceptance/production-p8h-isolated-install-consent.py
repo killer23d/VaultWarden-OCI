@@ -156,6 +156,27 @@ def accepted_base() -> Path:
     return base
 
 
+def reject_historical_install_attempts(base: Path) -> None:
+    """A new checkpoint must never bypass an attempted P8H install.
+
+    Prior checkpoints are historical, even when created at a different SHA.
+    Inspect only names inside the root-private acceptance evidence directory.
+    An exclusive marker or symlink is a permanent stop for automatic retries.
+    """
+    try:
+        folders = list(base.glob("p8h-prepare-*"))
+    except OSError as exc:
+        raise Blocked("historical install attempts cannot be inventoried") from exc
+    if len(folders) > 128:
+        raise Blocked("unreasonable previous preparation directory count")
+    for folder in folders:
+        if folder.is_symlink() or not private_directory(folder):
+            raise Blocked("previous preparation directory is unsafe")
+        marker = folder / "install-attempted.json"
+        if marker.exists() or marker.is_symlink():
+            raise Blocked("historical P8H installation attempt exists; no new prepare or retry")
+
+
 def private_directory(path: Path) -> bool:
     try:
         st = path.lstat()
@@ -427,6 +448,7 @@ def validation_state(pin: str) -> tuple[Path, DiskWitness]:
     if not host_ok() or not exact_source(pin):
         raise Blocked("host/version/clean reviewed source differs")
     base = accepted_base()
+    reject_historical_install_attempts(base)
     proof = read_p8g_proof(base)
     clean_host()
     sys.path.insert(0, str(SOURCE))
