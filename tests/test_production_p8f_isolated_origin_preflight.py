@@ -115,7 +115,7 @@ class P8FTests(unittest.TestCase):
             with self.assertRaises(gate.Blocked):
                 gate.listening_80_443()
 
-    def test_imds_v2_only_bounded_fixed_link_local_get(self):
+    def test_imds_second_version_bounded_link_local_get(self):
         url = gate.IMDS + "/instance/"
         opener = FakeOpener(FakeResponse(instance(), url))
         result = gate.imds_json("instance", opener=opener)
