@@ -233,3 +233,9 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+## P8I read-only BLOCKED and P8I-D diagnostic scope
+
+The first exact-P8I-checkout real-host attempt on NEW `vaultwarden-oci-7-vnic` completed **117 unit tests PASS**, then **BLOCKED/exit 2** in `stopped app and restore absence`. All previously reported P8H install checkpoint/attempt/success evidence, complete release/systemd file hashes, ext4 volume ownership and SOPS/Age locked config checks PASS; the failing subcondition was intentionally withheld. Original `service_state()` requires 12 units loaded+inactive+not enabled/linked, zero TCP 80/443 listeners, empty/absent Docker container metadata and absent pre-restore SQLite. Which failed remains **UNKNOWN**, and this is **not** a fresh install or live-start authorization.
+
+New `production-p8i-stopped-state-diagnostic.py` provides a strictly read-only, root-private diagnostic tied to the accepted original P8I BLOCKED evidence. It prints **allowlisted unit names/states and counts only**, so source/host expectation mismatch can be distinguished from genuine active services, retained containers or unexpected data. No destructive operations, service changes or network/cloud APIs. P8I remains BLOCKED until investigated and separately reviewed. [P8I-D runbook](P8I-STOPPED-STATE-DIAGNOSTIC.md). **P8H first install is already successful and MUST NOT be rerun.**
