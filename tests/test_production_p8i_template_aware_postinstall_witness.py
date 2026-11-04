@@ -227,7 +227,11 @@ class P8IPostInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as location, \
              mock.patch.object(gate, "private_dir", return_value=True), \
              mock.patch.object(gate, "private_read", side_effect=fake_read):
-            gate.classified_prior_blocker(Path(location))
+            # Simulate direct script execution: sys.path[0] points to the
+            # acceptance script directory, NOT the repository root.
+            with mock.patch.object(gate.sys, "path", [str(SOURCE.parent)]) as sys_path:
+                gate.classified_prior_blocker(Path(location))
+                self.assertEqual(sys_path[0], str(gate.SOURCE))
             rows["diag"] += "\nBLOCKED    Systemd vaultwarden-oci.service query=ok load=loaded active=active unitfile=disabled"
             with self.assertRaises(gate.Blocked):
                 gate.classified_prior_blocker(Path(location))
