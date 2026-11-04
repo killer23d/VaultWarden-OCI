@@ -428,6 +428,14 @@ def private_write(path: Path, content: bytes) -> None:
         file.write(content)
         file.flush()
         os.fsync(file.fileno())
+    # Durably publish the EXCLUSIVE one-shot attempt marker, including its
+    # parent directory entry, before invoking the product restore owner.
+    dirfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY |
+                    getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
 
 
 class Report:
