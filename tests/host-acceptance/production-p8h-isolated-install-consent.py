@@ -376,12 +376,19 @@ def same_oci(instance: object, vnics: object) -> bool:
 
 
 def write_exclusive(path: Path, data: bytes) -> None:
+    """Create once and fsync both file AND directory before any mutation."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                  getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "wb") as stream:
         stream.write(data)
         stream.flush()
         os.fsync(stream.fileno())
+    dirfd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                    getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
 
 
 def prepared_checkpoint(path: Path, base: Path, pin: str, proof: DiskWitness) -> dict[str, object]:
