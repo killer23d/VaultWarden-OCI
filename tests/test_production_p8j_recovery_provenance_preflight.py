@@ -146,8 +146,19 @@ offline_recovery_recipient = "{RECIPIENT}"
             state.mkdir()
             home.mkdir()
             backups = state / "backups"
+            # CI runs without read permissions on /root.  Simulate the
+            # root-only known kit directory as ABSENT; the real gate is
+            # sudo-root and must fail closed if that path is unreadable.
+            original_exists = gate.Path.exists
+            original_is_symlink = gate.Path.is_symlink
+            def safe_exists(path):
+                return False if str(path) == "/root/vaultwarden-recovery" else original_exists(path)
+            def safe_symlink(path):
+                return False if str(path) == "/root/vaultwarden-recovery" else original_is_symlink(path)
             with mock.patch.object(gate, "STATE", state), \
-                 mock.patch.object(gate.pwd, "getpwnam", return_value=SimpleNamespace(pw_dir=str(home))):
+                 mock.patch.object(gate.pwd, "getpwnam", return_value=SimpleNamespace(pw_dir=str(home))), \
+                 mock.patch.object(gate.Path, "exists", autospec=True, side_effect=safe_exists), \
+                 mock.patch.object(gate.Path, "is_symlink", autospec=True, side_effect=safe_symlink):
                 gate.no_local_recovery_payloads()
                 backups.mkdir()
                 gate.no_local_recovery_payloads()
