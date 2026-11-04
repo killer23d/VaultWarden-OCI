@@ -233,3 +233,10 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## P8F fresh isolated-origin preparation (new disposable VM only)
+
+After original-host P8A 115 tests PASS/READ-ONLY HOLD and corrected P8E 120 tests PASS/READ-ONLY HOLD, the operator attested public IPv4, no assigned IPv6, and Internet-wide TCP 80/443 permits on the **original** disposable VM. A distinct test hostname, no overlapping Worker wildcard Route, offline recovery custody and separate Box prefix are available, but the shared original origin cannot be declared isolated. Do **not** start the original recovered appliance.
+
+The next branch adds an explicit new-host-only, read-only `production-p8f-isolated-origin-preflight.py` with a reviewed exact Git pin. It refuses to run on the original VM, inventories native Ubuntu 26.04 ARM64 A1 Flex, vacant appliance state, local ports, root-related disk exclusion, blank candidate storage and OCI IMDSv2 identity fingerprints. It creates a root-private sanitized summary; it cannot format/install/restore/modify OCI/Cloudflare/Box. Its success remains **HOLD**, not a production/startup approval. Read [P8F isolated-origin preparation](P8F-ISOLATED-ORIGIN.md) for exact OCI VNIC/subnet/NSG/security-list and Cloudflare isolation prerequisites.
