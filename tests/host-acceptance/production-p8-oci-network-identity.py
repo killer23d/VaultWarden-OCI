@@ -40,6 +40,25 @@ class Blocked(RuntimeError):
     """Local security or source integrity failure; never print raw exceptions."""
 
 
+class MetadataContractError(Blocked):
+    """Report ONLY a fixed, non-sensitive OCI metadata validation category."""
+
+    CATEGORIES = frozenset({
+        "redirect_or_wrong_endpoint", "oversized_response", "invalid_json",
+        "instance_not_object", "vnics_not_expected_array",
+        "instance_ocid_invalid", "instance_shape_unexpected",
+        "vnic_not_object", "vnic_ocid_invalid",
+        "vnic_private_ipv4_malformed", "vnic_private_ipv4_unexpected",
+        "vnic_public_ipv4_malformed", "duplicate_vnic_ocid",
+    })
+
+    def __init__(self, category: str) -> None:
+        if category not in self.CATEGORIES:
+            raise ValueError("invalid metadata diagnostic category")
+        self.category = category
+        super().__init__("OCI metadata contract: " + category)
+
+
 def reviewed_source(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -125,65 +144,85 @@ def metadata_json(kind: str, *, opener=None):
         )
     with opener.open(request, timeout=6) as response:
         if response.geturl() != target:
-            raise Blocked("IMDSv2 redirected off the approved link-local endpoint")
+            raise MetadataContractError("redirect_or_wrong_endpoint")
         size = response.read(IMDS_MAX_BYTES + 1)
         if len(size) > IMDS_MAX_BYTES:
-            raise Blocked("IMDSv2 returned an oversized payload")
+            raise MetadataContractError("oversized_response")
     try:
         return json.loads(size)
     except (UnicodeDecodeError, ValueError) as exc:
-        raise Blocked("IMDSv2 returned invalid JSON") from exc
+        raise MetadataContractError("invalid_json") from exc
+
+
+def guest_name_matches(instance: object) -> bool:
+    """Display names are user-editable; a mismatch requires Console review."""
+    if not isinstance(instance, dict):
+        return False
+    display = instance.get("displayName")
+    hostname = instance.get("hostname")
+    return (display == HOST or
+            isinstance(hostname, str) and hostname.split(".", 1)[0] == HOST)
 
 
 def summarize_metadata(instance: object, vnics: object) -> tuple[str, str]:
-    """Validate Oracle instance/VNIC identities; disclose fingerprints only."""
-    if not isinstance(instance, dict) or not isinstance(vnics, list) or not 1 <= len(vnics) <= 16:
-        raise Blocked("IMDSv2 instance/VNIC payload structure is unexpected")
-    name, instance_id = instance.get("displayName"), instance.get("id")
-    shape = instance.get("shape")
-    if (name != HOST or not isinstance(instance_id, str)
-            or not instance_id.startswith("ocid1.instance.")
-            or shape != "VM.Standard.A1.Flex"):
-        raise Blocked("IMDSv2 instance identity differs from reviewed OCI A1 Flex host")
+    """Validate Oracle identity shape; disclose fingerprints and counts only.
+
+    OCI displayName and hostname are separate independently editable fields.
+    A name mismatch is NOT proof of wrong instance; flag it for external
+    OCI Console review without weakening the OCID/shape/VNIC checks.
+    """
+    if not isinstance(instance, dict):
+        raise MetadataContractError("instance_not_object")
+    if not isinstance(vnics, list) or not 1 <= len(vnics) <= 16:
+        raise MetadataContractError("vnics_not_expected_array")
+    instance_id = instance.get("id")
+    if (not isinstance(instance_id, str) or not instance_id.isascii()
+            or not instance_id.startswith("ocid1.instance.")):
+        raise MetadataContractError("instance_ocid_invalid")
+    if instance.get("shape") != "VM.Standard.A1.Flex":
+        raise MetadataContractError("instance_shape_unexpected")
     hashes: list[str] = []
     ipv6_subnet_count = 0
     ipv4_public_indications = 0
-    for index, vnic in enumerate(vnics):
+    for vnic in vnics:
         if not isinstance(vnic, dict):
-            raise Blocked("IMDSv2 VNIC metadata is not structured")
+            raise MetadataContractError("vnic_not_object")
         vnic_id, private = vnic.get("vnicId"), vnic.get("privateIp")
-        if not isinstance(vnic_id, str) or not vnic_id.startswith("ocid1.vnic."):
-            raise Blocked("IMDSv2 VNIC has an invalid identity")
+        if (not isinstance(vnic_id, str) or not vnic_id.isascii()
+                or not vnic_id.startswith("ocid1.vnic.")):
+            raise MetadataContractError("vnic_ocid_invalid")
         try:
             ip = ipaddress.ip_address(private)
         except (ValueError, TypeError) as exc:
-            raise Blocked("IMDSv2 VNIC private address is malformed") from exc
+            raise MetadataContractError("vnic_private_ipv4_malformed") from exc
         if ip.version != 4 or not ip.is_private:
-            raise Blocked("IMDSv2 VNIC private address is not RFC1918-like")
+            raise MetadataContractError("vnic_private_ipv4_unexpected")
         hashes.append(fingerprint(vnic_id))
-        v6 = vnic.get("ipv6SubnetCidrBlocks")
-        if (isinstance(v6, list) and bool(v6)
+        if (isinstance(vnic.get("ipv6SubnetCidrBlocks"), list)
+                and bool(vnic["ipv6SubnetCidrBlocks"])
                 or isinstance(vnic.get("ipv6SubnetCidrBlock"), str)
-                and vnic["ipv6SubnetCidrBlock"] not in {"", "null"}):
+                and vnic["ipv6SubnetCidrBlock"] not in {"", "null"}
+                or isinstance(vnic.get("ipv6Addresses"), list)
+                and bool(vnic["ipv6Addresses"])):
             ipv6_subnet_count += 1
-        # The IMDS VNIC schema may omit publicIp even when the instance has
-        # one. Its absence must NEVER be interpreted as no public exposure.
+        # An absent publicIp key is never evidence of absent public ingress.
         public = vnic.get("publicIp")
         if isinstance(public, str) and public:
             try:
-                if ipaddress.ip_address(public).version == 4:
-                    ipv4_public_indications += 1
+                parsed = ipaddress.ip_address(public)
             except ValueError as exc:
-                raise Blocked("IMDSv2 public IPv4 indication is malformed") from exc
+                raise MetadataContractError("vnic_public_ipv4_malformed") from exc
+            if parsed.version != 4:
+                raise MetadataContractError("vnic_public_ipv4_malformed")
+            ipv4_public_indications += 1
     if len(set(hashes)) != len(hashes):
-        raise Blocked("IMDSv2 VNIC identities are duplicated")
+        raise MetadataContractError("duplicate_vnic_ocid")
     return (
         f"Oracle IMDSv2 instance fingerprint={fingerprint(instance_id)} "
         f"shape=A1.Flex VNICs={len(vnics)}",
         f"VNIC fingerprints={','.join(hashes)} IPv6_subnet_indications={ipv6_subnet_count} "
         f"reported_public_IPv4={ipv4_public_indications} (absence is NOT proof of no public IP)",
     )
-
 
 class Report:
     def __init__(self, output: Path) -> None:
@@ -260,13 +299,26 @@ def main() -> int:
         stage = "read-only Oracle instance metadata"
         try:
             instance = metadata_json("instance")
+            stage = "read-only Oracle VNIC metadata"
             vnics = metadata_json("vnics")
+        except urllib.error.HTTPError as exc:
+            # Codes are safe numeric metadata; never include response body,
+            # error reason, URL, headers or request/instance contents.
+            code = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else 0
+            report.add("PENDING", "OCI IMDSv2 request unavailable at " + stage
+                       + "; HTTP status=" + str(code or "unknown"))
         except (OSError, urllib.error.URLError, TimeoutError):
-            report.add("PENDING", "Oracle IMDSv2 metadata temporarily unavailable; no fallback to IMDSv1 or cloud control-plane mutation")
+            report.add("PENDING", "OCI IMDSv2 request unavailable at " + stage
+                       + "; no legacy IMDS fallback or retry")
         else:
+            stage = "read-only Oracle instance/VNIC validation"
             line1, line2 = summarize_metadata(instance, vnics)
             report.add("PASS", line1)
             report.add("PASS", line2)
+            if guest_name_matches(instance):
+                report.add("PASS", "OCI metadata display name or hostname agrees with known guest name; Console authority still PENDING")
+            else:
+                report.add("PENDING", "OCI metadata display name/hostname differs from Linux short hostname; require Console mapping, not automatic rejection")
         report.add("PENDING", "IMDS does NOT expose effective OCI subnet security lists, NSG ingress rules, public IPv6 or edge routing; verify in OCI Console/API")
         report.add("PENDING", "Configured shared hostname is not a test endpoint; select an independently isolated disposable target before any live start")
         report.add("PENDING", "Cloudflare DNS, proxied test route, Worker Route overlap/Fail Open and DNS-01 authority require independent read-only Cloudflare proof")
@@ -276,6 +328,9 @@ def main() -> int:
         return report.finish()
     except KeyboardInterrupt:
         report.add("BLOCKED", "Interrupted during " + stage + "; no operation retried")
+    except MetadataContractError as exc:
+        report.add("BLOCKED", "Oracle IMDSv2 validation failed at " + stage
+                   + "; category=" + exc.category + " (no raw metadata disclosed)")
     except Exception:
         report.add("BLOCKED", "Read-only verification failure during " + stage + "; details withheld")
     return report.finish()
