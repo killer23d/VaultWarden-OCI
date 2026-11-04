@@ -226,7 +226,8 @@ class TargetTests(unittest.TestCase):
             sample = inbox / Path(BOX_OBJECT).name
             sample.write_bytes(SAMPLE)
             sample.chmod(0o600)
-            with mock.patch.object(target, "INBOX", inbox):
+            with mock.patch.object(target, "INBOX", inbox), \
+                 mock.patch.object(target.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())):
                 n, sha = target.encrypted_file(sample, sample.name, SAMPLE_SHA)
                 self.assertEqual((n, sha), (len(SAMPLE), SAMPLE_SHA))
                 with self.assertRaises(target.Blocked):
@@ -275,6 +276,7 @@ class TargetTests(unittest.TestCase):
                  mock.patch.object(target, "pinned_checkout", return_value=True), \
                  mock.patch.object(target, "supported_guest", return_value=True), \
                  mock.patch.object(target, "BASE_PATH", base), \
+                 mock.patch.object(target.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())), \
                  mock.patch.object(target, "private_folder", return_value=True), \
                  mock.patch.object(target, "original_constants", return_value=original()), \
                  mock.patch.object(target, "previous_p8k"), \
@@ -300,6 +302,7 @@ class TargetTests(unittest.TestCase):
                  mock.patch.object(target, "pinned_checkout", return_value=True), \
                  mock.patch.object(target, "supported_guest", return_value=True), \
                  mock.patch.object(target, "BASE_PATH", base), \
+                 mock.patch.object(target.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())), \
                  mock.patch.object(target, "private_folder", return_value=True), \
                  mock.patch.object(target, "original_constants", return_value=original()), \
                  mock.patch.object(target, "previous_p8k"), \
@@ -323,6 +326,7 @@ class TargetTests(unittest.TestCase):
                  mock.patch.object(target, "pinned_checkout", return_value=True), \
                  mock.patch.object(target, "supported_guest", return_value=True), \
                  mock.patch.object(target, "BASE_PATH", base), \
+                 mock.patch.object(target.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())), \
                  mock.patch.object(target, "private_folder", return_value=True), \
                  mock.patch.object(target, "original_constants", return_value=original()), \
                  mock.patch.object(target, "previous_p8k", side_effect=target.Blocked()), \
