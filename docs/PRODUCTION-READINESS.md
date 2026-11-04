@@ -233,3 +233,10 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## Corrected P8H: accepted read-only preparation and locked test-host install
+
+Original P8H `prepare` on NEW `vaultwarden-oci-7-vnic` passed **124 tests** and READ-ONLY HOLD/exit 0 at commit `32565eb6e168b6fc109889a8657cc1668052abfd`. Original `install` was **CANCELLED/exit 2** before formatting or creating any attempt marker because the operator entered an HTTPS URL for a prompt expecting a bare hostname; moreover, original source prohibited `bw.lazymocha.com`. The chosen ACME contact `bw@lazymocha.com` is valid. No product installation or restore was run.
+
+The operator has since explicitly allowed `bw.lazymocha.com` and `bw@lazymocha.com` **for a local installed-but-stopped test appliance**. The corrected acceptance branch `audit/rc12-p8h-testhostname-install-consent`, from the unchanged release baseline, binds that exact hostname/email to the supported installer. No new URL prompt is used; a fresh typed format-consent phrase includes the hostname and `INSTALL ONLY`. Its read-only `prepare` must be run at a new exact commit; the historical P8H checkpoint cannot be reused across changed source. The domain also appears on the original stopped restored VM, so **shared hostname does not prove isolated public origin**. Live Caddy, Cloudflare DNS/DNS-01, Worker, SMTP, remote Box and recovery remain separately consented future gates. See [corrected P8H runbook](P8H-ISOLATED-INSTALL-CONSENT.md). Never run destructive tests on the original `-6-vnic`.
