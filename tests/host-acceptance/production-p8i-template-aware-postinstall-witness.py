@@ -270,6 +270,10 @@ def classified_prior_blocker(base: Path) -> None:
     if (not all(any(row.startswith(item) for row in first) for item in first_markers)
             or not all(any(row.startswith(item) for row in diag) for item in diag_markers)):
         raise Blocked("original P8I blocker or P8I-D diagnostic evidence differs")
+    # Direct file-path execution sets sys.path[0] to tests/host-acceptance, not
+    # the checkout root. Bind imports to the already exact-Git-pinned source.
+    if str(SOURCE) not in sys.path:
+        sys.path.insert(0, str(SOURCE))
     from vaultwarden_oci import install
     usual = [unit for unit in install.SYSTEMD_UNITS if unit != NOTIFY_TEMPLATE]
     if len(usual) != 11 or len(install.SYSTEMD_UNITS) != 12:
