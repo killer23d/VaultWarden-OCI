@@ -171,7 +171,7 @@ class P8LCandidateTests(unittest.TestCase):
         self.assertFalse(gate.valid_relative_path("nested/../../recovery-20261103T000000Z-abc.vwrec"))
         self.assertFalse(gate.valid_relative_path("nested\\recovery-20261103T000000Z-abc.vwrec"))
 
-    def test_stream_ciphertext_age_v1_hash_without_disk(self):
+    def test_stream_ciphertext_age_envelope_hash_without_disk(self):
         payload = OLD_BYTES
         rd, wr = os.pipe()
         os.write(wr, payload)
