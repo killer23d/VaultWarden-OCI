@@ -70,7 +70,7 @@ If --artifact is specified, it must point **exactly** to:
 /home/ubuntu/vwoci-encrypted-inbox/recovery-20261029T223200Z-1d319a79.vwrec
 ~~~
 
-The path must reside in a 0700 private inbox, be a single-link regular 0600 file owned by ubuntu/root, have the Age-v1 ciphertext header and be within the 4 GiB bound; a full SHA-256 is compared with the original accepted digest. The script never decrypts or changes the encrypted source. WITHOUT --artifact, the local checks can still return HOLD but the actual ciphertext integrity remains PENDING.
+The path must reside in a 0700 private inbox, be a single-link regular 0600 file owned by ubuntu/root, have the supported age-encryption ciphertext header and be within the 4 GiB bound; a full SHA-256 is compared with the original accepted digest. The script never decrypts or changes the encrypted source. WITHOUT --artifact, the local checks can still return HOLD but the actual ciphertext integrity remains PENDING.
 
 Output: a new root-private sanitized summary and a **separate private** ciphertext metadata file; paste ONLY the sanitized status and P8L_EXIT, never the private JSON. A mismatch, unexpected staging, active service, changed recipient/disk or unsafe source returns **BLOCKED/exit 2**; no automatic remediation.
 
