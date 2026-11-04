@@ -382,6 +382,47 @@ class P8LCandidateTests(unittest.TestCase):
                 self.assertNotIn(AGE_PUBLIC, json.dumps(data))
                 self.assertNotIn(OLD_REMOTE, output.getvalue())
 
+    def test_untrusted_bad_ciphertext_does_not_mask_independent_historical_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            def fake_read(args, timeout=20, cap=gate.MAX_LIST_BYTES):
+                if "lsjson" in args:
+                    return 0, json.dumps(inventory())
+                self.fail("unexpected Box operation")
+            def fake_stream(remote, size_limit, seconds=600):
+                if remote == OLD_REMOTE:
+                    return OLD_SHA, len(OLD_BYTES), True
+                if "new-host/" in remote:
+                    return "a" * 64, size_limit, False
+                if "different-host/" in remote:
+                    return "b" * 64, size_limit - 1, True
+                return "c" * 64, size_limit, True
+            with mock.patch.object(gate.sys, "argv", [
+                     "p8l", "--expected-commit", PIN, "--read-only-box",
+                 ]), mock.patch.object(gate.os, "geteuid", return_value=0), \
+                 mock.patch.dict(gate.os.environ, {"SUDO_USER": "ubuntu"}), \
+                 mock.patch.object(gate.platform, "node", return_value=gate.HOST), \
+                 mock.patch.object(gate, "source_approved", return_value=True), \
+                 mock.patch.object(gate, "host_approved", return_value=True), \
+                 mock.patch.object(gate, "evidence_base", return_value=base), \
+                 mock.patch.object(gate, "previous_box_proof", return_value=p8k_record()), \
+                 mock.patch.object(gate, "original_public_pins", return_value=historical()), \
+                 mock.patch.object(gate, "local_isolation", return_value=11), \
+                 mock.patch.object(gate, "root_remote_configured", return_value=True), \
+                 mock.patch.object(gate, "read_command", side_effect=fake_read), \
+                 mock.patch.object(gate, "hash_age_stream", side_effect=fake_stream):
+                result = io.StringIO()
+                with contextlib.redirect_stdout(result):
+                    self.assertEqual(gate.main(), 0)
+                self.assertIn("PIN_MATCH", result.getvalue())
+                self.assertIn("untrusted fixture quarantined", result.getvalue())
+                record = json.loads(next(base.glob("p8l-box-source-*/candidates.private.json")).read_text())
+                statuses = [item["status"] for item in record["records"]]
+                self.assertEqual(statuses.count("PIN_MATCH"), 1)
+                self.assertEqual(statuses.count("AGE_HEADER_MISMATCH"), 1)
+                self.assertEqual(statuses.count("SIZE_MISMATCH"), 1)
+                self.assertEqual(statuses.count("NEW_OBSERVATION_ONLY"), 1)
+
     def test_failed_streams_consume_cumulative_network_budget(self):
         """Two failed max-size attempts must suppress third Box read."""
         large = gate.MAX_OBJECT_BYTES
