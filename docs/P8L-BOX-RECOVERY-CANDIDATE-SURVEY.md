@@ -1,0 +1,43 @@
+# P8L — batched VM-only Box encrypted recovery candidate survey
+
+**SOURCE-ONLY CANDIDATE; real-host P8L NOT RUN.** New acceptance branch from the unchanged release-branch baseline. All commands execute as `ubuntu` with passwordless `sudo -n` **ON the NEW disposable** `vaultwarden-oci-7-vnic`. The operator's workstation cannot download or process files; nothing needs to run there except pasting this one-shot SSH command and collecting a sanitized summary.
+
+## Accepted preceding evidence (2026-11-04 UTC)
+
+- The FIRST, separately typed P8H install completed successfully on NEW `-7-vnic`, formatting the previously witnessed disposable 50 GiB data disk exactly once. The rc.12 application remains installed and stopped. **Never retry install/format.**
+- Corrected full P8I-R verified original P8H one-shot checkpoint, 52 immutable rc.12 product files, 12 unit bytes, dedicated ext4 dual markers, original offline PUBLIC Age recipient and SOPS encrypted custody, inactive/unenabled services/notification template, zero HTTP 80/443 listeners/Docker container metadata/pre-restore SQLite. **122 focused tests PASS, READ-ONLY HOLD/exit 0.** The original first P8I and P8I-D BLOCKED reports remain accurate historical evidence about the acceptance script's bare notification template query.
+- P8J offline recovery provenance source PRE-TRANSFER confirmed the original public Age recipient matches the original restored-host acceptance pin and historical Box ciphertext object SHA-256 reference. **118 focused tests PASS, HOLD/exit 0.** No Box read or restore during P8J.
+- P8K first local acceptance **121 focused tests PASS, HOLD/exit 0**; Box remote unavailable for root at that time. Operator configured a **new root-owned** `bw-backup:` rclone Box OAuth remote *on NEW `-7-vnic`* (no original restored VM credentials copied). The second P8K run reused reviewed commit `e446677fc2c846aa0ac4fb734f7b03729cefad4d`, required freshly typed `P8K READ ORIGINAL BOX CIPHERTEXT ONLY`, and returned **P8K_BOX_EXIT=0 / READ-ONLY HOLD**. All local safety checks passed, 46 GiB dedicated volume free, /run tmpfs, swap absent. Recursive Box read-only inventory found **9 encrypted `.vwrec` objects**, with **2 newer by filename timestamp** than the historical reference, and independently checked original ciphertext **SHA-256 MATCH on 358,680 streamed bytes**, with nothing saved/decrypted.
+- Accepted original private P8K Box evidence: `/home/ubuntu/vwoci-acceptance/p8k-batched-recovery-20261104T225128Z-4717/summary.txt` and **PRIVATE** `candidate.private.json`. Neither original nor newer backup payload has been decrypted/restored. Both original `-6-vnic` and NEW `-7-vnic` stopped configurations use `bw.lazymocha.com`.
+
+## One-turn P8L gate
+
+`tests/host-acceptance/production-p8l-box-candidate-inventory.py` requires a **clean exact-Git-pinned branch**, Ubuntu 26.04 ARM64 with Python 3.14 and the correct NEW VM identity, prior root-private P8K Box SHA **PASS** and original historical reference metadata.
+
+It independently performs the following **in one run**:
+
+1. Require the prior P8K successful **actual** Box readback (not the initial remote-unavailable P8K HOLD). Verify the accepted summary and private readback metadata correspond to the **same** original-host pinned historical ciphertext SHA-256, object and offline **PUBLIC** Age recipient.
+2. Revalidate installed rc.12/dedicated non-root ext4, locked `bw.lazymocha.com` and `bw@lazymocha.com`, original PUBLIC Age recipient, disabled backup remote/retention zero, all eleven concrete systemd units inactive/unenabled, root-owned static notification template uninstantiated, no HTTP80/443 listener, Docker container metadata, pre-restore SQLite, swap or unapproved staged artifact. Require /run tmpfs and at least 5 GiB free.
+3. Confirm root's `/root/.config/rclone/rclone.conf` is a root-owned regular file with mode 0600, and root's **existing** `bw-backup:` remote is listed. Never copy original VM's credentials or print tokens.
+4. **Fresh exact typed consent REQUIRED** before contacting Box:
+   ```text
+   P8L READ BOX ENCRYPTED RECOVERY CANDIDATES ONLY
+   ```
+5. Only after approval, recursively **read** `bw-backup:bw-backup` encrypted-object metadata. Require safe relative paths (no traversal), no duplicates, nonzero bounded sizes and a still-present exact historically pinned object. Cap at **12** recovery objects for this batch. Classify file **name timestamps** and whether each candidate resides in the same remote directory as the historically pinned reference. This does **not** prove source VM, backup creation time, database consistency or latest legitimate production snapshot.
+6. Stream each listed encrypted `.vwrec` object from Box through SHA-256, **without writing ciphertext to disk**, decryption or ZIP/PRIVATE Age access. Check exact bytes against the Box metadata size, and an `age-encryption.org/v1` header (the same superficial format check the product performs before decryption). **Max 4 GiB per object, 8 GiB cumulative, 10 minutes per object**. The original historical object's SHA MUST match the original independent accepted hash or BLOCK. Any unexpected header/size or unsafe object BLOCKS. If a remote object cannot be streamed, mark that candidate PENDING and do NOT call it verified.
+7. Print sanitized per-candidate rank, filename-date, same-parent status, byte count, 12-hex object path fingerprint and 12-hex ciphertext SHA fingerprint, with explicit **PIN_MATCH** (historical independent pin) or **NEW_OBSERVATION_ONLY** (new hash, **not independent trusted integrity proof**). Save actual object paths/full SHA-256 only in NEW root-private `~/vwoci-acceptance/p8l-box-source-*/candidates.private.json` (NEVER PASTE). Save independently displayed safe `summary.txt` alongside it. Existing P8H–P8K reports remain unchanged.
+
+## Security scope and interpretation
+
+- **READ-ONLY BOX** does not mean zero local side effects: rclone Box OAuth can refresh the LOCAL root token. It does not upload, move, delete, list-with-write, prune or change any Box backup. No file is downloaded and saved to the NEW VM; all ciphertext is streamed through RAM into SHA-256 and discarded. No file processing is required on the operator's computer.
+- **NO** offline PRIVATE Age key, AES-256 kit ZIP or passphrase is accessed. Age-v1 header does **not** authenticate source, confirm matching decryption keys, validate encrypted manifest, prove SQLite integrity or select the correct restore point. New hashes are observations from today's Box bytes, not independent historical pins.
+- A newer filename does **not** automatically imply the correct or latest source data; the Box folder may contain acceptance artifacts from other disposable VMs. Different directory from the historically pinned object remains a provenance warning. No automatic newest-object selection.
+- **HOLD/exit 0** indicates local/remote read-only checks have completed without a safety failure; PENDING applies to unstreamed candidates, verified provenance of newer points, exact restorable manifest and original off-host private identity. **BLOCKED/exit 2** means stop and investigate read-only—never retry setup/format, import private credentials to bypass a check, decrypt, restore or start app.
+- Decrypt/verify/restore temporarily stages `decrypted.tar` and application payload under **on-disk dedicated ext4 backups**, not all-RAM, even though sensitive offline Age identity may be staged in protected /run. Any real restore needs its own explicit agreement for encrypted scratch/plaintext-at-rest risk, cleanup, rollback, secret/config/remote Box imports and first-start isolation.
+- Both original stopped `vaultwarden-oci-6-vnic` and NEW `vaultwarden-oci-7-vnic` configure `bw.lazymocha.com`: no DNS, Cloudflare Worker, ACME, public traffic, email, Box backups/timers or live Caddy/Vaultwarden start is authorized.
+
+## Following larger recovery gate
+
+Once P8L returns acceptable read-only evidence, propose a distinct batched **kit/identity custody and restore-consent preparation**. The user has an encrypted recovery kit off-host but cannot process files on their computer. The product supports secure interactive paste of the offline private Age identity through the SSH TTY into a protected transient /run workspace, or an explicit locally staged encrypted ZIP, but neither is authorized by P8L. A private key/ZIP passphrase must never be pasted in chat, GitHub issues, PRs, shell command history, env vars, args or public output. A later approved gate should identify an acceptable VM-only secure handoff method and enforce cleanup without exposing private data.
+
+**P8L real-host NOT RUN; no restore, private key handoff, live startup, Box writes, or production GO.**
