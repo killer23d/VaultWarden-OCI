@@ -388,7 +388,7 @@ def bounded_objects(data: str, original: dict[str, str]) -> tuple[list[dict[str,
 
 
 def hash_age_stream(remote: str, *, size_limit: int, seconds: int = 600) -> tuple[str, int, bool]:
-    """SHA256 and Age-v1 HEADER test over stdout pipe; no local ciphertext file."""
+    """SHA256 and Age envelope version one HEADER test over stdout pipe; no local ciphertext file."""
     if (not remote.startswith(BOX_PARENT + "/")
             or not valid_relative_path(remote.removeprefix(BOX_PARENT + "/"))
             or not 64 <= size_limit <= MAX_OBJECT_BYTES or seconds < 1):
@@ -572,7 +572,7 @@ def main() -> int:
                     break
                 independently_pinned = remote == original["HISTORICAL_REMOTE"]
                 status = "PIN_MATCH" if independently_pinned else "NEW_OBSERVATION_ONLY"
-                report.add("PASS", f"Candidate rank={rank} name_date={entry['name_date']} same_parent={entry['same_parent_as_historical']} ciphertext_bytes={observed_bytes} Age-v1=yes path_fp={entry['path_fingerprint']} sha_fp={sha[:12]} scope={status}")
+                report.add("PASS", f"Candidate rank={rank} name_date={entry['name_date']} same_parent={entry['same_parent_as_historical']} ciphertext_bytes={observed_bytes} Age envelope version one=yes path_fp={entry['path_fingerprint']} sha_fp={sha[:12]} scope={status}")
                 observations.append({**entry, "status": status, "sha256": sha, "streamed_bytes": observed_bytes})
             verified = sum(item.get("status") in ("PIN_MATCH", "NEW_OBSERVATION_ONLY") for item in observations)
             report.add("PASS" if verified == len(entries) else "PENDING", f"Encrypted recovery object streams age-header and SHA reviewed={verified}/{len(entries)}, without files on disk")
