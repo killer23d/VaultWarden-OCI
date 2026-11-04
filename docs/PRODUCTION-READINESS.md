@@ -233,3 +233,10 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## P8H: isolated disposable installation consent boundary
+
+The operator's P8G OCI Console review of the **new** `vaultwarden-oci-7-vnic` confirmed a disposable non-shared disk matched to the locally private by-id report; no external TCP 80, only Cloudflare CIDRs for 443, no public IPv6, verified serial-console recovery, separate test DNS-01 authority and unused test Box prefix, and original off-host Age/recovery kit custody. These **independent operator attestations** establish prerequisites to prepare a consented format/install gate; they are not machine-verifiable control-plane proof or a typed destructive consent. P8G had 117 focused tests PASS and READ-ONLY HOLD/exit 0.
+
+New P8H candidate runs a root-private read-only `prepare` as the first one-shot from an exact pinned PR SHA. It rechecks the P8G fingerprinted one-blank-disk identity, new A1/VNIC, OS/source, prior evidence and no app/HTTP listeners; it saves a checkpoint tied to the current boot and returns **HOLD** with **NO** formatting/install. The **later, separate** interactive `install` command can be authorized only after viewing the prepared result. It demands exact alias selection, separate test-only hostname, ACME email, the ORIGINAL public Age recipient, a successful non-mutating supported installer dry run and the exact typed P8H format phrase, with an exclusive attempt marker. An interrupted install is not automatically retryable. The still-stopped, not-yet-restored rc.12 install does not qualify as live production. Read [P8H runbook](P8H-ISOLATED-INSTALL-CONSENT.md); original `-6-vnic` state remains preserved.
