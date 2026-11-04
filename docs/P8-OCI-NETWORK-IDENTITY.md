@@ -4,6 +4,14 @@
 
 The follow-up P8E source correction (same review branch, new exact commit) reports only allowlisted **metadata schema/identity categories and endpoint phases**, without raw values. Oracle separately documents instance `displayName` and `hostname`; a difference from the Linux guest name must now be **PENDING for authoritative Console mapping**, not automatically a hard local integrity failure. Malformed OCID/VNIC/IP, unexpected A1 shape, oversized/redirected response, and other actual metadata-contract defects still BLOCK. A metadata HTTP or transport outage remains PENDING with only a safe numeric status/phase, never a fallback to IMDSv1. **This correction has not yet been exercised on the real host; do not retroactively relabel the initial BLOCKED.**
 
+## Actual corrective P8E acceptance — 2026-11-04 UTC
+
+The operator ran the exact reviewed candidate `af1907a0faae118950f173300a5b9aaa4158701b` on the original disposable `vaultwarden-oci-6-vnic`. **120 focused acceptance tests passed**; the real-host read-only P8E returned **HOLD, exit 0**, as intended. P8A HOLD evidence and original P7/P7R source/state were unchanged; installed rc.12/storage/SQLite/SOPS, doctor, CrowdSec engine and host INPUT firewall, disabled Cloudflare Worker, inactive Vaultwarden/Caddy/DNS/four timers remained valid. OCI link-local IMDSv2 returned a structurally valid VM.Standard.A1.Flex instance with one VNIC and a matching instance display name/hostname. The sanitized instance fingerprint was `33e9dc43ee5f` and VNIC fingerprint `c29f9e2daf58`; **reported_public_IPv4=0 and IPv6_subnet_indications=0 do not certify absence of Internet exposure.** Root-private operator summary: `~/vwoci-acceptance/p8e-network-identity-20261104T200549Z-7493/summary.txt`.
+
+The Python test transcript also emitted one `ResourceWarning` for a synthetic HTTPError 429 fixture; all 120 tests passed. A separate **test-only** cleanup change closes that fixture explicitly. It does not alter the production runtime, acceptance host or historical evidence and does not require repeating the original P8E acceptance.
+
+**Classification:** Original initial P8E BLOCKED is retained as historical diagnostic; corrected real-host P8E **ACCEPTED READ-ONLY HOLD/exit 0**. External NSGs/subnet security lists, effective ingress and IPv4/IPv6 routing, Cloudflare proxied DNS/Worker Route isolation, offline kit custody and separate Box prefix remain PENDING. No live-start consent, cloud changes or production GO.
+
 ## What this gate provides
 
 `tests/host-acceptance/production-p8-oci-network-identity.py` runs on the **same original host**, `vaultwarden-oci-6-vnic`, and only under `sudo -n` from the `ubuntu` login.
