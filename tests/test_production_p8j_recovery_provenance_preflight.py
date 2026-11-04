@@ -172,8 +172,7 @@ offline_recovery_recipient = "{RECIPIENT}"
             return 0, ""
         def is_symlink(self_path):
             return self_path == gate.CURRENT
-        with mock.patch.object(gate.CURRENT, "is_symlink", return_value=True), \
-             mock.patch.object(gate.CURRENT, "resolve", return_value=gate.INSTALLED), \
+        with mock.patch.object(gate.Path, "resolve", return_value=gate.INSTALLED), \
              mock.patch.object(gate, "command", side_effect=safe_output), \
              mock.patch.object(gate.Path, "exists", return_value=False), \
              mock.patch.object(gate.Path, "is_symlink", autospec=True, side_effect=is_symlink):
