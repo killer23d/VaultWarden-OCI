@@ -155,21 +155,41 @@ class P8LCandidateTests(unittest.TestCase):
         self.assertTrue(next(x for x in entries if x["remote"] == OLD_REMOTE)["same_parent_as_historical"])
         self.assertEqual(len(entries[0]["path_fingerprint"]), 12)
 
-    def test_source_inventory_rejects_traversal_duplicates_and_unsafe_metadata(self):
+    def test_box_survey_quarantines_unrelated_defective_fixtures_and_blocks_historical(self):
         good = inventory()
-        for bad in (
-            good + [good[0]],
-            good + [{"Path": "../recovery-20261103T000000Z-evil.vwrec", "Size": 120, "IsDir": False}],
-            good + [{"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": 120, "IsDir": True}],
-            good + [{"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": -1, "IsDir": False}],
-            good + [{"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": True, "IsDir": False}],
-            good * 4,
-            good[1:],
-        ):
-            with self.subTest(size=len(bad)), self.assertRaises(gate.Blocked):
-                gate.bounded_objects(json.dumps(bad), historical())
+        invalids = [
+            ("unsafe_path", {"Path": "../recovery-20261103T000000Z-evil.vwrec", "Size": 120, "IsDir": False}),
+            ("not_file", {"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": 120, "IsDir": True}),
+            ("missing_size", {"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": None, "IsDir": False}),
+            ("undersized", {"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": 24, "IsDir": False}),
+            ("oversized", {"Path": "backup/recovery-20261103T000000Z-evil.vwrec", "Size": gate.MAX_OBJECT_BYTES + 1, "IsDir": False}),
+        ]
+        for reason, item in invalids:
+            with self.subTest(reason=reason):
+                stats = {}
+                safe, newer = gate.bounded_objects(
+                    json.dumps(good + [item]), historical(), diagnostics=stats)
+                self.assertEqual(len(safe), 4)
+                self.assertEqual(newer, 2)
+                self.assertEqual(stats["quarantined"], 1)
+                self.assertEqual(stats[reason], 1)
+                self.assertFalse(any(x["remote"].endswith(item["Path"]) for x in safe))
+        for broken in (good + [good[0]], good[1:]):
+            with self.assertRaises(gate.Blocked):
+                gate.bounded_objects(json.dumps(broken), historical())
+        historical_broken = [dict(x) for x in good]
+        historical_broken[0]["Size"] = 12
+        with self.assertRaises(gate.Blocked) as error:
+            gate.bounded_objects(json.dumps(historical_broken), historical())
+        self.assertEqual(str(error.exception), "BOX_HISTORICAL_OBJECT_INVALID_METADATA")
+        many = [good[0]] + [
+            {"Path": f"test/recovery-20261103T000000Z-x{i}.vwrec",
+             "Size": 120, "IsDir": False} for i in range(12)]
+        with self.assertRaises(gate.Blocked):
+            gate.bounded_objects(json.dumps(many), historical())
         self.assertFalse(gate.valid_relative_path("nested/../../recovery-20261103T000000Z-abc.vwrec"))
         self.assertFalse(gate.valid_relative_path("nested\\recovery-20261103T000000Z-abc.vwrec"))
+
 
     def test_stream_ciphertext_age_envelope_hash_without_disk(self):
         payload = OLD_BYTES
@@ -211,20 +231,12 @@ class P8LCandidateTests(unittest.TestCase):
         self.assertNotIn("RCLONE_CONFIG", env)
         self.assertNotIn("RCLONE_CONFIG_PASS", env)
 
-    def test_explicit_tty_consent_is_required(self):
-        with mock.patch.object(gate.sys, "stdin", TTY()), \
-             mock.patch.object(gate.sys, "stdout", TTY()), \
-             mock.patch("builtins.input", return_value=gate.CONSENT):
-            self.assertTrue(gate.exact_consent())
-        with mock.patch.object(gate.sys, "stdin", TTY()), \
-             mock.patch.object(gate.sys, "stdout", TTY()), \
-             mock.patch("builtins.input", return_value="RESTORE"):
-            self.assertFalse(gate.exact_consent())
-        with mock.patch.object(gate.sys, "stdin", io.StringIO()), \
-             mock.patch.object(gate.sys, "stdout", TTY()), \
-             mock.patch("builtins.input") as typed:
-            self.assertFalse(gate.exact_consent())
-            typed.assert_not_called()
+    def test_vm_only_box_survey_has_no_interactive_prompt(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("--read-only-box", source)
+        self.assertNotIn("input(", source)
+        self.assertNotIn("exact_consent(", source)
+
 
     def test_existing_root_config_must_be_private(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -281,6 +293,7 @@ class P8LCandidateTests(unittest.TestCase):
             self.assertNotIn(unsafe, content)
         self.assertIn("MAX_BATCH_BYTES = 8 * 1024**3", content)
         self.assertIn("NEW_OBSERVATION_ONLY", content)
+        self.assertNotIn("input(", content)
 
     def test_early_wrong_invocation_never_reads_box_or_original_evidence(self):
         with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
@@ -292,7 +305,7 @@ class P8LCandidateTests(unittest.TestCase):
             evidence.assert_not_called()
             consent.assert_not_called()
 
-    def test_mocked_one_turn_batch_without_box_when_tty_declines(self):
+    def test_mocked_one_turn_batch_omits_box_without_read_only_flag(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
@@ -306,34 +319,34 @@ class P8LCandidateTests(unittest.TestCase):
                  mock.patch.object(gate, "original_public_pins", return_value=historical()), \
                  mock.patch.object(gate, "local_isolation", return_value=11), \
                  mock.patch.object(gate, "root_remote_configured", return_value=True), \
-                 mock.patch.object(gate, "exact_consent", return_value=False), \
                  mock.patch.object(gate, "read_command") as remote:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(gate.main(), 0)
                 remote.assert_not_called()
-                self.assertIn("NO Box API accessed", output.getvalue())
+                self.assertIn("not requested by --read-only-box", output.getvalue())
                 self.assertIn("HOLD", output.getvalue())
                 private = json.loads(next(base.glob("p8l-box-source-*/candidates.private.json")).read_text())
                 self.assertEqual(private["records"], [])
 
-    def test_mocked_safety_failure_prevents_box_consent(self):
+
+    def test_mocked_safety_failure_prevents_box_contact(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
-                 mock.patch.object(gate.os, "geteuid", return_value=0), \
+            with mock.patch.object(gate.sys, "argv", [
+                     "p8l", "--expected-commit", PIN, "--read-only-box",
+                 ]), mock.patch.object(gate.os, "geteuid", return_value=0), \
                  mock.patch.dict(gate.os.environ, {"SUDO_USER": "ubuntu"}), \
                  mock.patch.object(gate.platform, "node", return_value=gate.HOST), \
                  mock.patch.object(gate, "source_approved", return_value=True), \
                  mock.patch.object(gate, "host_approved", return_value=True), \
                  mock.patch.object(gate, "evidence_base", return_value=base), \
                  mock.patch.object(gate, "previous_box_proof", side_effect=gate.Blocked("previous evidence changed")), \
-                 mock.patch.object(gate, "exact_consent") as consent, \
                  mock.patch.object(gate, "read_command") as remote, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(gate.main(), 2)
-                consent.assert_not_called()
                 remote.assert_not_called()
+
 
     def test_mocked_full_box_batch_keeps_newer_sha_untrusted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -347,7 +360,7 @@ class P8LCandidateTests(unittest.TestCase):
                 if remote == OLD_REMOTE:
                     return OLD_SHA, len(OLD_BYTES), True
                 return "c" * 64, size_limit, True
-            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
+            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN, "--read-only-box"]), \
                  mock.patch.object(gate.os, "geteuid", return_value=0), \
                  mock.patch.dict(gate.os.environ, {"SUDO_USER": "ubuntu"}), \
                  mock.patch.object(gate.platform, "node", return_value=gate.HOST), \
@@ -358,7 +371,6 @@ class P8LCandidateTests(unittest.TestCase):
                  mock.patch.object(gate, "original_public_pins", return_value=historical()), \
                  mock.patch.object(gate, "local_isolation", return_value=11), \
                  mock.patch.object(gate, "root_remote_configured", return_value=True), \
-                 mock.patch.object(gate, "exact_consent", return_value=True), \
                  mock.patch.object(gate, "read_command", side_effect=fake_read), \
                  mock.patch.object(gate, "hash_age_stream", side_effect=fake_stream):
                 output = io.StringIO()
@@ -382,7 +394,7 @@ class P8LCandidateTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
+            with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN, "--read-only-box"]), \
                  mock.patch.object(gate.os, "geteuid", return_value=0), \
                  mock.patch.dict(gate.os.environ, {"SUDO_USER": "ubuntu"}), \
                  mock.patch.object(gate.platform, "node", return_value=gate.HOST), \
@@ -393,7 +405,6 @@ class P8LCandidateTests(unittest.TestCase):
                  mock.patch.object(gate, "original_public_pins", return_value=historical()), \
                  mock.patch.object(gate, "local_isolation", return_value=11), \
                  mock.patch.object(gate, "root_remote_configured", return_value=True), \
-                 mock.patch.object(gate, "exact_consent", return_value=True), \
                  mock.patch.object(gate, "read_command", return_value=(0, json.dumps(items))), \
                  mock.patch.object(gate, "hash_age_stream", side_effect=gate.Blocked("remote lost")) as stream:
                 with contextlib.redirect_stdout(io.StringIO()):
