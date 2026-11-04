@@ -44,7 +44,6 @@ CONFIG = Path("/etc/vaultwarden-oci/config.toml")
 RCLONE_CONFIG = Path("/root/.config/rclone/rclone.conf")
 ORIGINAL_PIN = SOURCE / "tests/host-acceptance/production-recovery-source-preflight.py"
 BOX_PARENT = "bw-backup:bw-backup"
-CONSENT = "P8L READ BOX ENCRYPTED RECOVERY CANDIDATES ONLY"
 SHA40_RE = re.compile(r"[a-f0-9]{40}\Z")
 SHA64_RE = re.compile(r"[a-f0-9]{64}\Z")
 RECOVERY_NAME_RE = re.compile(r"recovery-([0-9]{8}T[0-9]{6}Z)-([A-Za-z0-9]+)\.vwrec\Z")
@@ -348,42 +347,81 @@ def valid_relative_path(path: str) -> bool:
             and bool(RECOVERY_NAME_RE.fullmatch(path.rsplit("/", 1)[-1])))
 
 
-def bounded_objects(data: str, original: dict[str, str]) -> tuple[list[dict[str, object]], int]:
-    """Never select by filename date alone; validate relative Box object paths."""
-    items = json.loads(data)
+def bounded_objects(
+    data: str, original: dict[str, str],
+    *, diagnostics: dict[str, int] | None = None,
+) -> tuple[list[dict[str, object]], int]:
+    """Quarantine unsafe *unrelated* objects, never broaden an rclone read.
+
+    Some acceptance folders can contain tiny or incomplete .vwrec test
+    fixtures. A fail-closed parser used to block the ENTIRE Box survey on one
+    such unrelated object. Only individually validated regular encrypted
+    candidate files may be streamed. The independently pinned original MUST
+    still be present with safe metadata, or the whole gate BLOCKS.
+    """
+    try:
+        items = json.loads(data)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise Blocked("BOX_LIST_JSON_INVALID") from exc
     if not isinstance(items, list) or len(items) > 10000:
-        raise Blocked("Box listing missing or unbounded")
+        raise Blocked("BOX_LIST_NOT_BOUNDED_ARRAY")
+    counts = {
+        "named": 0, "quarantined": 0, "unsafe_path": 0,
+        "not_file": 0, "missing_size": 0, "undersized": 0,
+        "oversized": 0,
+    }
     rows: list[dict[str, object]] = []
     seen: set[str] = set()
+    historical = original["HISTORICAL_REMOTE"]
     for entry in items:
         if not isinstance(entry, dict):
-            raise Blocked("invalid Box listing entry")
-        path, size = entry.get("Path"), entry.get("Size")
-        if not isinstance(path, str) or not RECOVERY_NAME_RE.fullmatch(path.rsplit("/", 1)[-1]):
             continue
-        if (not valid_relative_path(path) or path in seen or
-                entry.get("IsDir") is not False or
-                type(size) is not int or not 64 <= size <= MAX_OBJECT_BYTES):
-            raise Blocked("unsafe/duplicate or oversized encrypted recovery object")
-        seen.add(path)
+        path, size = entry.get("Path"), entry.get("Size")
+        if not isinstance(path, str):
+            continue
         match = RECOVERY_NAME_RE.fullmatch(path.rsplit("/", 1)[-1])
         if match is None:
-            raise Blocked("invalid encrypted recovery filename")
+            continue
+        counts["named"] += 1
+        if path in seen:
+            raise Blocked("BOX_DUPLICATE_RECOVERY_PATH")
+        seen.add(path)
+        reason: str | None = None
+        if not valid_relative_path(path):
+            reason = "unsafe_path"
+        elif entry.get("IsDir") is not False:
+            reason = "not_file"
+        elif type(size) is not int:
+            reason = "missing_size"
+        elif size < 64:
+            reason = "undersized"
+        elif size > MAX_OBJECT_BYTES:
+            reason = "oversized"
+        if reason is not None:
+            if BOX_PARENT + "/" + path == historical:
+                raise Blocked("BOX_HISTORICAL_OBJECT_INVALID_METADATA")
+            counts[reason] += 1
+            counts["quarantined"] += 1
+            continue
         remote = BOX_PARENT + "/" + path
         rows.append({
             "remote": remote, "path_fingerprint": safe_tag(remote),
             "name_date": match.group(1), "size": size,
             "same_parent_as_historical":
                 path.rpartition("/")[0] ==
-                original["HISTORICAL_REMOTE"].removeprefix(BOX_PARENT + "/").rpartition("/")[0],
+                historical.removeprefix(BOX_PARENT + "/").rpartition("/")[0],
         })
-    if not rows or len(rows) > MAX_OBJECTS:
-        raise Blocked("encrypted source object count missing/over safety cap")
+    if not rows:
+        raise Blocked("BOX_NO_SAFE_RECOVERY_OBJECTS")
+    if len(rows) > MAX_OBJECTS:
+        raise Blocked("BOX_TOO_MANY_SAFE_RECOVERY_OBJECTS")
     rows.sort(key=lambda row: (row["name_date"], row["path_fingerprint"]), reverse=True)
-    historical = [row for row in rows if row["remote"] == original["HISTORICAL_REMOTE"]]
-    if len(historical) != 1:
-        raise Blocked("historically pinned Box ciphertext no longer in inventory")
-    newer = sum(row["name_date"] > historical[0]["name_date"] for row in rows)
+    pinned = [row for row in rows if row["remote"] == historical]
+    if len(pinned) != 1:
+        raise Blocked("BOX_HISTORICAL_OBJECT_MISSING_FROM_LIST")
+    newer = sum(row["name_date"] > pinned[0]["name_date"] for row in rows)
+    if diagnostics is not None:
+        diagnostics.update(counts)
     return rows, newer
 
 
@@ -435,19 +473,6 @@ def hash_age_stream(remote: str, *, size_limit: int, seconds: int = 600) -> tupl
             task.stdout.close()
 
 
-def exact_consent() -> bool:
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return False
-    print("P8L will READ and SHA-256 up to 12 existing encrypted recovery objects from root's Box remote.")
-    print("No Box writes/deletes, local ciphertext downloads, Age decryption, kit/password or restore.")
-    print("It may refresh ROOT's local rclone OAuth token.")
-    print("Enter this exact phrase to approve:", CONSENT)
-    try:
-        return input("Box recovery-set READ consent (anything else cancels): ").strip() == CONSENT
-    except (KeyboardInterrupt, EOFError):
-        return False
-
-
 def write_private(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                  getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -487,6 +512,10 @@ class Report:
 
 def main() -> int:
     args = sys.argv[1:]
+    read_box = False
+    if len(args) == 3 and args[-1] == "--read-only-box":
+        read_box = True
+        args = args[:-1]
     if (len(args) != 2 or args[0] != "--expected-commit" or
             not SHA40_RE.fullmatch(args[1]) or os.geteuid() != 0 or
             os.environ.get("SUDO_USER") != "ubuntu" or
@@ -522,25 +551,33 @@ def main() -> int:
         unit_count = local_isolation(original["OFFLINE_RECIPIENT_SHA256"])
         report.add("PASS", f"Immutable rc.12, non-root ext4, public offline Age recipient and {unit_count} stopped units verified")
         report.add("PASS", "No active notify instance, TCP 80/443, Docker container, SQLite, swap or unapproved backup stage; /run tmpfs")
-        stage = "root Box config and new typed consent"
+        stage = "root Box config and declared read-only Box scope"
         if not root_remote_configured():
             report.add("BLOCKED", "Root bw-backup: rclone remote is no longer available or secure")
-        elif not exact_consent():
-            report.add("PENDING", "Fresh per-batch Box READ consent declined or noninteractive; NO Box API accessed")
-            report.add("NOT RUN", "No encrypted object list, stream, SHA, decryption or restore")
+        elif not read_box:
+            report.add("NOT RUN", "Box inventory/hash not requested by --read-only-box; no Box object contacted")
         else:
-            report.add("PASS", "Fresh typed read-only Box recovery-set consent obtained; root rclone config secured")
+            report.add("PASS", "Requested Box READ-only via --read-only-box; no additional TTY prompt, root config secured")
             stage = "bounded recursive Box encrypted-object listing"
             code, raw = read_command([
                 "rclone", "lsjson", BOX_PARENT, "--recursive",
                 "--files-only", "--retries", "1",
             ], timeout=180, cap=MAX_LIST_BYTES)
+            if code is None:
+                raise Blocked("BOX_LIST_TIMEOUT_OR_OUTPUT_CAP")
             if code != 0:
-                raise Blocked("Box read-only source inventory failed")
-            entries, newer = bounded_objects(raw, original)
-            report.add("PASS", f"Box recursive .vwrec objects={len(entries)}, newer by filename date={newer} (not verified origin)")
+                raise Blocked("BOX_LIST_COMMAND_FAILED")
+            diagnostic: dict[str, int] = {}
+            entries, newer = bounded_objects(raw, original, diagnostics=diagnostic)
+            report.add("PASS", f"Box recovery filenames={diagnostic['named']}, safe encrypted candidates={len(entries)}, newer safe by filename date={newer}")
+            if diagnostic["quarantined"]:
+                report.add("PENDING",
+                    f"Untrusted Box fixtures QUARANTINED={diagnostic['quarantined']}: "
+                    f"path={diagnostic['unsafe_path']} type={diagnostic['not_file']} "
+                    f"size_missing={diagnostic['missing_size']} tiny={diagnostic['undersized']} "
+                    f"oversize={diagnostic['oversized']}; none streamed")
             report.add("PENDING", "Filename dates, Box path and new SHA are not independent backup authenticity/restore validity proofs")
-            if len(entries) != 9 or newer != 2:
+            if diagnostic["named"] != 9 or newer != 2:
                 report.add("PENDING", "Box inventory count/date differs from previous P8K; no automatic point selection")
             stage = "read-only bounded SHA and Age header survey"
             # Reserve each listed object's maximum stream size BEFORE launch,
@@ -583,7 +620,14 @@ def main() -> int:
         report.add("NOT RUN", "No private Age key, ZIP/passphrase handling, decryption, plaintext, restore, Box object write/prune")
         report.add("NOT RUN", "No systemd/Docker start, cloud DNS/Worker/OCI change, ACME, SMTP, timer, format or reboot")
     except KeyboardInterrupt:
-        report.add("BLOCKED", "Interrupted during " + stage + "; no destructive action authorized")
+        report.add("BLOCKED", "Interrupted during " + stage + "; no destructive action performed")
+    except Blocked as exc:
+        code = str(exc)
+        # Codes are authored literals, not provider error strings or paths.
+        if stage == "bounded recursive Box encrypted-object listing" and code.startswith("BOX_"):
+            report.add("BLOCKED", "Box listing validation reason_code=" + code + "; no ciphertext stream invoked")
+        else:
+            report.add("BLOCKED", "Read-only source/isolation failed during " + stage + "; details withheld")
     except Exception:
         report.add("BLOCKED", "Read-only P8L source isolation/inventory failed during " + stage + "; details withheld")
     private = {
