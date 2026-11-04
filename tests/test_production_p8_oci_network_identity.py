@@ -120,7 +120,7 @@ class NetworkIdentityTests(unittest.TestCase):
         self.assertEqual(ctx.exception.category, "redirect_or_wrong_endpoint")
 
     def test_payload_size_and_json_fail_closed(self):
-        response = FakeResponse(good_instance())
+        response = FakeResponse(good_instance(), url=p8e.IMDS_ORIGIN + "/instance/")
         response.data = b"{" + b"a" * (p8e.IMDS_MAX_BYTES + 1)
         with self.assertRaises(p8e.MetadataContractError) as ctx:
             p8e.metadata_json("instance", opener=SimpleNamespace(open=lambda *a, **k: response))
