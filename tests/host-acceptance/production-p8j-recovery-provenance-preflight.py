@@ -284,11 +284,14 @@ def current_stopped() -> int:
 def no_local_recovery_payloads() -> None:
     """Inventory only expected local paths; does not claim global key absence."""
     backups = STATE / "backups"
-    if backups.is_symlink() or not backups.is_dir():
-        raise Blocked("installed backup staging directory unsafe/unavailable")
-    for item in backups.iterdir():
-        if item.is_symlink() or item.suffix.casefold() in (".vwrec", ".zip"):
-            raise Blocked("local encrypted recovery/kit or symlink already staged without approval")
+    if backups.is_symlink():
+        raise Blocked("installed backup staging directory is a symlink")
+    if backups.exists():
+        if not backups.is_dir():
+            raise Blocked("installed backup staging path has an unsafe type")
+        for item in backups.iterdir():
+            if item.is_symlink() or item.suffix.casefold() in (".vwrec", ".zip"):
+                raise Blocked("local encrypted recovery/kit or symlink already staged without approval")
     home = Path(pwd.getpwnam("ubuntu").pw_dir)
     for parent in (home, Path("/root/vaultwarden-recovery")):
         if parent.exists() or parent.is_symlink():
