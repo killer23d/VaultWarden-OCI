@@ -100,6 +100,19 @@ class P8KTests(unittest.TestCase):
         with mock.patch.object(gate.platform, "node", return_value="vaultwarden-oci-6-vnic"):
             self.assertFalse(gate.host_ok())
 
+    def test_rclone_is_always_root_scoped_without_sudo_caller_overrides(self):
+        with mock.patch.dict(gate.os.environ, {
+            "HOME": "/home/ubuntu",
+            "XDG_CONFIG_HOME": "/home/ubuntu/.config",
+            "RCLONE_CONFIG": "/tmp/unapproved.conf",
+            "RCLONE_CONFIG_PASS": "sensitive",
+        }):
+            isolated = gate.root_rclone_env()
+        self.assertEqual(isolated["HOME"], "/root")
+        self.assertEqual(isolated["XDG_CONFIG_HOME"], "/root/.config")
+        self.assertNotIn("RCLONE_CONFIG", isolated)
+        self.assertNotIn("RCLONE_CONFIG_PASS", isolated)
+
     def test_immutable_prior_hold_and_candidate_binding(self):
         with tempfile.TemporaryDirectory() as name:
             base = Path(name)
@@ -145,6 +158,9 @@ class P8KTests(unittest.TestCase):
                 with self.assertRaises(gate.Blocked):
                     gate.original_source_pin()
                 p.write_text(contents(remote="evil:dangerous"))
+                with self.assertRaises(gate.Blocked):
+                    gate.original_source_pin()
+                p.write_text(contents(remote="bw-backup:bw-backup/../recovery-20261029T223200Z-abc.vwrec"))
                 with self.assertRaises(gate.Blocked):
                     gate.original_source_pin()
 
@@ -217,6 +233,7 @@ remote_retention_days = 0
                 self.assertEqual(actual, hashlib.sha256(data).hexdigest())
                 self.assertEqual(size, len(data))
                 self.assertEqual(spawned.call_args.kwargs["stderr"], gate.subprocess.DEVNULL)
+                self.assertEqual(spawned.call_args.kwargs["env"]["HOME"], "/root")
         with self.assertRaises(ValueError):
             gate.bounded_ciphertext_digest(["rclone", "copyto", "src", "dest"], seconds=0)
 
