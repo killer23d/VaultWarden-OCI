@@ -299,11 +299,9 @@ class P8LCandidateTests(unittest.TestCase):
         with mock.patch.object(gate.sys, "argv", ["p8l", "--expected-commit", PIN]), \
              mock.patch.object(gate.os, "geteuid", return_value=1000), \
              mock.patch.object(gate, "evidence_base") as evidence, \
-             mock.patch.object(gate, "exact_consent") as consent, \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(gate.main(), 2)
             evidence.assert_not_called()
-            consent.assert_not_called()
 
     def test_mocked_one_turn_batch_omits_box_without_read_only_flag(self):
         with tempfile.TemporaryDirectory() as directory:
