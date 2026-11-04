@@ -599,13 +599,23 @@ def main() -> int:
                     observations.append({**entry, "status": "STREAM_UNAVAILABLE"})
                     continue
                 if observed_bytes != listed_size:
-                    report.add("BLOCKED", f"Candidate rank={rank} metadata/stream SIZE MISMATCH; stop before restore")
+                    pinned = remote == original["HISTORICAL_REMOTE"]
+                    report.add("BLOCKED" if pinned else "PENDING",
+                               f"Candidate rank={rank} stream SIZE MISMATCH; " +
+                               ("historical pin INVALID" if pinned else "untrusted fixture quarantined"))
                     observations.append({**entry, "status": "SIZE_MISMATCH", "sha256": sha, "streamed_bytes": observed_bytes})
-                    break
+                    if pinned:
+                        break
+                    continue
                 if not age_header:
-                    report.add("BLOCKED", f"Candidate rank={rank} lacks Age v1 header; stop before restore")
+                    pinned = remote == original["HISTORICAL_REMOTE"]
+                    report.add("BLOCKED" if pinned else "PENDING",
+                               f"Candidate rank={rank} not an Age encrypted envelope; " +
+                               ("historical pin INVALID" if pinned else "untrusted fixture quarantined"))
                     observations.append({**entry, "status": "AGE_HEADER_MISMATCH", "sha256": sha, "streamed_bytes": observed_bytes})
-                    break
+                    if pinned:
+                        break
+                    continue
                 if remote == original["HISTORICAL_REMOTE"] and sha != original["HISTORICAL_SHA256"]:
                     report.add("BLOCKED", f"Historical candidate rank={rank} SHA differs from independently pinned reference")
                     observations.append({**entry, "status": "INDEPENDENT_PIN_MISMATCH", "sha256": sha, "streamed_bytes": observed_bytes})
