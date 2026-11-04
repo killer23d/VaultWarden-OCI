@@ -1,6 +1,6 @@
 # P8 isolation acceptance and first live start boundaries
 
-Status: P8A read-only source candidate; **real-host result NOT RUN**. This document does not approve start or production cutover.
+Status: **P8A accepted READ-ONLY HOLD/exit 0** on 2026-11-04 after **115 focused tests passed** on the original disposable host, from exact reviewed commit `697c9b84ce73c17ebb4789c2c12c7cc5d95b2deb`. Local integrity/security and all nine PR CI checks passed; 13 generated/volatile runtime paths remain absent with zero unsafe paths. External OCI/Cloudflare isolation, original offline custody and test-only Box prefix remain PENDING. **No live startup or production cutover is approved.**
 
 ## What P7 and P7R proved
 
