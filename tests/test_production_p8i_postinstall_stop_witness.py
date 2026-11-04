@@ -198,7 +198,9 @@ class P8IPostInstallTests(unittest.TestCase):
             '["oci",', "requests.post(", "urllib.request.urlopen(",
         ):
             self.assertNotIn(banned, text)
-        self.assertIn("Proxy", "Proxy")
+        self.assertIn('"--decrypt"', text)
+        self.assertIn('"--output", "/dev/null"', text)
+        self.assertNotIn('subprocess.Popen(', text)
 
     def test_bad_invocation_denied_before_private_evidence(self):
         with mock.patch.object(gate.sys, "argv", [
@@ -224,8 +226,8 @@ class P8IPostInstallTests(unittest.TestCase):
                  mock.patch.object(gate, "verify_storage", return_value="f" * 12), \
                  mock.patch.object(gate, "config_and_secrets") as custody, \
                  mock.patch.object(gate, "service_state", return_value=(12, 0)), \
-                 mock.patch.object(gate.CURRENT, "is_symlink", return_value=True), \
-                 mock.patch.object(gate.CURRENT, "resolve", return_value=gate.INSTALLED):
+                 mock.patch.object(gate.Path, "is_symlink", return_value=True), \
+                 mock.patch.object(gate.Path, "resolve", return_value=gate.INSTALLED):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(gate.main(), 0)
