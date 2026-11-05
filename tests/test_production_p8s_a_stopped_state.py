@@ -116,6 +116,20 @@ class P8SATests(unittest.TestCase):
             self.assertNotIn("private state digest", report)
             self.assertIn("protected.snapshot", output.getvalue())
 
+    def test_known_static_failures_have_safe_codes(self):
+        known = {
+            "accepted P8R summary heading/outcome mismatch": "history.p8r-summary-outcome",
+            "reboot checkpoint identity or JSON schema invalid": "history.p8p-checkpoint",
+            "recovered SQLite integrity or pinned historical digest changed": "state.sqlite",
+            "unexpected installed security/runtime doctor FAIL ID": "doctor.unexpected-failure",
+        }
+        for text, code in known.items():
+            with self.subTest(code=code):
+                self.assertEqual(gate.reason_code(gate.Blocked(text)), code)
+        unknown = gate.reason_code(RuntimeError("AGE-SECRET=do-not-share"))
+        self.assertEqual(unknown, "unclassified-safe-stop")
+        self.assertNotIn("do-not-share", unknown)
+
     def test_invalid_diagnostic_phase_never_echoes_untrusted_value(self):
         with tempfile.TemporaryDirectory() as tmp:
             private = Path(tmp) / "evidence"
