@@ -38,6 +38,9 @@ def accepted_p8q_summary() -> str:
     return "\n".join(lines) + "\n"
 
 
+REAL_P8Q_SANITIZED = "Gate P8Q - NEW disposable VM independent P8P postboot blocker diagnosis (READ-ONLY)\nPASS       source.exact-reviewed-p8p\nPASS       prior.p8o-foundation-evidence\nPASS       reboot.root-private-checkpoint\nPASS       reboot.changed-kernel-boot-id\nPASS       release.immutable-current-link\nPASS       release.imported-original-witnesses\nPASS       release.52-immutable-product-files\nPASS       release.12-installed-systemd-definitions\nPASS       storage.dedicated-original-ext4\nPASS       config.historical-domain-recipient-smtp-box-no-prune\nPASS       secrets.offline-custody-sops-admin-remediation\nPASS       sqlite.readonly-integrity-and-historical-sha\nPASS       services.app-dns-timers-disabled-inactive\nPASS       services.notification-template-inactive\nPASS       network.no-http-or-docker-tcp-listeners\nPASS       docker.no-retained-or-running-containers\nPASS       updates.no-recovery-required-guard\nPASS       security.crowdsec-package\nPASS       security.crowdsec-engine-active-enabled\nPASS       security.crowdsec-input-bouncer-active-enabled\nPASS       security.cloudflare-worker-disabled-inactive\nPASS       os.dpkg-audit-clean\nPASS       os.run-is-tmpfs\nPASS       os.swap-empty\nPASS       os.ntp-synchronized\nPASS       doctor.27-id-schema\nPASS       doctor.host.os\nPASS       doctor.host.architecture\nPASS       doctor.config.toml\nPASS       doctor.versions.toml\nPASS       doctor.runtime.docker\nPASS       doctor.runtime.compose\nPENDING    doctor.runtime.paths\nPASS       doctor.storage.dedicated\nPASS       doctor.secrets.custody\nPASS       doctor.secrets.decrypt\nPASS       doctor.notification.catalog\nPASS       doctor.notification.provider\nPASS       doctor.notification.api_secret\nPASS       doctor.notification.smtp_fallback\nPENDING    doctor.notification.last_delivery\nPENDING    doctor.edge.caddy.trusted_proxy\nPENDING    doctor.edge.admin.protection\nPENDING    doctor.edge.caddy.health\nPASS       doctor.edge.cloudflare.cidrs\nPENDING    doctor.edge.cloudflare.iptables\nPASS       doctor.crowdsec.engine\nPASS       doctor.crowdsec.hub\nPASS       doctor.crowdsec.firewall\nPASS       doctor.crowdsec.cloudflare\nPENDING    doctor.recovery.local\nPENDING    doctor.recovery.offsite\nPASS       doctor.recovery.rclone\nPENDING    runtime.volatile-path-metadata-consistent\nPASS       checkpoint.original-file-hashes-match\nPASS       original-p8p.snapshot-parity\nNOT RUN    not-run.reboot-firewall-start-cloud-box-timers\nREADONLY   p8q.no-mutation.no-reboot.no-rearm.no-box.no-live-go\n"
+
+
 def fake_p8p(root: Path, *, result=0):
     marker = root / "original-p8p-rearm.json"
     def exclusive(path, data):
@@ -67,6 +70,58 @@ def fake_p8p(root: Path, *, result=0):
 
 
 class P8RTests(unittest.TestCase):
+
+    def test_real_p8q_summary_parses_multitoken_not_run_without_mutation(self):
+        """Exact sanitized real P8Q format (not synthetic all-PASS rows)."""
+        parsed = p8r.p8q_statuses(REAL_P8Q_SANITIZED)
+        self.assertEqual(parsed["not-run.reboot-firewall-start-cloud-box-timers"], "NOT RUN")
+        self.assertEqual(parsed["doctor.edge.cloudflare.iptables"], "PENDING")
+        self.assertEqual(parsed["runtime.volatile-path-metadata-consistent"], "PENDING")
+        self.assertEqual(parsed["checkpoint.original-file-hashes-match"], "PASS")
+        self.assertEqual(parsed["original-p8p.snapshot-parity"], "PASS")
+        self.assertEqual(parsed["p8q.no-mutation.no-reboot.no-rearm.no-box.no-live-go"], "READONLY")
+        self.assertGreaterEqual(len(parsed), 48)
+
+    def test_real_p8q_missing_expected_not_run_blocks(self):
+        altered = REAL_P8Q_SANITIZED.replace(
+            "NOT RUN    not-run.reboot-firewall-start-cloud-box-timers",
+            "PASS       not-run.reboot-firewall-start-cloud-box-timers",
+        )
+        with self.assertRaises(p8r.Blocked):
+            p8r.p8q_statuses(altered)
+
+    def test_real_p8q_unexpected_skipped_critical_test_blocks(self):
+        altered = REAL_P8Q_SANITIZED.replace(
+            "PASS       sqlite.readonly-integrity-and-historical-sha",
+            "NOT RUN    sqlite.readonly-integrity-and-historical-sha",
+        )
+        with self.assertRaises(p8r.Blocked):
+            p8r.p8q_statuses(altered)
+
+    def test_real_p8q_invalid_terminal_order_blocks(self):
+        # A subsequent row after READONLY is invalid, even when status PASS.
+        altered = REAL_P8Q_SANITIZED + "PASS       diagnostic.unexpected-after-outcome\n"
+        with self.assertRaises(p8r.Blocked):
+            p8r.p8q_statuses(altered)
+
+    def test_real_p8q_trailing_or_duplicate_status_row_blocks(self):
+        altered = REAL_P8Q_SANITIZED.replace(
+            "NOT RUN    not-run.reboot-firewall-start-cloud-box-timers",
+            "NOT RUN    not-run.reboot-firewall-start-cloud-box-timers\n"
+            "NOT RUN    not-run.reboot-firewall-start-cloud-box-timers",
+        )
+        with self.assertRaises(p8r.Blocked):
+            p8r.p8q_statuses(altered)
+
+    def test_real_p8q_other_pending_live_checks_are_not_unexpected_failures(self):
+        parsed = p8r.p8q_statuses(REAL_P8Q_SANITIZED)
+        for name in (
+            "doctor.runtime.paths", "doctor.notification.last_delivery",
+            "doctor.edge.caddy.health", "doctor.recovery.local",
+            "doctor.recovery.offsite",
+        ):
+            self.assertEqual(parsed[name], "PENDING")
+
     def test_exact_source_contract(self):
         self.assertEqual(p8r.HOST, "vaultwarden-oci-7-vnic")
         self.assertEqual(len(p8r.P8P_COMMIT), 40)
