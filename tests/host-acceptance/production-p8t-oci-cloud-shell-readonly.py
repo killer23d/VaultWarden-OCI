@@ -45,25 +45,55 @@ def module():
     return obj
 
 
+def cli_failure_code(stderr: bytes) -> str:
+    """Return a source-owned diagnostic only; never echo CLI stderr or data."""
+    data = stderr[:8192].decode("utf-8", "replace").lower()
+    for marker, code in (
+        ("notauthorizedornotfound", "not-authorized-or-not-found"),
+        ("notauthenticated", "authentication-rejected"),
+        ("configfilenotfound", "config-file-unavailable"),
+        ("delegation_token", "delegation-token-issue"),
+        ("invalidcredential", "credential-invalid"),
+        ("no such option", "cli-argument-unsupported"),
+        ("no such command", "cli-subcommand-unsupported"),
+        ("toomanyrequests", "rate-limited"),
+        ("sslerror", "tls-unavailable"),
+        ("timed out", "timeout"),
+        ("connection refused", "connection-unavailable"),
+    ):
+        if marker in data:
+            return code
+    return "cli-nonzero-unclassified"
+
+
 def data_only(command: tuple[str, ...], key: str, value: str,
               region: str, *, extra: tuple[str, ...] = (),
               instance_filter: str | None = None,
-              cli: str = "oci") -> Any | None:
-    # Only hardcoded exact OCI GET/list commands and validated OCIDs; never
-    # accept user-supplied CLI flags, URL, query filter or a shell string.
+              cli: str = "oci", diagnostic: list[str] | None = None) -> Any | None:
+    """One allowlisted read-only OCI query, inheriting Cloud Shell delegation.
+
+    The prior verifier forced extra OCI_CLI_AUTO_PROMPT/PAGER values and used
+    a 35s process timeout, unlike the two proven direct CLI GET calls. This
+    uses the unchanged Cloud Shell environment and a 75s process bound.
+    """
+    def unavailable(code: str) -> None:
+        if diagnostic is not None:
+            diagnostic.append(code)
+        return None
+
     if (command not in ALLOWED or not OCID_RE.fullmatch(value)
             or not REGION_RE.fullmatch(region)
             or not key.startswith("--") or extra not in ((), ("--all",))):
-        return None
+        return unavailable("preflight-argument-rejected")
     is_attachment_list = command == ("compute", "vnic-attachment", "list")
     if is_attachment_list:
         if (key != "--compartment-id" or not instance_filter
                 or not OCID_RE.fullmatch(instance_filter)
                 or not instance_filter.startswith("ocid1.instance.")
                 or extra != ("--all",)):
-            return None
+            return unavailable("preflight-instance-filter-invalid")
     elif instance_filter is not None:
-        return None
+        return unavailable("preflight-unexpected-filter")
     args = [cli, *command, key, value]
     if is_attachment_list:
         args.extend(["--instance-id", instance_filter])
@@ -72,18 +102,22 @@ def data_only(command: tuple[str, ...], key: str, value: str,
     try:
         proc = subprocess.run(
             args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, check=False, timeout=35,
-            env=dict(os.environ, OCI_CLI_AUTO_PROMPT="false", PAGER="cat"))
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0 or len(proc.stdout) > 1024 * 1024:
-        return None
+            stderr=subprocess.PIPE, check=False, timeout=75)
+    except subprocess.TimeoutExpired:
+        return unavailable("process-timeout")
+    except OSError:
+        return unavailable("cli-execution-unavailable")
+    if proc.returncode != 0:
+        return unavailable(cli_failure_code(proc.stderr))
+    if not proc.stdout or len(proc.stdout) > 1024 * 1024:
+        return unavailable("cli-response-empty-or-oversized")
     try:
         doc = json.loads(proc.stdout)
-        return doc.get("data") if isinstance(doc, dict) else None
     except (UnicodeError, ValueError):
-        return None
-
+        return unavailable("cli-response-json-invalid")
+    if not isinstance(doc, dict) or "data" not in doc:
+        return unavailable("cli-response-data-missing")
+    return doc["data"]
 
 def obvious_public_ingress(rule: dict[str, Any], p8t) -> bool:
     """Block manifest broad TCP/80 or TCP/443, even without current CIDRs."""
@@ -123,10 +157,13 @@ def verify(argv=None) -> int:
 
     rows: list[tuple[str, str]] = []
     try:
+        instance_diagnostics: list[str] = []
         instance = data_only(("compute", "instance", "get"), "--instance-id",
-                             args.instance_id, args.region)
+                             args.instance_id, args.region,
+                             diagnostic=instance_diagnostics)
         if not isinstance(instance, dict):
-            rows.append(("PENDING", "oci.cloudshell-instance-read-permission-or-region-unavailable"))
+            reason = instance_diagnostics[0] if instance_diagnostics else "cli-data-not-object"
+            rows.append(("PENDING", "oci.cloudshell-instance-get-" + reason))
             return p8t.emit(None, rows, "HOLD")
         if instance.get("id") != args.instance_id:
             rows.append(("BLOCKED", "oci.cloudshell-provider-instance-id-mismatch"))
