@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).parent / "host-acceptance/production-p8s-a-stopped-state-preflight.py"
 SPEC = importlib.util.spec_from_file_location("production_p8s_a", SCRIPT)
@@ -69,6 +70,68 @@ class P8SATests(unittest.TestCase):
              mock.patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(gate.main(["--expected-commit", "a" * 40]), 2)
             importer.assert_not_called()
+
+    def test_preflight_failure_has_static_phase_in_private_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private = root / "evidence"
+            private.mkdir()
+            fake_p8p = SimpleNamespace(private_dir=lambda *args: None)
+            def fail_after_historical_summary(_p8p, _p8r, enter):
+                enter("prior.p8r-accepted-summary")
+                raise gate.Blocked("protected input must not appear in public output")
+            with mock.patch.object(gate, "host_ok", return_value=True), \
+                 mock.patch.object(gate, "source_clean", return_value=True), \
+                 mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
+                 mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate, "read_preflight", side_effect=fail_after_historical_summary), \
+                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(gate.main(["--expected-commit", "a" * 40]), 2)
+                shown = output.getvalue()
+            self.assertIn("prior.p8r-accepted-summary", shown)
+            self.assertIn("BLOCKED", shown)
+            self.assertNotIn("protected input must not appear", shown)
+            report = (private / "summary.txt").read_text()
+            self.assertIn("prior.p8r-accepted-summary", report)
+            self.assertNotIn("protected input must not appear", report)
+
+    def test_snapshot_failure_has_distinct_phase_and_no_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "evidence"
+            private.mkdir()
+            def fail_snapshot(*args, **kwargs):
+                raise gate.Blocked("private state digest never exposed")
+            fake_p8p = SimpleNamespace(
+                private_dir=lambda *args: None, Report=lambda *args: object(),
+                snapshot=fail_snapshot)
+            with mock.patch.object(gate, "host_ok", return_value=True), \
+                 mock.patch.object(gate, "source_clean", return_value=True), \
+                 mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
+                 mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate, "read_preflight", return_value={"hashes": {}}), \
+                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(gate.main(["--expected-commit", "b" * 40]), 2)
+            report = (private / "summary.txt").read_text()
+            self.assertIn("protected.snapshot", report)
+            self.assertNotIn("private state digest", report)
+            self.assertIn("protected.snapshot", output.getvalue())
+
+    def test_invalid_diagnostic_phase_never_echoes_untrusted_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "evidence"
+            private.mkdir()
+            fake_p8p = SimpleNamespace(private_dir=lambda *args: None)
+            def malicious(_p8p, _p8r, enter):
+                enter("BAD\nsecret=plaintext")
+            with mock.patch.object(gate, "host_ok", return_value=True), \
+                 mock.patch.object(gate, "source_clean", return_value=True), \
+                 mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
+                 mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate, "read_preflight", side_effect=malicious), \
+                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(gate.main(["--expected-commit", "c" * 40]), 2)
+            self.assertNotIn("secret=plaintext", output.getvalue())
+            self.assertIn("prior.evidence-metadata", output.getvalue())
 
     def test_report_private_and_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
