@@ -167,8 +167,8 @@ class P8TReadOnlyTests(unittest.TestCase):
         from urllib.error import URLError
         import socket
         with mock.patch.object(gate, "request_bytes", side_effect=[
-                b"173.245.48.0/20\\n103.21.244.0/22\\n",
-                b"2400:cb00::/32\\n"]) as request:
+                b"173.245.48.0/20\n103.21.244.0/22\n",
+                b"2400:cb00::/32\n"]) as request:
             trusted, rows = gate.official_cidr_observations()
         self.assertEqual(set(trusted), {4, 6})
         self.assertEqual(rows, [
@@ -181,7 +181,7 @@ class P8TReadOnlyTests(unittest.TestCase):
 
         with mock.patch.object(gate, "request_bytes", side_effect=[
                 URLError(socket.gaierror("private-dns-error")),
-                b"2400:cb00::/32\\n"]):
+                b"2400:cb00::/32\n"]):
             partial, diagnostics = gate.official_cidr_observations()
         self.assertEqual(set(partial), {6})
         self.assertEqual(diagnostics[0],
