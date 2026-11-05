@@ -194,6 +194,52 @@ def write_report(folder: Path, rows: list[tuple[str, str]], state: str) -> int:
     return 0 if state == "HOLD" else 2
 
 
+# Exact source-owned static messages only: never interpolate unknown exception
+# strings, raw doctor details, paths, network identities, or SOPS plaintext.
+REASON_CODES = {
+    "private acceptance evidence directory unsafe": "history.private-directory",
+    "root-private acceptance evidence metadata invalid": "history.private-file",
+    "accepted P8R summary heading/outcome mismatch": "history.p8r-summary-outcome",
+    "accepted P8R protected coverage or outcome missing": "history.p8r-summary-coverage",
+    "P8R summary contains unexpected terminal/blocked row": "history.p8r-summary-status",
+    "P8R expected negative operations record altered": "history.p8r-no-mutation-row",
+    "P8R accepted five-control result altered": "history.p8r-foundation-row",
+    "P8Q accepted summary identity mismatch": "history.p8q-summary",
+    "P8Q status format mismatch": "history.p8q-status-format",
+    "P8Q accepted security/recovery diagnosis changed": "history.p8q-baseline",
+    "P8O one-shot host-security marker does not match accepted run": "history.p8o-marker",
+    "P8O actual FOUNDATION private summary unavailable": "history.p8o-summary",
+    "reboot checkpoint identity or JSON schema invalid": "history.p8p-checkpoint",
+    "accepted pre/postboot one-shot continuity invalid": "history.boot-marker-continuity",
+    "unreviewed reboot after accepted P8R": "history.reboot-after-rearm",
+    "immutable source, Age/SOPS, restored SQLite or P8O evidence changed after reboot": "state.protected-hashes",
+    "installed immutable rc.12 release pointer changed": "state.release-pointer",
+    "52 original installed product files changed": "state.release-integrity",
+    "12 installed systemd unit bytes changed": "state.systemd-integrity",
+    "original isolated ext4 disk/source markers changed": "state.storage-device",
+    "restored hostname/offline identity/SMTP/Box no-prune configuration changed": "state.config-and-retention",
+    "restored SOPS/admin/remediation authority changed": "state.secrets-authority",
+    "recovered SQLite integrity or pinned historical digest changed": "state.sqlite",
+    "app/DNS/timer enabled or active across reboot": "state.service-activation",
+    "retained Docker container could auto-start on reboot": "state.docker-container",
+    "unexpected public HTTP or Docker TCP listener": "state.network-listener",
+    "CrowdSec engine or host INPUT bouncer lost boot-enabled/active state": "state.crowdsec-host",
+    "Cloudflare Worker must remain boot-disabled/inactive": "state.cloudflare-worker",
+    "installed 27-check product doctor failed contract validation": "doctor.schema",
+    "unexpected installed security/runtime doctor FAIL ID": "doctor.unexpected-failure",
+    "CrowdSec or validated Cloudflare CIDR policy regressed": "doctor.local-foundation",
+    "unsafe postreboot generated/volatile runtime path metadata": "doctor.unsafe-generated-path",
+    "product runtime.paths and independent metadata disagree": "doctor.runtime-path-parity",
+    "protected stopped-host doctor or origin guard mismatch": "doctor.origin-filter-or-schema",
+}
+
+
+def reason_code(error: Exception) -> str:
+    # Keys are pinned constant messages that cannot contain unknown user data.
+    # Discard every other exception string to avoid accidental secret exfiltration.
+    return REASON_CODES.get(str(error), "unclassified-safe-stop")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if (len(argv) != 2 or argv[0] != "--expected-commit" or
@@ -265,11 +311,12 @@ def main(argv: list[str] | None = None) -> int:
             ("NOT RUN", "No replay, reboot, firewall mutation, Docker start, DNS/Worker, SMTP or Box operations"),
         ])
         return write_report(report, rows, "HOLD")
-    except Exception:
+    except Exception as exc:
         # A previous P8S-A returned only a generic BLOCKED before a report
-        # existed. Keep evidence-specific private error text suppressed, but
-        # publish a static phase label so the next operator turn can fix it.
-        message = "Read-only acceptance failed at " + phase[0] + "; preserve VM and original markers"
+        # existed. Preserve private details; publish only authored phase and
+        # exact allowlisted failure code so one operator run gives useful proof.
+        message = ("Read-only acceptance failed at " + phase[0] + " reason=" +
+                   reason_code(exc) + "; preserve VM and original markers")
         print("BLOCKED: " + message)
         if report is not None:
             try:
