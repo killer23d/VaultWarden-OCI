@@ -258,7 +258,7 @@ class P8PTests(unittest.TestCase):
                 self.assertEqual(argv[-2:], ["edge", "refresh"])
                 return 0
             before_state = ({"edge.cloudflare.iptables": "FAIL"}, "PENDING", False)
-            after_state = ({"edge.cloudflare.iptables": "PASS"}, "PENDING", True)
+            after_state = ({key: "PASS" for key in p8p.FOUNDATION}, "PENDING", True)
             with ExitStack() as stack:
                 for label, value in (("EVIDENCE", root), ("CHECKPOINT", checkpoint),
                                      ("REARM_MARKER", rearm_marker)):
