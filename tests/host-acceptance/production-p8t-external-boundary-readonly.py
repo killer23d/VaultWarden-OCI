@@ -16,6 +16,7 @@ import platform
 import pwd
 import re
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -205,6 +206,34 @@ def request_bytes(url: str, headers: dict[str, str], maximum: int = 131072, time
     return data
 
 
+def safe_read_failure(error: Exception) -> str:
+    """Classify fixed-URL GET failures without exposing provider data.
+
+    Do not echo URLError.reason, HTTP response bodies, credential values,
+    socket addresses, filesystem paths, OCIDs, or proxy configuration.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        return ("http-authorization-denied" if error.code in (401, 403) else
+                "http-rate-limited" if error.code == 429 else
+                "http-server-unavailable" if 500 <= error.code <= 599 else
+                "http-unexpected-response")
+    if isinstance(error, urllib.error.URLError):
+        return safe_read_failure(error.reason) if isinstance(error.reason, BaseException) else "connection-unavailable"
+    if isinstance(error, (socket.gaierror,)):
+        return "dns-unavailable"
+    if isinstance(error, (ssl.SSLError, ssl.SSLCertVerificationError)):
+        return "tls-unavailable"
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(error, (ConnectionError, BrokenPipeError)):
+        return "connection-unavailable"
+    if isinstance(error, (UnicodeError, ValueError, json.JSONDecodeError)):
+        return "response-invalid"
+    if isinstance(error, Blocked):
+        return "response-unexpected"
+    return "unclassified-unavailable"
+
+
 def load_json_bytes(data: bytes) -> Any:
     return json.loads(data.decode("utf-8", "strict"))
 
@@ -274,13 +303,33 @@ def cidr_set(raw: str, family: int) -> tuple[ipaddress._BaseNetwork, ...]:
 
 
 def official_cloudflare_ranges() -> dict[int, tuple[ipaddress._BaseNetwork, ...]]:
+    """Strict fetch helper retained for source contract and pure tests."""
     four = request_bytes("https://www.cloudflare.com/ips-v4", {}, maximum=8192).decode("ascii")
     six = request_bytes("https://www.cloudflare.com/ips-v6", {}, maximum=8192).decode("ascii")
     return {4: cidr_set(four, 4), 6: cidr_set(six, 6)}
 
 
+def official_cidr_observations() -> tuple[
+    dict[int, tuple[ipaddress._BaseNetwork, ...]], list[tuple[str, str]]
+]:
+    """Fetch both official families independently; partial data never implies PASS."""
+    trusted: dict[int, tuple[ipaddress._BaseNetwork, ...]] = {}
+    rows: list[tuple[str, str]] = []
+    for family, suffix in ((4, "ipv4"), (6, "ipv6")):
+        try:
+            raw = request_bytes("https://www.cloudflare.com/ips-v" + str(family),
+                                {}, maximum=8192).decode("ascii")
+            trusted[family] = cidr_set(raw, family)
+            rows.append(("PASS", "cloudflare.official-" + suffix + "-cidr-fetched"))
+        except Exception as exc:
+            rows.append(("PENDING", "cloudflare.official-" + suffix + "-" +
+                         safe_read_failure(exc)))
+    return trusted, rows
+
+
 def find_oci_cli() -> Path | None:
-    for path in (Path("/usr/bin/oci"), Path("/usr/local/bin/oci"), Path("/home/ubuntu/bin/oci")):
+    for path in (Path("/usr/bin/oci"), Path("/usr/local/bin/oci"),
+                 Path("/home/ubuntu/bin/oci"), Path("/home/ubuntu/.local/bin/oci")):
         if path.is_file() and os.access(path, os.X_OK):
             return path
     return None
@@ -565,18 +614,20 @@ def main(argv: list[str] | None = None) -> int:
             rows.append(("PENDING", "oci.imdsv2-read-unavailable"))
 
         phase = "cloudflare.official-cidrs"
-        try:
-            trusted = official_cloudflare_ranges()
-            rows.append(("PASS", "cloudflare.official-dual-stack-cidr-read"))
-        except Exception:
-            trusted = {}
-            rows.append(("PENDING", "cloudflare.official-cidr-read-unavailable"))
+        trusted, official_rows = official_cidr_observations()
+        rows.extend(official_rows)
+        if set(trusted) != {4, 6}:
+            rows.append(("PENDING", "cloudflare.current-dualstack-cidr-set-incomplete"))
 
         phase = "oci.authoritative-security"
         oci_ip: str | None = None
         cli = find_oci_cli()
-        if not vnics or cli is None or not trusted:
-            rows.append(("PENDING", "oci.authoritative-nsg-and-security-list-unavailable"))
+        if cli is not None:
+            rows.append(("PASS", "oci.cli-executable-present-not-provider-authorization"))
+        if not vnics:
+            rows.append(("PENDING", "oci.imdsv2-vnic-inventory-unavailable"))
+        elif cli is None:
+            rows.append(("PENDING", "oci.cli-executable-unavailable"))
         else:
             vnic_id = str(vnics[0]["vnicId"])
             vnic, auth = oci_probe(vnic_id, executable=cli)
@@ -634,6 +685,8 @@ def main(argv: list[str] | None = None) -> int:
                                 ingress.extend(rules)
                         if not complete:
                             rows.append(("PENDING", "oci.provider-ingress-inventory-incomplete"))
+                        elif set(trusted) != {4, 6}:
+                            rows.append(("PENDING", "oci.ingress-rule-source-comparison-needs-current-cidrs"))
                         else:
                             judgment = review_oci_rules(ingress, trusted)
                             rows.append((judgment, "oci.effective-union-of-nsg-and-security-list-ingress"))
