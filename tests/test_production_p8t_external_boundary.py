@@ -162,32 +162,62 @@ class P8TReadOnlyTests(unittest.TestCase):
                 result = gate.safe_read_failure(exc)
                 self.assertEqual(result, code)
                 self.assertNotIn("secret", result)
+                if isinstance(exc, HTTPError):
+                    exc.close()
 
-    def test_cloudflare_official_families_are_independently_classified(self):
-        from urllib.error import URLError
-        import socket
-        with mock.patch.object(gate, "request_bytes", side_effect=[
-                b"173.245.48.0/20\n103.21.244.0/22\n",
-                b"2400:cb00::/32\n"]) as request:
+    def test_cloudflare_public_api_is_complete_one_request_dual_stack(self):
+        import json
+        response = {"success": True, "result": {
+            "etag": "public-cidrs", "ipv4_cidrs": ["173.245.48.0/20", "103.21.244.0/22"],
+            "ipv6_cidrs": ["2400:cb00::/32"]}}
+        with mock.patch.object(gate, "request_bytes",
+                return_value=json.dumps(response).encode()) as request:
             trusted, rows = gate.official_cidr_observations()
         self.assertEqual(set(trusted), {4, 6})
-        self.assertEqual(rows, [
-            ("PASS", "cloudflare.official-ipv4-cidr-fetched"),
-            ("PASS", "cloudflare.official-ipv6-cidr-fetched"),
-        ])
-        self.assertEqual(request.call_count, 2)
-        self.assertTrue(all(call.kwargs.get("maximum") == 8192
-                            for call in request.call_args_list))
+        self.assertEqual(rows, [("PASS", "cloudflare.official-api-dualstack-cidrs-validated")])
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[0], "https://api.cloudflare.com/client/v4/ips")
+        self.assertNotIn("Authorization", request.call_args.args[1])
+        self.assertEqual(request.call_args.kwargs["maximum"], 16384)
 
+    def test_cloudflare_api_403_fallback_to_both_legacy_official_endpoints(self):
+        from urllib.error import HTTPError
+        denied = HTTPError("https://api.cloudflare.com/client/v4/ips", 403, "denied", {}, None)
+        try:
+            with mock.patch.object(gate, "request_bytes", side_effect=[
+                    denied, b"173.245.48.0/20\n103.21.244.0/22\n",
+                    b"2400:cb00::/32\n"]) as request:
+                trusted, rows = gate.official_cidr_observations()
+            self.assertEqual(set(trusted), {4, 6})
+            self.assertEqual(rows, [
+                ("PENDING", "cloudflare.official-api-ips-http-authorization-denied"),
+                ("PASS", "cloudflare.official-ipv4-cidr-fetched"),
+                ("PASS", "cloudflare.official-ipv6-cidr-fetched"),
+            ])
+            self.assertEqual(request.call_count, 3)
+            self.assertEqual(request.call_args_list[1].args[0],
+                             "https://www.cloudflare.com/ips-v4")
+        finally:
+            denied.close()
+
+    def test_cloudflare_partial_fallback_cannot_be_dualstack_pass(self):
+        from urllib.error import URLError
+        import json
+        import socket
+        invalid_api = {"success": True,
+                       "result": {"ipv4_cidrs": ["10.0.0.0/8"],
+                                  "ipv6_cidrs": ["2400:cb00::/32"]}}
         with mock.patch.object(gate, "request_bytes", side_effect=[
+                json.dumps(invalid_api).encode(),
                 URLError(socket.gaierror("private-dns-error")),
                 b"2400:cb00::/32\n"]):
             partial, diagnostics = gate.official_cidr_observations()
         self.assertEqual(set(partial), {6})
-        self.assertEqual(diagnostics[0],
-                         ("PENDING", "cloudflare.official-ipv4-dns-unavailable"))
-        self.assertEqual(diagnostics[1],
-                         ("PASS", "cloudflare.official-ipv6-cidr-fetched"))
+        self.assertEqual(diagnostics, [
+            ("PENDING", "cloudflare.official-api-ips-response-unexpected"),
+            ("PENDING", "cloudflare.official-ipv4-dns-unavailable"),
+            ("PASS", "cloudflare.official-ipv6-cidr-fetched"),
+        ])
         self.assertNotIn("private-dns-error", str(diagnostics))
 
     def test_no_oci_cli_reports_tool_absence_independently_of_cidrs(self):
