@@ -233,3 +233,12 @@ The archived rc.11 A/B/C real-host operational tests and rc.12 D1R/D2 fixes rema
 **P4/P5:** only after explicit operator GO, perform selected supported transition and controlled production DNS/traffic cutover, then prove actual outside-client authentication, security, first naturally scheduled backup with independent remote verification, and agreed observation period. Reboot is separately authorized; the Worker is intentionally unarmed following reboot.
 
 Never claim a binary-only rollback restores persistent data or package state.
+
+
+## New disposable VM P8S stopped-state verified; external isolation HOLD (2026-11-05 UTC)
+
+On `vaultwarden-oci-7-vnic`, pinned candidate `08de314333303d5ff671f81497723580ff394cc6` from consolidated PR #411 passed 22 focused P8S tests; P8S-A host result **HOLD/0**, private sanitized report `/home/ubuntu/vwoci-acceptance/p8s-a-readonly-20261105T214536Z-3811/summary.txt`. The exact restored data/SOPS/Age/dedicated ext4/immutable release, all 12 service definitions, CrowdSec, 27-ID doctor, IPv4+IPv6 Docker origin filters and empty stopped HTTP/Docker state passed. Original P8P BLOCKED and P8R REARMED retain their historical meaning: no automatic reboot-persistence claim.
+
+Expected pending generated runtime paths are not license for automatic repair. OCI VNIC/NSG/subnet security-list union, Cloudflare DNS/Worker Route and wildcard overlap, public IPv4/IPv6 policy, test-only FQDN and original production host isolation **have not been independently proven**. No live rc.12 Caddy/Vaultwarden, TLS challenge, Worker, original Box write/prune, SMTP, timer activation or cutover was executed. Until those boundaries are verified, next live/service acceptance is HOLD and production GO is NO.
+
+Continue with one batched, read-only P8T external-isolation discovery/proof on a separately reviewed source branch, not an incremental series of local recheck scripts. Only if all provider facts are authoritative and the test dataset and Box destination are isolated should a subsequent live canary be planned. Preserve all root-private historical markers and original recovery material.
