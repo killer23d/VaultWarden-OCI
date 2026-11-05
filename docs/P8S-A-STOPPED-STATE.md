@@ -26,3 +26,14 @@ The second real disposable-VM P8S-A invocation ran **20/20 focused regression te
 The root cause is a **test-reader formatting bug**: the original P8R writer generates each final line with a ten-character left-aligned status **plus one separating space**. For `REARMED`, this results in four spaces before `P8R`; the original P8S-A reader incorrectly expected three. Its fixture duplicated the incorrect constant, so its tests falsely passed. The consolidated correction now matches original P8R writer formatting, uses an **independent literal source-writer fixture**, and asserts that the old three-space line is rejected. No P8R marker, historical report, or original production state was changed.
 
 After all CI jobs pass, use **a fresh distinct checkout pinned to the corrected PR HEAD** to run the focused P8S-A/P8S-B suites and read-only host preflight in one invocation. Do not edit the original failed checkouts, rerun P8R, or begin live/Box/Worker activity. A `HOLD/0` means stopped-host checks passed but external isolation remains unverified.
+
+
+## Actual accepted corrected P8S-A stopped-host result (November 5, 2026 UTC)
+
+Operator ran corrected combined candidate `08de314333303d5ff671f81497723580ff394cc6` in a **new clean checkout** on disposable `vaultwarden-oci-7-vnic`, Ubuntu 26.04 ARM64. **All 22 focused P8S-A/P8S-B regression tests PASS.** Real protected-host acceptance returned **HOLD/exit 0**, not BLOCKED. Root-private sanitized evidence: `/home/ubuntu/vwoci-acceptance/p8s-a-readonly-20261105T214536Z-3811/summary.txt`.
+
+Real PASS: exact historical P8O/P8P/P8Q/P8R evidence and exclusive postboot marker continuity; same original dedicated ext4 device, restored SQLite SHA/integrity, SOPS/Age and immutable release/12 installed units; original P8P BLOCKED and P8R REARMED preserved; no app/DNS/timers/notifications, Docker containers or HTTP80/443 listeners; CrowdSec engine and INPUT bouncer enabled/active; Cloudflare Worker disabled/inactive; validated Cloudflare CIDRs and effective IPv4/IPv6 DOCKER-USER origin filtering; exact 27-ID installed doctor schema and mandatory host/security/storage checks.
+
+Expected **PENDING**: stopped generated/volatile runtime paths (no repair or unsafe path demonstrated), authoritative external OCI/Cloudflare isolation and test-only offsite destination verification. **NOT RUN:** no reboot, firewall refresh, Docker start, Worker/DNS/SMTP, Box access/write/prune or timers. This is the final accepted outcome for the P8S stopped-host gate, **not live/public or production GO**. Do not rerun P8S/P8P/P8R to manufacture a stronger label. First review external isolation and an independent test dataset/hostname before P8T canary planning.
+
+The first two P8S-A BLOCKED runs remain in this document as correct historical diagnostic failures. The combined code is pending ordinary PR review/merge; acceptance does not imply that any product release is deployed to production.
