@@ -1,0 +1,37 @@
+# P8T — batched read-only external-isolation audit
+
+**Baseline:** `v2` at `2ea58845bc354d6c81e8a9ba5712a57b6ffdecb6`. **Host:** `vaultwarden-oci-7-vnic`, Ubuntu 26.04 ARM64. **Scope:** P8S-to-P8T read-only boundary, NOT a live canary and NOT production GO.
+
+## Accepted predecessor (do not rerun)
+
+P8S-A on 2026-11-05 UTC from reviewed source `08de314333303d5ff671f81497723580ff394cc6`: 22/22 P8S-A/B regression tests PASS; private `/home/ubuntu/vwoci-acceptance/p8s-a-readonly-20261105T214536Z-3811/summary.txt` ended HOLD/0. Exact original historical data/SQLite SHA/operational SOPS-Age/52 files/12 units, dedicated ext4, stopped services/containers and local Cloudflare/CrowdSec IPv4+IPv6 passed. Generated/volatile runtime paths PENDING; independent OCI/Cloudflare isolation PENDING; no external mutation occurred. Original P8P BLOCKED/2 and P8R REARMED/0 retain their meaning.
+
+P8T checks this root-private P8S summary, its exact PASS/PENDING/NOT RUN rows and current kernel boot continuity. P8T **does not run P8S, P8P, P8R or their original markers**. It checks that application units are still dormant and there are no published HTTP/Docker listeners or retained containers.
+
+## One batched read-only source gate
+
+One candidate branch, one PR and one single operator command:
+
+- Exact clean git SHA, correct hostname, Ubuntu 26.04 ARM64, passwordless sudo.
+- Independent P8S archived HOLD and kernel boot continuity, no unexpected local startup.
+- Oracle IMDSv2 instance/VNIC identity, with bounded requests to the fixed local metadata endpoint.
+- Optional authoritative OCI CLI **GET/list** queries as unprivileged `ubuntu` using existing OCI config or instance-principal read permissions: primary VNIC, public IPv4, subnet, **every** subnet security-list ingress and attached NSG ingress (additive union), IPv6 assigned objects. No network configuration is ever written.
+- Latest official Cloudflare IPv4/IPv6 CIDR read to compare OCI 443 ingress sources. Public HTTP 80 and unauthorized HTTPS 443 allowances on any NSG or security list are **BLOCKED**; unknown or inaccessible provider rule data is PENDING, never passed.
+- Optional GET-only Cloudflare zone, complete DNS pages, zone Worker routes and account Worker custom domains via the immutable installed rc.12 Cloudflare token. A separately supplied candidate test FQDN is checked against wildcard/Worker overlap and the OCI VNIC public IPv4. Missing Worker custom-domain permissions, missing candidate hostname or incomplete origin identity remains PENDING. Original production hostname `bw.lazymocha.com` remains immutable and must not be used as candidate.
+- OCI console recovery and original VM separation require independent operator/provider confirmation: PENDING. A disposable blank application dataset and **test-only** offsite remote are not yet proven: PENDING.
+
+No additional packages, IAM permissions, CLI config, Cloudflare tokens, API records or rclone remotes are automatically created. If OCI CLI or Cloudflare API read permissions are unavailable, the gate records PENDING, NOT inferred PASS; grant *read-only* privileges separately if desired. The command does not print raw CIDRs, OCIDs, VNIC IPs, DNS targets, tokens, secrets, SQL, Cloudflare responses or private doctor logs.
+
+**An independent test hostname must be supplied via `--test-fqdn` to assess its DNS and Worker overlap.** It may be left blank to gather the rest of the evidence in the same run. The script never provisions a hostname or changes records. It will not start any service even when the read-only checks pass.
+
+## Status semantics
+
+`HOLD/exit 0`: the read-only audit ran without a detected blocking security drift, but any PENDING requires independent proof before a live canary. `BLOCKED/exit 2`: a known overpermissive provider ingress, candidate DNS/Worker collision, protected P8S evidence/boot mismatch, unexpected local app activation, or other fail-closed condition. Never treat BLOCKED as authorization to rerun P8R, edit firewall manually or delete one-shot markers.
+
+Private sanitized evidence: `/home/ubuntu/vwoci-acceptance/p8t-readonly-<UTC>-<PID>/summary.txt`, owner root, 0600. Only paste sanitized summary and `P8T_EXIT` to chat; don't send raw provider responses or credential values.
+
+## Next after P8T
+
+If OCI/Cloudflare facts are complete and independent test hostname, serial console, test-only app dataset and isolated remote are verified, open **one** separate bounded P8U canary PR that proves the installed product-owned startup sequence, then external TLS/auth/admin, controlled stop/rollback and later test-only SMTP/backup/timer behavior. The historical restored production SQLite and `bw-backup:bw-backup` must **never** become live test fixtures. Reboot persistence is still a separate historical HOLD; a successful local filter rearm does not change P8P.
+
+P8T read-only acceptance, even with all observed provider checks passing, **never** grants production permission.
