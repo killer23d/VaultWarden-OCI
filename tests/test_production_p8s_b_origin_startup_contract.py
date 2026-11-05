@@ -134,7 +134,7 @@ class OriginStartupContract(unittest.TestCase):
         text = edge.firewall_bouncer_bootstrap_local_text()
         self.assertNotIn("DOCKER-USER", text)
         self.assertNotIn("FORWARD", text)
-        self.assertIn("INPUT", text)
+        self.assertIn("- input", text)
 
     def test_firewall_unavailable_does_not_silently_allow(self):
         runner = CapturingRunner(fail_at="iptables -w -n -L DOCKER-USER")
