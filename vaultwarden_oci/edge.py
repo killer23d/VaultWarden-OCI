@@ -23,7 +23,6 @@ from .cli import CommandResult, DoctorCheck, run_command
 CLOUDFLARE_IPV4_URL = "https://www.cloudflare.com/ips-v4"
 CLOUDFLARE_IPV6_URL = "https://www.cloudflare.com/ips-v6"
 CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
-CLOUDFLARE_IPS_API_URL = CLOUDFLARE_API + "/ips"
 CROWDSEC_REPO_INSTALLER = "https://install.crowdsec.net"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_INSTALLER_BYTES = 512 * 1024
@@ -174,50 +173,14 @@ def _http_text(url: str, maximum: int = MAX_RESPONSE_BYTES) -> str:
         raise EdgeError("HTTPS response is not UTF-8") from exc
 
 
-def parse_cloudflare_ips_api(text: str, *, fetched_at: int) -> CloudflarePolicy:
-    """Validate both families from Cloudflare's documented public GET /ips.
-
-    A partial, malformed or non-success API response is never a usable
-    current policy; callers may attempt the independent legacy HTTPS source.
-    """
-    if not isinstance(text, str) or not 0 < len(text) <= MAX_RESPONSE_BYTES:
-        raise EdgeError("Cloudflare IP API response is missing or oversized")
-    try:
-        payload = json.loads(text)
-    except (ValueError, TypeError) as exc:
-        raise EdgeError("Cloudflare IP API response is not valid JSON") from exc
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        raise EdgeError("Cloudflare IP API response is not a successful object")
-    result = payload.get("result")
-    if not isinstance(result, dict):
-        raise EdgeError("Cloudflare IP API result is not an object")
-    values = []
-    for field in ("ipv4_cidrs", "ipv6_cidrs"):
-        field_value = result.get(field)
-        if (not isinstance(field_value, list) or
-                any(not isinstance(value, str) for value in field_value)):
-            raise EdgeError("Cloudflare IP API CIDR list is incomplete")
-        values.append("\n".join(field_value))
-    return validate_policy(values[0], values[1], fetched_at=fetched_at,
-                           source="current")
-
-
 def fetch_cloudflare_policy(*, now: int | None = None, fetcher: Fetcher = _http_text) -> CloudflarePolicy:
     timestamp = int(time.time()) if now is None else int(now)
-    # The public API is an independent official source; it avoids rejecting
-    # safe start when www.cloudflare.com WAF denies the older text downloads.
-    # Do not fall back to a third-party mirror or unvalidated ranges.
-    try:
-        return parse_cloudflare_ips_api(
-            fetcher(CLOUDFLARE_IPS_API_URL, MAX_RESPONSE_BYTES),
-            fetched_at=timestamp)
-    except EdgeError:
-        return validate_policy(
-            fetcher(CLOUDFLARE_IPV4_URL, MAX_RESPONSE_BYTES),
-            fetcher(CLOUDFLARE_IPV6_URL, MAX_RESPONSE_BYTES),
-            fetched_at=timestamp,
-            source="current",
-        )
+    return validate_policy(
+        fetcher(CLOUDFLARE_IPV4_URL, MAX_RESPONSE_BYTES),
+        fetcher(CLOUDFLARE_IPV6_URL, MAX_RESPONSE_BYTES),
+        fetched_at=timestamp,
+        source="current",
+    )
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
