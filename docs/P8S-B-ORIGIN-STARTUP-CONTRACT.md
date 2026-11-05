@@ -1,6 +1,6 @@
 # P8S-B: source contract for origin fail-closed startup
 
-Base v2: 8590d83c074174824df1256b68d5bc0b57f4e9ab.
+Base integration SHA: 8590d83c074174824df1256b68d5bc0b57f4e9ab.
 
 The installed default-path runtime.lifecycle(start/restart) refreshes origin policy before Docker Compose up. edge.refresh_origin_policy installs temporary both-family DOCKER-USER 443 drop guards before contacting the Cloudflare policy source or LKG. It builds IPv4 and IPv6 CIDR source allowlist chains with terminal DROP, installs jumps, and only then removes guards.
 
