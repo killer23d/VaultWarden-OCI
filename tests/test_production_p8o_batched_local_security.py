@@ -95,7 +95,7 @@ class P8OLocalFoundationTests(unittest.TestCase):
                 self.assertEqual(report.finish(), 2)
             text = (Path(folder) / "summary.txt").read_text()
             self.assertIn("BLOCKED", text)
-            self.assertIn("never rerun", text)
+            self.assertIn("do not rerun", text)
 
     def test_report_foundation_only_after_verified(self):
         with tempfile.TemporaryDirectory() as folder:
