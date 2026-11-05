@@ -47,6 +47,7 @@ def module():
 
 def data_only(command: tuple[str, ...], key: str, value: str,
               region: str, *, extra: tuple[str, ...] = (),
+              instance_filter: str | None = None,
               cli: str = "oci") -> Any | None:
     # Only hardcoded exact OCI GET/list commands and validated OCIDs; never
     # accept user-supplied CLI flags, URL, query filter or a shell string.
@@ -54,9 +55,20 @@ def data_only(command: tuple[str, ...], key: str, value: str,
             or not REGION_RE.fullmatch(region)
             or not key.startswith("--") or extra not in ((), ("--all",))):
         return None
-    args = [cli, *command, key, value, *extra,
-            "--region", region, "--output", "json", "--max-retries", "0",
-            "--connection-timeout", "4", "--read-timeout", "10"]
+    is_attachment_list = command == ("compute", "vnic-attachment", "list")
+    if is_attachment_list:
+        if (key != "--compartment-id" or not instance_filter
+                or not OCID_RE.fullmatch(instance_filter)
+                or not instance_filter.startswith("ocid1.instance.")
+                or extra != ("--all",)):
+            return None
+    elif instance_filter is not None:
+        return None
+    args = [cli, *command, key, value]
+    if is_attachment_list:
+        args.extend(["--instance-id", instance_filter])
+    args.extend([*extra, "--region", region, "--output", "json", "--max-retries", "0",
+                 "--connection-timeout", "4", "--read-timeout", "10"])
     try:
         proc = subprocess.run(
             args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -130,7 +142,8 @@ def verify(argv=None) -> int:
             rows.append(("PENDING", "oci.cloudshell-selected-instance-needs-identity-crosscheck"))
 
         attached = data_only(("compute", "vnic-attachment", "list"), "--compartment-id",
-                             compartment, args.region, extra=("--all",))
+                             compartment, args.region, extra=("--all",),
+                             instance_filter=args.instance_id)
         if not isinstance(attached, list):
             rows.append(("PENDING", "oci.cloudshell-attached-vnic-list-unavailable"))
             return p8t.emit(None, rows, "HOLD")
