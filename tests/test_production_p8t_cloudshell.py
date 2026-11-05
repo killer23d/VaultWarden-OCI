@@ -42,6 +42,30 @@ class CloudShellReadOnlyTests(unittest.TestCase):
             self.assertIsNone(value)
             calls.assert_not_called()
 
+    def test_attachment_query_must_filter_exact_disposable_instance(self):
+        from subprocess import CompletedProcess
+        compartment="ocid1.tenancy.oc1..abcdefgh"
+        payload={"data":[{"vnic-id":VNIC, "lifecycle-state":"ATTACHED"}]}
+        with mock.patch.object(shell.subprocess, "run", return_value=
+                CompletedProcess(["oci"], 0, json.dumps(payload).encode(), b"")) as run:
+            absent=shell.data_only(("compute","vnic-attachment","list"),
+                    "--compartment-id", compartment, REGION, extra=("--all",))
+            self.assertIsNone(absent)
+            run.assert_not_called()
+            unrelated=shell.data_only(("compute","vnic-attachment","list"),
+                    "--compartment-id", compartment, REGION, extra=("--all",),
+                    instance_filter="ocid1.vnic.oc1.iad.not-instance")
+            self.assertIsNone(unrelated)
+            run.assert_not_called()
+            actual=shell.data_only(("compute","vnic-attachment","list"),
+                    "--compartment-id", compartment, REGION, extra=("--all",),
+                    instance_filter=INSTANCE)
+            self.assertEqual(actual, payload["data"])
+            called=run.call_args.args[0]
+            self.assertIn("--instance-id",called)
+            self.assertEqual(called[called.index("--instance-id")+1], INSTANCE)
+            self.assertIn("--all",called)
+
     def test_cli_get_sanitizes_raw_failures(self):
         from subprocess import CompletedProcess
         with mock.patch.object(shell.subprocess, "run", return_value=
