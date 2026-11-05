@@ -237,7 +237,23 @@ REASON_CODES = {
 def reason_code(error: Exception) -> str:
     # Keys are pinned constant messages that cannot contain unknown user data.
     # Discard every other exception string to avoid accidental secret exfiltration.
-    return REASON_CODES.get(str(error), "unclassified-safe-stop")
+    fixed = REASON_CODES.get(str(error))
+    if fixed is not None:
+        return fixed
+    for exception_type, code in (
+        (FileNotFoundError, "os.missing-file"),
+        (PermissionError, "os.permission-denied"),
+        (NotADirectoryError, "os.invalid-parent"),
+        (json.JSONDecodeError, "json.invalid-evidence"),
+        (UnicodeError, "text.invalid-encoding"),
+        (KeyError, "schema.missing-key"),
+        (TypeError, "schema.invalid-type"),
+        (ValueError, "schema.invalid-value"),
+        (OSError, "os.unclassified"),
+    ):
+        if isinstance(error, exception_type):
+            return code
+    return "unclassified-safe-stop"
 
 
 def main(argv: list[str] | None = None) -> int:
