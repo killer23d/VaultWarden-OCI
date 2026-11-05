@@ -50,6 +50,70 @@ def record(host, address, proxied=True):
 
 
 class P8TReadOnlyTests(unittest.TestCase):
+    def test_real_oracle_metadata_field_roles_not_identical(self):
+        # Oracle defines displayName as a friendly name, independent of
+        # hostname. The original test incorrectly equated the two.
+        source = {
+            "id": "ocid1.instance.oc1.phx.abc123def456",
+            "displayName": "my-friendly-disposable-name",
+            "hostname": gate.HOST,
+        }
+        vnics = [{"vnicId": "ocid1.vnic.oc1.phx.abc123def456",
+                  "privateIp": "10.0.0.2", "nicIndex": 0}]
+        actual_instance, actual_vnics = gate.validate_imds(source, vnics)
+        self.assertEqual(actual_vnics, vnics)
+        self.assertEqual(actual_instance, source)
+        self.assertEqual(gate.imds_name_status(source),
+            ("PASS", "oci.imdsv2-hostname-corresponds-to-linux-host"))
+
+    def test_instance_display_name_matches_but_hostname_is_independent(self):
+        instance = {"displayName": gate.HOST, "hostname": "vnic-host.label.internal"}
+        self.assertEqual(gate.imds_name_status(instance),
+            ("PASS", "oci.imdsv2-displayname-corresponds-to-linux-host"))
+
+    def test_unrelated_friendly_name_is_pending_not_blocked(self):
+        # OCI API/host correlation is not proven by Linux hostname alone.
+        unrelated = {"displayName": "other-friendly-name", "hostname": "other-host"}
+        self.assertEqual(gate.imds_name_status(unrelated),
+            ("PENDING", "oci.imdsv2-provider-name-needs-independent-confirmation"))
+        self.assertEqual(gate.imds_name_status({}),
+            ("PENDING", "oci.imdsv2-provider-name-needs-independent-confirmation"))
+
+    def test_metadata_schema_gaps_are_bounded_not_forged_acceptance(self):
+        base = {"id": "ocid1.instance.oc1.phx.abc123def456",
+                "displayName": "unrelated"}
+        primary = {"vnicId": "ocid1.vnic.oc1.phx.abc123def456"}
+        for instance, vnics, expected in [
+            ([], [primary], "oci.imdsv2-instance-response-unrecognized"),
+            ({"id": "not-an-ocid"}, [primary], "oci.imdsv2-instance-ocid-unrecognized"),
+            (base, {}, "oci.imdsv2-vnics-response-unrecognized"),
+            (base, [{"vnicId": "bad"}], "oci.imdsv2-vnic-ocid-unrecognized"),
+            (base, [primary, primary], "oci.imdsv2-vnic-ocids-not-unique"),
+        ]:
+            with self.subTest(reason=expected):
+                with self.assertRaises(gate.ProviderObservationIncomplete) as raised:
+                    gate.validate_imds(instance, vnics)
+                self.assertEqual(str(raised.exception), expected)
+                self.assertIn(expected, gate.IMDS_OBSERVATIONS)
+
+    def test_metadata_gets_only_fixed_imdsv2_paths_and_bearer_oracle(self):
+        import json
+        instance = {"id": "ocid1.instance.oc1.phx.abc123def456",
+                    "displayName": "separate-friendly-name",
+                    "hostname": gate.HOST}
+        vnics = [{"vnicId": "ocid1.vnic.oc1.phx.abc123def456"}]
+        with mock.patch.object(gate, "request_bytes", side_effect=[
+                json.dumps(instance).encode(), json.dumps(vnics).encode()]) as read:
+            self.assertEqual(gate.imds(), (instance, vnics))
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in read.call_args_list], [
+                "http://169.254.169.254/opc/v2/instance/",
+                "http://169.254.169.254/opc/v2/vnics/"])
+        self.assertTrue(all(
+            call.args[1].get("Authorization") == "Bearer Oracle"
+            for call in read.call_args_list))
+
     def test_exact_real_accepted_p8s_historical_summary(self):
         gate.accept_p8s(ACCEPTED_P8S)
         self.assertEqual(gate.P8S_FINAL, "HOLD       P8S-A stopped-only; no live/Box/Worker/DNS/timer authorization")
