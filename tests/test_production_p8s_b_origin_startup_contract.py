@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from vaultwarden_oci import edge, runtime
+from vaultwarden_oci.cli import CommandResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,25 +35,25 @@ class CapturingRunner:
         binary = command[0]
         if binary in ("iptables", "ip6tables"):
             if self.fail_at and self.fail_at in " ".join(command):
-                return edge.run_command.__globals__["CommandResult"](command, 1, "", "injected", "exit")
+                return CommandResult(command, "exit", 1, "", "injected")
             if "-L" in command and "DOCKER-USER" in command:
-                return edge.run_command.__globals__["CommandResult"](command, 0, "", "", "exit")
+                return CommandResult(command, "success", 0, "", "")
             if "-L" in command and edge.CHAIN in command:
-                return edge.run_command.__globals__["CommandResult"](command, 0 if self.chain[binary] else 1, "", "", "exit")
+                return CommandResult(command, "success" if self.chain[binary] else "exit", 0 if self.chain[binary] else 1, "", "")
             if "-N" in command and edge.CHAIN in command:
                 self.chain[binary] = True
-                return edge.run_command.__globals__["CommandResult"](command, 0, "", "", "exit")
+                return CommandResult(command, "success", 0, "", "")
             if "-C" in command:
-                return edge.run_command.__globals__["CommandResult"](command, 1, "", "", "exit")
+                return CommandResult(command, "exit", 1, "", "")
             if "-D" in command and "DOCKER-USER" in command and edge.GUARD_COMMENT in command:
-                return edge.run_command.__globals__["CommandResult"](command, 0, "", "", "exit")
-        return edge.run_command.__globals__["CommandResult"](command, 0, "", "", "exit")
+                return CommandResult(command, "success", 0, "", "")
+        return CommandResult(command, "success", 0, "", "")
 
 
 class OriginStartupContract(unittest.TestCase):
     @staticmethod
     def policy():
-        return edge.validate_policy("173.245.48.0/20", "2400:cb00::/32",
+        return edge.validate_policy("173.245.48.0/20\n103.21.244.0/22", "2400:cb00::/32",
                                     fetched_at=1000, source="live")
 
     def test_unsafe_invalid_and_expired_cidrs_fail(self):
@@ -127,7 +128,7 @@ class OriginStartupContract(unittest.TestCase):
         self.assertIn("enable_ipv6: true", source)
         self.assertIn("gateway_mode_ipv6: nat", source)
         self.assertIn("restart: unless-stopped", source)  # Vaultwarden not publicly mapped
-        self.assertIn("restart: \\"no\\"", source)  # Caddy is publicly mapped
+        self.assertIn('restart: "no"', source)  # Caddy is publicly mapped
 
     def test_crowdsec_boundary_is_input_only(self):
         text = edge.firewall_bouncer_bootstrap_local_text()
