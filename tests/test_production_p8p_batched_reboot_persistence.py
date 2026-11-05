@@ -263,6 +263,31 @@ class P8PTests(unittest.TestCase):
             self.assertIn("BLOCKED", out.getvalue())
 
     @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
+    def test_uncertain_prior_rearm_attempt_blocks_before_new_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            checkpoint = root / "checkpoint.json"
+            attempt = root / "rearm.json"
+            p8p.exclusive_file(checkpoint, (json.dumps(fixture_checkpoint())+"\n").encode())
+            p8p.exclusive_file(attempt, b'{"schema":1}\n')
+            out = TTY()
+            with ExitStack() as stack:
+                for name, value in (("EVIDENCE", root), ("CHECKPOINT", checkpoint),
+                                    ("REARM_MARKER", attempt)):
+                    stack.enter_context(mock.patch.object(p8p, name, value))
+                stack.enter_context(mock.patch.object(p8p, "authorized_host", return_value=True))
+                stack.enter_context(mock.patch.object(p8p, "source_clean", return_value=True))
+                stack.enter_context(mock.patch.object(p8p, "accepted_p8o"))
+                snap = stack.enter_context(mock.patch.object(p8p, "snapshot"))
+                stack.enter_context(mock.patch.object(sys, "stdout", out))
+                stack.enter_context(mock.patch.object(sys, "argv", [
+                    str(SCRIPT), "--expected-commit", PIN, "--mode", "verify",
+                ]))
+                self.assertEqual(p8p.main(), 2)
+            snap.assert_not_called()
+            self.assertIn("BLOCKED", out.getvalue())
+
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_postboot_verify_and_one_shot_rearm(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
