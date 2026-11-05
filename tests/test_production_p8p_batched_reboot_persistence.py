@@ -26,8 +26,11 @@ NEW_BOOT = "23456789-1234-1234-1234-1234567890ab"
 # root-only (uid 0, mode 0600); only these mock tests reinterpret st_uid.
 _REAL_FSTAT = os.fstat
 def fake_root_fstat(fd):
-    real = _REAL_FSTAT(fd)
-    return SimpleNamespace(st_mode=real.st_mode, st_uid=0, st_size=real.st_size)
+    # Keep the complete stat_result interface (st_dev/st_ino needed by
+    # tempfile cleanup), changing ONLY the simulated file-owner UID.
+    values = list(_REAL_FSTAT(fd))
+    values[4] = 0
+    return os.stat_result(values)
 
 
 
