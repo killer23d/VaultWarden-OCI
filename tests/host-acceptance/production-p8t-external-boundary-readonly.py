@@ -702,25 +702,34 @@ def main(argv: list[str] | None = None) -> int:
                         rows.append(("PASS", "oci.no-ipv6-assignment-on-primary-vnic"))
 
         phase = "cloudflare.authoritative-routes"
-        rows.append(("PASS" if candidate else "PENDING", "cloudflare.distinct-test-fqdn-specified" if candidate else "cloudflare.distinct-test-fqdn-unprovided"))
+        rows.append(("PASS" if candidate else "PENDING",
+                     "cloudflare.distinct-test-fqdn-specified" if candidate
+                     else "cloudflare.distinct-test-fqdn-unprovided"))
+        cf_phase = "cloudflare.installed-release"
         try:
             if not RELEASE.is_dir():
                 raise Blocked("immutable rc12 release missing")
+            cf_phase = "cloudflare.installed-module-import"
             sys.path.insert(0, str(RELEASE))
             from vaultwarden_oci import runtime, secrets
+            cf_phase = "cloudflare.installed-config-read"
             cfg = runtime.load_config()
             if cfg.domain != HISTORICAL_DOMAIN or cfg.offsite_remote != HISTORICAL_REMOTE:
                 raise Blocked("original recovered application config changed before isolation gate")
+            cf_phase = "cloudflare.sops-credential-read"
             values = secrets.validate_encrypted(cfg.offline_recovery_recipient)
             token = values.get("cloudflare_api_token", "") if isinstance(values, dict) else ""
             if not isinstance(token, str) or not token:
                 raise Blocked("installed Cloudflare credentials unavailable")
+            cf_phase = "cloudflare.api-zone-query"
             zone = cf_paginate(token, "/zones?name=" + ZONE, limit=2)
             hits = [z for z in zone if z.get("name") == ZONE]
             if len(hits) != 1 or not re.fullmatch(r"[a-f0-9]{32}", str(hits[0].get("id", ""))):
                 raise Blocked("Cloudflare authoritative zone identity ambiguous")
             zid = hits[0]["id"]
+            cf_phase = "cloudflare.api-dns-records-query"
             records = cf_paginate(token, f"/zones/{zid}/dns_records", limit=10)
+            cf_phase = "cloudflare.api-worker-routes-query"
             routes_doc = cf_api(token, f"/zones/{zid}/workers/routes")
             routes = routes_doc["result"]
             if len(routes) > 1000 or any(not isinstance(x, dict) for x in routes):
@@ -728,24 +737,26 @@ def main(argv: list[str] | None = None) -> int:
             account = hits[0].get("account")
             accountid = account.get("id") if isinstance(account, dict) else None
             custom = None
+            custom_reason = "cloudflare.api-worker-domains-account-unidentified"
             if isinstance(accountid, str) and re.fullmatch(r"[a-f0-9]{32}", accountid):
                 try:
+                    cf_phase = "cloudflare.api-worker-domains-query"
                     custom = cf_paginate(token, f"/accounts/{accountid}/workers/domains", limit=10)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    custom_reason = "cloudflare.api-worker-domains-" + safe_read_failure(exc)
             rows.append(("PASS", "cloudflare.authoritative-zone-dns-and-worker-routes-read"))
             review = review_cf_candidate(candidate, ZONE, records, routes, custom, oci_ip)
             rows.append((review, "cloudflare.test-host-dns-worker-and-origin-isolation"))
             if review == "BLOCKED":
                 raise Blocked("Cloudflare test hostname collides with DNS/Worker or expected origin")
             if custom is None:
-                rows.append(("PENDING", "cloudflare.worker-custom-domains-scope-unverified"))
+                rows.append(("PENDING", custom_reason))
         except Blocked as exc:
             if "changed before isolation gate" in str(exc) or "collides" in str(exc):
                 raise
-            rows.append(("PENDING", "cloudflare.readonly-api-credentials-or-permissions-incomplete"))
-        except Exception:
-            rows.append(("PENDING", "cloudflare.readonly-api-unavailable"))
+            rows.append(("PENDING", cf_phase + "-" + safe_read_failure(exc)))
+        except Exception as exc:
+            rows.append(("PENDING", cf_phase + "-" + safe_read_failure(exc)))
 
         rows.extend([
             ("PENDING", "oci.console-recovery-and-original-vm-isolation-independent-attestation"),
