@@ -1,6 +1,6 @@
 # P8S-A: disposable stopped-state read-only batch
 
-Base v2: 8590d83c074174824df1256b68d5bc0b57f4e9ab. Host: vaultwarden-oci-7-vnic, Ubuntu 26.04 ARM64.
+Base integration SHA: 8590d83c074174824df1256b68d5bc0b57f4e9ab. Host: vaultwarden-oci-7-vnic, Ubuntu 26.04 ARM64.
 
 P8M RESTORED/0, P8N HOLD/0, P8O FOUNDATION/0, P8Q READONLY/0 and P8R REARMED/0 were observed on the new disposable VM. P8P remains BLOCKED/2 despite a real changed kernel boot ID. P8R succeeded after 129 focused tests and nine green CI jobs; its accepted private summary is /home/ubuntu/vwoci-acceptance/p8r-origin-rearm-20261105T210337Z-2487/summary.txt. P8R was a manual origin re-arm, not automatic cold-boot persistence.
 
