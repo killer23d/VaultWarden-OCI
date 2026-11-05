@@ -350,7 +350,12 @@ def review_oci_rules(rules: list[dict[str, Any]], trusted: dict[int, tuple[ipadd
 
 
 def cf_api(token: str, path: str) -> dict[str, Any]:
-    if (not token or len(token) > 512 or not re.fullmatch(r"/(?:zones|accounts)/[a-zA-Z0-9/?=&._%-]+", path)):
+    allowed_path = re.fullmatch(
+        r"(?:/zones\?name=[a-z0-9.-]+&page=[0-9]+&per_page=100"
+        r"|/zones/[a-f0-9]{32}/dns_records\?page=[0-9]+&per_page=100"
+        r"|/zones/[a-f0-9]{32}/workers/routes"
+        r"|/accounts/[a-f0-9]{32}/workers/domains\?page=[0-9]+&per_page=100)", path)
+    if not token or len(token) > 512 or allowed_path is None:
         raise Blocked("unapproved Cloudflare read-only endpoint")
     blob = request_bytes("https://api.cloudflare.com/client/v4" + path,
                          {"Authorization": "Bearer " + token,
