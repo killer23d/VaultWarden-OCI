@@ -136,6 +136,64 @@ class P8TReadOnlyTests(unittest.TestCase):
         with self.assertRaises(gate.Blocked):
             gate.accept_p8s(ACCEPTED_P8S.replace(original, ""))
 
+    def test_safe_network_codes_no_exception_text_or_provider_body(self):
+        import socket
+        import ssl
+        from urllib.error import HTTPError, URLError
+        errors = [
+            (HTTPError("https://www.cloudflare.com/ips-v4", 403,
+                       "private-token-should-not-leak", {}, None),
+             "http-authorization-denied"),
+            (HTTPError("https://www.cloudflare.com/ips-v6", 429,
+                       "private-identifier-should-not-leak", {}, None),
+             "http-rate-limited"),
+            (HTTPError("https://www.cloudflare.com/ips-v4", 503,
+                       "private-source-should-not-leak", {}, None),
+             "http-server-unavailable"),
+            (URLError(socket.gaierror("secret-address")), "dns-unavailable"),
+            (URLError(ssl.SSLError("secret-certificate")), "tls-unavailable"),
+            (URLError(TimeoutError("secret-timeout")), "timeout"),
+            (ConnectionRefusedError("secret-origin"), "connection-unavailable"),
+            (gate.Blocked("secret-http-body"), "response-unexpected"),
+            (RuntimeError("secret-key-token"), "unclassified-unavailable"),
+        ]
+        for exc, code in errors:
+            with self.subTest(code=code):
+                result = gate.safe_read_failure(exc)
+                self.assertEqual(result, code)
+                self.assertNotIn("secret", result)
+
+    def test_cloudflare_official_families_are_independently_classified(self):
+        from urllib.error import URLError
+        import socket
+        with mock.patch.object(gate, "request_bytes", side_effect=[
+                b"173.245.48.0/20\\n103.21.244.0/22\\n",
+                b"2400:cb00::/32\\n"]) as request:
+            trusted, rows = gate.official_cidr_observations()
+        self.assertEqual(set(trusted), {4, 6})
+        self.assertEqual(rows, [
+            ("PASS", "cloudflare.official-ipv4-cidr-fetched"),
+            ("PASS", "cloudflare.official-ipv6-cidr-fetched"),
+        ])
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(all(call.kwargs.get("maximum") == 8192
+                            for call in request.call_args_list))
+
+        with mock.patch.object(gate, "request_bytes", side_effect=[
+                URLError(socket.gaierror("private-dns-error")),
+                b"2400:cb00::/32\\n"]):
+            partial, diagnostics = gate.official_cidr_observations()
+        self.assertEqual(set(partial), {6})
+        self.assertEqual(diagnostics[0],
+                         ("PENDING", "cloudflare.official-ipv4-dns-unavailable"))
+        self.assertEqual(diagnostics[1],
+                         ("PASS", "cloudflare.official-ipv6-cidr-fetched"))
+        self.assertNotIn("private-dns-error", str(diagnostics))
+
+    def test_no_oci_cli_reports_tool_absence_independently_of_cidrs(self):
+        with mock.patch.object(gate.Path, "is_file", return_value=False):
+            self.assertIsNone(gate.find_oci_cli())
+
     def test_cloudflare_ranges_reject_private_and_duplicates(self):
         for text in ("10.0.0.0/8\n173.245.48.0/20\n",
                      "173.245.48.0/20\n173.245.48.0/20\n",
