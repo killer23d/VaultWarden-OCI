@@ -391,7 +391,10 @@ def cf_paginate(token: str, prefix: str, *, limit: int = 10) -> list[dict[str, A
 def route_collides(pattern: str, fqdn: str) -> bool:
     if not isinstance(pattern, str) or not 0 < len(pattern) <= 512:
         return True
-    host_pattern = pattern.split("/", 1)[0].lower()
+    route = pattern.lower()
+    if route.startswith(("http://", "https://")):
+        route = route.split("://", 1)[1]
+    host_pattern = route.split("/", 1)[0]
     if host_pattern in ("*", "*." + ZONE):
         return True
     from fnmatch import fnmatchcase
@@ -407,8 +410,12 @@ def review_cf_candidate(fqdn: str, zone: str, records: list[dict[str, Any]],
         return "BLOCKED"
     if domains is None:
         return "PENDING"
-    if any(d.get("hostname", "").lower() == fqdn and (d.get("enabled") or d.get("previews_enabled"))
-           for d in domains):
+    if any(
+        isinstance(d.get("hostname"), str) and (
+            (d["hostname"].lower() == fqdn and (d.get("enabled") or d.get("previews_enabled")))
+            or (d.get("previews_enabled") and fqdn.endswith("." + d["hostname"].lower()))
+        ) for d in domains
+    ):
         return "BLOCKED"
     matching = [r for r in records if r.get("name", "").lower() == fqdn]
     wildcard = [r for r in records if r.get("name", "").lower().startswith("*.") and
