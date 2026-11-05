@@ -178,5 +178,94 @@ class P8OLocalFoundationTests(unittest.TestCase):
             self.assertNotIn(forbidden, content)
 
 
+    def test_full_batched_success_invokes_only_two_installed_product_commands(self):
+        """Mock the integrated one-shot path and assert marker precedes writes."""
+        from contextlib import ExitStack
+
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            attempts = root / "p8o-attempt.json"
+            actions = []
+
+            def fake_log(out, name, command, seconds):
+                self.assertTrue(attempts.is_file(), "one-shot marker must predate mutation")
+                self.assertEqual(attempts.stat().st_mode & 0o777, 0o600)
+                actions.append((name, command[-2:]))
+                return 0
+
+            stdout = TTY()
+            with ExitStack() as stack:
+                for target, value in (
+                    ("EVIDENCE", root),
+                    ("ATTEMPT", attempts),
+                ):
+                    stack.enter_context(mock.patch.object(p8o, target, value))
+                stack.enter_context(mock.patch.object(p8o, "authorized_host", return_value=True))
+                stack.enter_context(mock.patch.object(p8o, "source_clean", return_value=True))
+                stack.enter_context(mock.patch.object(p8o, "historical_recovery"))
+                stack.enter_context(mock.patch.object(p8o, "imported_module", return_value=SimpleNamespace()))
+                stack.enter_context(mock.patch.object(p8o, "protected_state", return_value=b"same"))
+                security = stack.enter_context(mock.patch.object(p8o, "security_state"))
+                stack.enter_context(mock.patch.object(p8o, "host_operational", return_value=(False, True)))
+                doctor = stack.enter_context(mock.patch.object(p8o, "check_doctor", return_value=({}, "PENDING")))
+                stack.enter_context(mock.patch.object(p8o, "private_log", side_effect=fake_log))
+                stack.enter_context(mock.patch.object(sys, "argv", [
+                    str(SCRIPT), "--expected-commit", "a" * 40,
+                    "--apply-disposable", "--oci-console-ready",
+                ]))
+                stack.enter_context(mock.patch.object(sys, "stdin", TTY()))
+                stack.enter_context(mock.patch.object(sys, "stdout", stdout))
+                self.assertEqual(p8o.main(), 0)
+
+            self.assertEqual([label for label, _ in actions], ["edge-refresh", "crowdsec-setup"])
+            self.assertEqual([command for _, command in actions], [
+                ["edge", "refresh"], ["crowdsec", "setup"]
+            ])
+            self.assertEqual(doctor.call_count, 2)
+            self.assertEqual(security.call_count, 3)
+            self.assertEqual([c.kwargs.get("installed") for c in security.call_args_list],
+                             [False, False, True])
+            self.assertIn("FOUNDATION", stdout.getvalue())
+            self.assertIn("FOUNDATION", next(root.glob("p8o-security-batch-*/summary.txt")).read_text())
+
+    def test_edge_setup_failure_blocks_and_does_not_run_crowdsec(self):
+        from contextlib import ExitStack
+
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            marker = root / "p8o-attempt.json"
+            out = TTY()
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(p8o, "EVIDENCE", root))
+                stack.enter_context(mock.patch.object(p8o, "ATTEMPT", marker))
+                stack.enter_context(mock.patch.object(p8o, "authorized_host", return_value=True))
+                stack.enter_context(mock.patch.object(p8o, "source_clean", return_value=True))
+                stack.enter_context(mock.patch.object(p8o, "historical_recovery"))
+                stack.enter_context(mock.patch.object(p8o, "imported_module", return_value=SimpleNamespace()))
+                stack.enter_context(mock.patch.object(p8o, "protected_state", return_value=b"same"))
+                stack.enter_context(mock.patch.object(p8o, "security_state"))
+                stack.enter_context(mock.patch.object(p8o, "host_operational", return_value=(False, True)))
+                stack.enter_context(mock.patch.object(p8o, "check_doctor", return_value=({}, "PENDING")))
+                logs = stack.enter_context(mock.patch.object(p8o, "private_log", return_value=None))
+                stack.enter_context(mock.patch.object(sys, "argv", [
+                    str(SCRIPT), "--expected-commit", "b" * 40,
+                    "--apply-disposable", "--oci-console-ready",
+                ]))
+                stack.enter_context(mock.patch.object(sys, "stdin", TTY()))
+                stack.enter_context(mock.patch.object(sys, "stdout", out))
+                self.assertEqual(p8o.main(), 2)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(logs.call_count, 1)
+            self.assertIn("BLOCKED", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
