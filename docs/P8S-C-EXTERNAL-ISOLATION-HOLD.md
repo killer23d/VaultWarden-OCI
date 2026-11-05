@@ -1,6 +1,6 @@
 # P8S-C: independent OCI/Cloudflare proof required before live canary
 
-Base v2: 8590d83c074174824df1256b68d5bc0b57f4e9ab.
+Base integration SHA: 8590d83c074174824df1256b68d5bc0b57f4e9ab.
 
 Status HOLD, not accepted: repository inspection alone cannot verify authoritative OCI and Cloudflare provider state.
 
