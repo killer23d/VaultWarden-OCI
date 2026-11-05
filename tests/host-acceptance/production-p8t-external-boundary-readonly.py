@@ -312,9 +312,33 @@ def official_cloudflare_ranges() -> dict[int, tuple[ipaddress._BaseNetwork, ...]
 def official_cidr_observations() -> tuple[
     dict[int, tuple[ipaddress._BaseNetwork, ...]], list[tuple[str, str]]
 ]:
-    """Fetch both official families independently; partial data never implies PASS."""
-    trusted: dict[int, tuple[ipaddress._BaseNetwork, ...]] = {}
+    """Prefer Cloudflare's public dual-stack GET /ips; fallback to two text URLs.
+
+    All responses must be complete, bounded, and independently validated. An
+    HTTP 403 or malformed response never authorizes reusing unverified CIDRs.
+    """
     rows: list[tuple[str, str]] = []
+    try:
+        doc = load_json_bytes(request_bytes(
+            "https://api.cloudflare.com/client/v4/ips",
+            {"Accept": "application/json", "User-Agent": "VaultWarden-OCI P8T readonly"},
+            maximum=16384, timeout=10))
+        if not isinstance(doc, dict) or doc.get("success") is not True:
+            raise Blocked("official Cloudflare IP API success marker missing")
+        result = doc.get("result")
+        if not isinstance(result, dict):
+            raise Blocked("official Cloudflare IP API result invalid")
+        trusted: dict[int, tuple[ipaddress._BaseNetwork, ...]] = {}
+        for family, field in ((4, "ipv4_cidrs"), (6, "ipv6_cidrs")):
+            ranges = result.get(field)
+            if not isinstance(ranges, list) or any(not isinstance(x, str) for x in ranges):
+                raise Blocked("official Cloudflare IP API family missing")
+            trusted[family] = cidr_set("\n".join(ranges), family)
+        return trusted, [("PASS", "cloudflare.official-api-dualstack-cidrs-validated")]
+    except Exception as exc:
+        rows.append(("PENDING", "cloudflare.official-api-ips-" + safe_read_failure(exc)))
+
+    trusted = {}
     for family, suffix in ((4, "ipv4"), (6, "ipv6")):
         try:
             raw = request_bytes("https://www.cloudflare.com/ips-v" + str(family),
