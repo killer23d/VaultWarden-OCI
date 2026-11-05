@@ -64,6 +64,20 @@ class Blocked(RuntimeError):
     """No private details enter sanitized reports."""
 
 
+class ProviderObservationIncomplete(Exception):
+    """Known schema/metadata gap, not proof of unsafe host configuration."""
+
+
+# Only constant, source-reviewed reasons may reach the sanitized host summary.
+IMDS_OBSERVATIONS = frozenset({
+    "oci.imdsv2-instance-response-unrecognized",
+    "oci.imdsv2-instance-ocid-unrecognized",
+    "oci.imdsv2-vnics-response-unrecognized",
+    "oci.imdsv2-vnic-ocid-unrecognized",
+    "oci.imdsv2-vnic-ocids-not-unique",
+})
+
+
 def source_clean(expected: str) -> bool:
     if not SHA40.fullmatch(expected) or REPO.is_symlink() or not (REPO / ".git").is_dir():
         return False
@@ -195,20 +209,51 @@ def load_json_bytes(data: bytes) -> Any:
     return json.loads(data.decode("utf-8", "strict"))
 
 
+def validate_imds(instance: Any, vnics: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate only stable Oracle IMDSv2 identifiers and bounded VNIC count.
+
+    The Oracle instance displayName is user-editable and is NOT an OS
+    hostname identity assertion. Do not turn a name mismatch into a security
+    BLOCKED/2 when the authoritative VNIC/OCI provider checks haven't run.
+    """
+    if not isinstance(instance, dict):
+        raise ProviderObservationIncomplete("oci.imdsv2-instance-response-unrecognized")
+    instance_id = instance.get("id")
+    if (not isinstance(instance_id, str) or not OCID.fullmatch(instance_id)
+            or not instance_id.startswith("ocid1.instance.")):
+        raise ProviderObservationIncomplete("oci.imdsv2-instance-ocid-unrecognized")
+    if not isinstance(vnics, list) or not 1 <= len(vnics) <= 8:
+        raise ProviderObservationIncomplete("oci.imdsv2-vnics-response-unrecognized")
+    ids: list[str] = []
+    for entry in vnics:
+        if not isinstance(entry, dict):
+            raise ProviderObservationIncomplete("oci.imdsv2-vnics-response-unrecognized")
+        identifier = entry.get("vnicId")
+        if (not isinstance(identifier, str) or not OCID.fullmatch(identifier)
+                or not identifier.startswith("ocid1.vnic.")):
+            raise ProviderObservationIncomplete("oci.imdsv2-vnic-ocid-unrecognized")
+        ids.append(identifier)
+    if len(set(ids)) != len(ids):
+        raise ProviderObservationIncomplete("oci.imdsv2-vnic-ocids-not-unique")
+    return instance, vnics
+
+
 def imds() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     root = "http://169.254.169.254/opc/v2/"
     header = {"Authorization": "Bearer Oracle", "Accept": "application/json"}
     instance = load_json_bytes(request_bytes(root + "instance/", header))
     vnics = load_json_bytes(request_bytes(root + "vnics/", header))
-    if (not isinstance(instance, dict) or not isinstance(vnics, list)
-            or not 1 <= len(vnics) <= 8 or
-            not isinstance(instance.get("id"), str)
-            or not OCID.fullmatch(instance["id"]) or
-            not instance["id"].startswith("ocid1.instance.")
-            or any(not isinstance(v, dict) or not OCID.fullmatch(str(v.get("vnicId", "")))
-                   or not str(v["vnicId"]).startswith("ocid1.vnic.") for v in vnics)):
-        raise Blocked("OCI IMDSv2 instance or attached VNIC schema invalid")
-    return instance, vnics
+    return validate_imds(instance, vnics)
+
+
+def imds_name_status(instance: dict[str, Any]) -> tuple[str, str]:
+    # Oracle documents displayName as a friendly name, unlike hostname.
+    # A mismatch is incomplete provider linkage, not evidence of exposure.
+    if instance.get("hostname") == HOST:
+        return "PASS", "oci.imdsv2-hostname-corresponds-to-linux-host"
+    if instance.get("displayName") == HOST:
+        return "PASS", "oci.imdsv2-displayname-corresponds-to-linux-host"
+    return "PENDING", "oci.imdsv2-provider-name-needs-independent-confirmation"
 
 
 def cidr_set(raw: str, family: int) -> tuple[ipaddress._BaseNetwork, ...]:
@@ -504,14 +549,20 @@ def main(argv: list[str] | None = None) -> int:
         phase = "oci.imdsv2"
         try:
             instance, vnics = imds()
-            if instance.get("displayName") != HOST:
-                raise Blocked("IMDSv2 instance identity differs from expected disposable host")
-            rows.append(("PASS", "oci.imdsv2-instance-and-vnic-inventory"))
-        except Blocked:
-            raise
+            # Identifiers are from local metadata, not an independent
+            # provider-origin proof. Separate the two classifications.
+            rows.append(("PASS", "oci.imdsv2-structured-ocids-and-vnic-inventory"))
+            rows.append(imds_name_status(instance))
+        except ProviderObservationIncomplete as exc:
+            instance, vnics = {}, []
+            # Reasons are finite constant identifiers; never print raw HTTP,
+            # instance names, OCI IDs, network addresses, or exception values.
+            reason = str(exc)
+            rows.append(("PENDING", reason if reason in IMDS_OBSERVATIONS
+                         else "oci.imdsv2-unclassified-schema"))
         except Exception:
             instance, vnics = {}, []
-            rows.append(("PENDING", "oci.imdsv2-provider-identity-unavailable"))
+            rows.append(("PENDING", "oci.imdsv2-read-unavailable"))
 
         phase = "cloudflare.official-cidrs"
         try:
