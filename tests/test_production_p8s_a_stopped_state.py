@@ -84,6 +84,7 @@ class P8SATests(unittest.TestCase):
                  mock.patch.object(gate, "source_clean", return_value=True), \
                  mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
                  mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
                  mock.patch.object(gate, "read_preflight", side_effect=fail_after_historical_summary), \
                  mock.patch("sys.stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(gate.main(["--expected-commit", "a" * 40]), 2)
@@ -108,6 +109,7 @@ class P8SATests(unittest.TestCase):
                  mock.patch.object(gate, "source_clean", return_value=True), \
                  mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
                  mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
                  mock.patch.object(gate, "read_preflight", return_value={"hashes": {}}), \
                  mock.patch("sys.stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(gate.main(["--expected-commit", "b" * 40]), 2)
@@ -145,6 +147,7 @@ class P8SATests(unittest.TestCase):
                  mock.patch.object(gate, "source_clean", return_value=True), \
                  mock.patch.object(gate, "import_checked", side_effect=[fake_p8p, object()]), \
                  mock.patch.object(gate, "folder_private", return_value=private), \
+                 mock.patch.object(gate.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
                  mock.patch.object(gate, "read_preflight", side_effect=malicious), \
                  mock.patch("sys.stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(gate.main(["--expected-commit", "c" * 40]), 2)
