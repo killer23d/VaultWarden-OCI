@@ -1,6 +1,6 @@
 # P8T — batched read-only external-isolation audit
 
-**Baseline:** `v2` at `2ea58845bc354d6c81e8a9ba5712a57b6ffdecb6`. **Host:** `vaultwarden-oci-7-vnic`, Ubuntu 26.04 ARM64. **Scope:** P8S-to-P8T read-only boundary, NOT a live canary and NOT production GO.
+**Baseline integration commit:** `2ea58845bc354d6c81e8a9ba5712a57b6ffdecb6`. **Host:** `vaultwarden-oci-7-vnic`, Ubuntu 26.04 ARM64. **Scope:** P8S-to-P8T read-only boundary, NOT a live canary and NOT production GO.
 
 ## Accepted predecessor (do not rerun)
 
