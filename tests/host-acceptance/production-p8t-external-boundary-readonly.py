@@ -220,7 +220,8 @@ def cidr_set(raw: str, family: int) -> tuple[ipaddress._BaseNetwork, ...]:
         if net.version != family or net.is_private or net.is_loopback or net.is_reserved:
             raise Blocked("official Cloudflare CIDR list contains nonpublic network")
         items.append(net)
-    if not (2 <= len(items) <= 64) if family == 4 else not (1 <= len(items) <= 64):
+    minimum = 2 if family == 4 else 1
+    if not minimum <= len(items) <= 64:
         raise Blocked("official Cloudflare CIDR list size implausible")
     if len(set(items)) != len(items):
         raise Blocked("official Cloudflare CIDRs duplicated")
@@ -242,8 +243,8 @@ def find_oci_cli() -> Path | None:
 
 def oci_call(command: tuple[str, ...], key: str, value: str, *, auth: str,
              executable: Path, extra: tuple[str, ...] = ()) -> Any:
-    if command not in OCI_COMMANDS or not OCID.fullmatch(value) or
-       not key.startswith("--") or extra not in ((), ("--all",)):
+    if (command not in OCI_COMMANDS or not OCID.fullmatch(value)
+            or not key.startswith("--") or extra not in ((), ("--all",))):
         raise Blocked("unreviewed OCI read-only query rejected")
     # CLI runs as the unprivileged ubuntu user, never as root.
     account = pwd.getpwnam("ubuntu")
@@ -598,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
             token = values.get("cloudflare_api_token", "") if isinstance(values, dict) else ""
             if not isinstance(token, str) or not token:
                 raise Blocked("installed Cloudflare credentials unavailable")
-            zone = cf_paginate(token, "/zones?name=" + ZONE + "&", limit=2)
+            zone = cf_paginate(token, "/zones?name=" + ZONE, limit=2)
             hits = [z for z in zone if z.get("name") == ZONE]
             if len(hits) != 1 or not re.fullmatch(r"[a-f0-9]{32}", str(hits[0].get("id", ""))):
                 raise Blocked("Cloudflare authoritative zone identity ambiguous")
