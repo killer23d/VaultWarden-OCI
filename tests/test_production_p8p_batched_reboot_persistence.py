@@ -22,6 +22,14 @@ PIN = "a" * 40
 OLD_BOOT = "12345678-1234-1234-1234-1234567890ab"
 NEW_BOOT = "23456789-1234-1234-1234-1234567890ab"
 
+# Simulated root-file metadata for unprivileged CI. Actual P8P stays STRICT
+# root-only (uid 0, mode 0600); only these mock tests reinterpret st_uid.
+_REAL_FSTAT = os.fstat
+def fake_root_fstat(fd):
+    real = _REAL_FSTAT(fd)
+    return SimpleNamespace(st_mode=real.st_mode, st_uid=0, st_size=real.st_size)
+
+
 
 class TTY(io.StringIO):
     def isatty(self):
@@ -86,6 +94,7 @@ class P8PTests(unittest.TestCase):
                     self.assertEqual(p8p.main(), 2)
                 previous.assert_not_called()
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_read_private_file_0600_and_no_symlink(self):
         with tempfile.TemporaryDirectory() as d:
             file = Path(d) / "private"
@@ -110,6 +119,7 @@ class P8PTests(unittest.TestCase):
                 p8p.exclusive_file(marker, b"replacement")
             self.assertEqual(marker.read_bytes(), b'{"schema":1}\n')
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_checkpoint_exact_identity_and_phase(self):
         with tempfile.TemporaryDirectory() as d:
             checkpoint = Path(d) / "checkpoint"
@@ -122,6 +132,7 @@ class P8PTests(unittest.TestCase):
                 with self.assertRaises(p8p.Blocked):
                     p8p.checkpoint_finish(updated)
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_checkpoint_rejects_wrong_host(self):
         with tempfile.TemporaryDirectory() as d:
             checkpoint = Path(d) / "checkpoint"
@@ -131,6 +142,7 @@ class P8PTests(unittest.TestCase):
                 with self.assertRaises(p8p.Blocked):
                     p8p.checkpoint_read()
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_checkpoint_never_allows_protected_digest_edit(self):
         with tempfile.TemporaryDirectory() as d:
             checkpoint = Path(d) / "checkpoint"
@@ -224,6 +236,7 @@ class P8PTests(unittest.TestCase):
             self.assertIn("REBOOT_REQUESTED", out.getvalue())
             self.assertEqual(json.loads(checkpoint.read_text())["phase"], "requested")
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_verify_without_new_boot_blocks(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -246,6 +259,7 @@ class P8PTests(unittest.TestCase):
             snap.assert_not_called()
             self.assertIn("BLOCKED", out.getvalue())
 
+    @mock.patch.object(p8p.os, "fstat", new=fake_root_fstat)
     def test_postboot_verify_and_one_shot_rearm(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
