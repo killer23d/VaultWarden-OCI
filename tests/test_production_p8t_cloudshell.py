@@ -83,7 +83,93 @@ class CloudShellReadOnlyTests(unittest.TestCase):
                    "--instance-id", INSTANCE, REGION)
         self.assertEqual(data["id"], INSTANCE)
         self.assertIn("--region", calls.call_args.args[0])
-        self.assertEqual(calls.call_args.kwargs.get("stderr"),shell.subprocess.DEVNULL)
+        self.assertEqual(calls.call_args.kwargs.get("stderr"), shell.subprocess.PIPE)
+        self.assertNotIn("env", calls.call_args.kwargs)  # inherit delegated CLI auth
+        self.assertEqual(calls.call_args.kwargs["timeout"], 75)
+        self.assertEqual(calls.call_args.args[0][-8:],
+                         ["--output", "json", "--max-retries", "0",
+                          "--connection-timeout", "4", "--read-timeout", "10"])
+
+    def test_exact_region_and_instance_cli_matches_successful_shell_probe(self):
+        from subprocess import CompletedProcess
+        from unittest.mock import patch
+        instance = "ocid1.instance.oc1.us-sanjose-1.aaabbbcccddd"
+        payload = {"data": {"id": instance, "compartment-id": "ocid1.compartment.oc1..abcd"}}
+        with patch.dict(shell.os.environ, {
+                "OCI_CLI_AUTH": "instance_obo_user",
+                "OCI_CLI_CONFIG_FILE": "/etc/oci/config",
+                "OCI_CLI_PROFILE": "us-sanjose-1"}), \
+             mock.patch.object(shell.subprocess, "run",
+                 return_value=CompletedProcess(["oci"], 0, json.dumps(payload).encode(), b"")) as run:
+            failure_codes = []
+            data = shell.data_only(("compute", "instance", "get"), "--instance-id",
+                                   instance, "us-sanjose-1", diagnostic=failure_codes)
+            self.assertEqual(data, payload["data"])
+            self.assertEqual(failure_codes, [])
+            self.assertEqual(run.call_args.args[0],
+                ["oci", "compute", "instance", "get", "--instance-id", instance,
+                 "--region", "us-sanjose-1", "--output", "json",
+                 "--max-retries", "0", "--connection-timeout", "4",
+                 "--read-timeout", "10"])
+            self.assertNotIn("env", run.call_args.kwargs)
+
+    def test_cli_failure_categorization_redacts_provider_stderr(self):
+        from subprocess import CompletedProcess
+        cases = [
+            (b"ServiceError: NotAuthorizedOrNotFound ... secretOCID", "not-authorized-or-not-found"),
+            (b"ConfigFileNotFound secretPath", "config-file-unavailable"),
+            (b"Error: No such option: --example secretInfo", "cli-argument-unsupported"),
+            (b"NotAuthenticated token-should-not-leak", "authentication-rejected"),
+            (b"random-auth-private-error", "cli-nonzero-unclassified"),
+        ]
+        for stderr, reason in cases:
+            with self.subTest(reason=reason), \
+                 mock.patch.object(shell.subprocess, "run",
+                     return_value=CompletedProcess(["oci"], 1, b"secret-output", stderr)):
+                diagnostics = []
+                data = shell.data_only(("compute", "instance", "get"),
+                    "--instance-id", INSTANCE, REGION, diagnostic=diagnostics)
+                self.assertIsNone(data)
+                self.assertEqual(diagnostics, [reason])
+                self.assertNotIn("secret", str(diagnostics))
+                self.assertEqual(shell.cli_failure_code(stderr), reason)
+
+    def test_missing_data_and_malformed_json_have_specific_safe_codes(self):
+        from subprocess import CompletedProcess
+        for payload, reason in [
+            (b"untrusted private output", "cli-response-json-invalid"),
+            (b'{"other":"private"}', "cli-response-data-missing"),
+            (b"", "cli-response-empty-or-oversized"),
+        ]:
+            with self.subTest(reason=reason), \
+                 mock.patch.object(shell.subprocess, "run",
+                     return_value=CompletedProcess(["oci"], 0, payload, b"")):
+                diagnostics = []
+                self.assertIsNone(shell.data_only(
+                    ("compute", "instance", "get"), "--instance-id", INSTANCE,
+                    REGION, diagnostic=diagnostics))
+                self.assertEqual(diagnostics, [reason])
+
+    def test_verify_initial_instance_failure_emits_sanitized_reason(self):
+        from types import SimpleNamespace
+        recorder = []
+        def emit(_folder, rows, outcome):
+            recorder.extend(rows)
+            return 0 if outcome == "HOLD" else 2
+        def unavailable(*args, **kwargs):
+            kwargs["diagnostic"].append("cli-argument-unsupported")
+            return None
+        stub = SimpleNamespace(source_clean=lambda *_: True, emit=emit)
+        with mock.patch.object(shell.shutil, "which", return_value="/home/oci/bin/oci"), \
+             mock.patch.object(shell, "module", return_value=stub), \
+             mock.patch.object(shell, "data_only", side_effect=unavailable), \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = shell.verify(["--expected-commit", "a" * 40,
+                               "--instance-id", INSTANCE, "--region", REGION])
+        self.assertEqual(rc, 0)
+        self.assertEqual(recorder, [
+            ("PENDING", "oci.cloudshell-instance-get-cli-argument-unsupported")
+        ])
 
     def test_bad_instance_is_rejected_before_provider_access(self):
         with mock.patch.object(shell.shutil,"which",return_value="/usr/bin/oci"), \
