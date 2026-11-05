@@ -14,6 +14,12 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
+# Independently transcribed from the original reviewed P8R private_summary()
+# writer: a 10-column status plus a literal separating space. Do NOT derive
+# this fixture from gate.R_FINAL, or it can repeat a parser formatting bug.
+SOURCE_P8R_REARMED = "REARMED    P8R host-local firewall only; no public/Box/Worker/production GO"
+
+
 def accepted_report():
     return "\n".join([
         gate.R_HEADING,
@@ -32,11 +38,29 @@ def accepted_report():
         "PENDING    Public origin/Worker Route Fail Open and test-only backup/SMTP still require separate proof",
         "PENDING    Disposable unencrypted ext4 may retain restored plaintext remnants; securely retire after acceptance",
         "NOT RUN    No additional reboot, Caddy/Vaultwarden, Worker/DNS/SMTP, Box write/prune or timer operation",
-        gate.R_FINAL, "",
+        SOURCE_P8R_REARMED, "",
     ])
 
 
 class P8SATests(unittest.TestCase):
+    def test_p8r_terminal_matches_original_independent_writer(self):
+        # This test failed on the first P8S-A host attempt: P8R emits four
+        # blanks after REARMED (3 alignment + 1 separator), not three.
+        self.assertEqual(
+            SOURCE_P8R_REARMED,
+            f"{'REARMED':<10} P8R host-local firewall only; no public/Box/Worker/production GO",
+        )
+        self.assertEqual(gate.R_FINAL, SOURCE_P8R_REARMED)
+        gate.accepted_r_summary(accepted_report())
+
+    def test_original_incorrect_three_space_terminal_is_rejected(self):
+        incorrect = accepted_report().replace(
+            SOURCE_P8R_REARMED,
+            "REARMED   P8R host-local firewall only; no public/Box/Worker/production GO",
+        )
+        with self.assertRaises(gate.Blocked):
+            gate.accepted_r_summary(incorrect)
+
     def test_corrected_real_outcome_is_recognized(self):
         gate.accepted_r_summary(accepted_report())
 
