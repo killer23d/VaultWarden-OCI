@@ -134,7 +134,7 @@ class CloudShellReadOnlyTests(unittest.TestCase):
             (r("173.245.48.0/20"),"nsg",()),
             (r("173.245.48.0/20",80,80),"nsg",
              ("oci.cloudshell.nsg.ipv4.public-tcp80",)),
-            (r("203.0.113.0/24"),"nsg",
+            (r("8.8.8.0/24"),"nsg",
              ("oci.cloudshell.nsg.ipv4.outside-cloudflare-tcp443",)),
         ]
         for rule,kind,expected in cases:
@@ -168,7 +168,7 @@ class CloudShellReadOnlyTests(unittest.TestCase):
                     {"id":subnet,"security-list-ids":[slist]},
                 ("network","security-list","get"):
                     {"ingress-security-rules":[rule("0.0.0.0/0",80),
-                                               rule("203.0.113.0/24",443)]},
+                                               rule("8.8.8.0/24",443)]},
                 ("network","nsg","rules","list"):
                     [rule("::/0",443)],
                 ("network","ipv6","list"): [],
