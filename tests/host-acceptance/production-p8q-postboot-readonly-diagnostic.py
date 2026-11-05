@@ -328,7 +328,7 @@ def main() -> int:
     report = Report(folder)
     ctx: dict[str, object] = {}
     report.record("source.exact-reviewed-p8p", "PASS")
-    report.check("prior.p8o-foundation-evidence", p8p.accepted_p8o)
+    report.check("prior.p8o-foundation-evidence", lambda: p8p.accepted_p8o() is None)
     def check_checkpoint():
         value = p8p.checkpoint_read()
         if (value.get("phase") != "requested"
@@ -406,8 +406,9 @@ def main() -> int:
                  lambda: (lambda x: x[0] == 0 and not x[1].strip())(
                      p8p.run(["/usr/bin/dpkg", "--audit"], timeout=45)))
     report.check("os.run-is-tmpfs",
-                 lambda: p8p.run(["/usr/bin/findmnt", "-n", "-o", "FSTYPE",
-                                 "--target", "/run"]) == (0, "tmpfs\n"))
+                 lambda: (lambda res: res[0] == 0 and res[1].strip() == "tmpfs")(
+                     p8p.run(["/usr/bin/findmnt", "-n", "-o", "FSTYPE",
+                              "--target", "/run"])))
     report.check("os.swap-empty",
                  lambda: (lambda lines: len(lines) == 1 and
                          lines[0].startswith("Filename"))(
