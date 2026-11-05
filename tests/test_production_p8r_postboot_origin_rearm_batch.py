@@ -138,7 +138,7 @@ class P8RTests(unittest.TestCase):
 
     def test_report_suppresses_potential_secret_bearing_rows(self):
         with tempfile.TemporaryDirectory() as d:
-            for label in ("invalid", "a\nsecret", "a" * 211):
+            for label in ("unsafe\rlabel", "a\nsecret", "a" * 211):
                 with self.assertRaises(p8r.Blocked):
                     p8r.private_summary(Path(d), [("PASS", label)], "REARMED")
 
@@ -167,6 +167,7 @@ class P8RTests(unittest.TestCase):
                           "crowdsec.engine", "crowdsec.hub", "crowdsec.firewall")
             statuses = dict.fromkeys((*required, *foundation), "PASS")
             statuses.update({"crowdsec.cloudflare": "FAIL", "runtime.paths": "FAIL"})
+            statuses.update({"extra." + str(i): "PASS" for i in range(27 - len(statuses))})
             p8p = SimpleNamespace(
                 Report=lambda d, label: SimpleNamespace(),
                 snapshot=lambda rep, d, after_boot: {"file": "sha"},
@@ -187,6 +188,7 @@ class P8RTests(unittest.TestCase):
             statuses = dict.fromkeys(foundation, "PASS")
             statuses.update({"host.os": "PASS", "crowdsec.cloudflare": "FAIL",
                              "runtime.paths": "FAIL", "crowdsec.engine": "FAIL"})
+            statuses.update({"extra." + str(i): "PASS" for i in range(27 - len(statuses))})
             p8p = SimpleNamespace(
                 Report=lambda d, label: SimpleNamespace(),
                 snapshot=lambda rep, d, after_boot: {"file": "sha"},
