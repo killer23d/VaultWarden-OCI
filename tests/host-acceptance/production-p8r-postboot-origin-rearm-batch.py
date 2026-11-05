@@ -178,6 +178,15 @@ def phase_dir(folder: Path, name: str) -> Path:
     return child
 
 
+def new_private_folder() -> Path:
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    folder = EVIDENCE / ("p8r-origin-rearm-" + stamp + "-" + str(os.getpid()))
+    folder.mkdir(mode=0o700)
+    if folder.lstat().st_uid != 0 or stat.S_IMODE(folder.lstat().st_mode) != 0o700:
+        raise Blocked("root-private P8R evidence metadata mismatch")
+    return folder
+
+
 def postboot_audit(p8p, folder: Path, checkpoint, label: str) -> tuple[bool, str]:
     snapshot_folder = phase_dir(folder, label + "-snapshot")
     doctor_folder = phase_dir(folder, label + "-doctor")
@@ -245,11 +254,7 @@ def main() -> int:
                 or p8p.P8O_COMMIT != "f989f2c91a1276501aab126443b96d593261e54e"):
             raise Blocked("exact source identity differs")
         checkpoint = historical_evidence(p8p, p8q)
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        folder = EVIDENCE / ("p8r-origin-rearm-" + stamp + "-" + str(os.getpid()))
-        folder.mkdir(mode=0o700)
-        if folder.lstat().st_uid != 0:
-            raise Blocked("root-private P8R evidence ownership mismatch")
+        folder = new_private_folder()
     except Exception:
         print("BLOCKED: P8P/P8Q evidence, source or one-shot marker invalid; no host change")
         return 2
