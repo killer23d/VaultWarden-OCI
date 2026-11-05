@@ -61,6 +61,9 @@ REQUIRED_P8Q = {
     "doctor.crowdsec.firewall": "PASS",
     "checkpoint.original-file-hashes-match": "PASS",
     "original-p8p.snapshot-parity": "PASS",
+    # The real P8Q report contains this *intentional* multiword status.
+    # Parsing it as two whitespace-separated fields rejects valid evidence.
+    "not-run.reboot-firewall-start-cloud-box-timers": "NOT RUN",
 }
 SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 
@@ -119,21 +122,36 @@ def module(path: Path, name: str):
 
 
 def p8q_statuses(text: str) -> dict[str, str]:
-    if not text.startswith("Gate P8Q - NEW disposable VM independent P8P postboot blocker diagnosis (READ-ONLY)\n"):
+    """Parse *exact* sanitized P8Q rows, including the two-word NOT RUN.
+
+    No raw log messages are parsed or emitted. A successful P8Q has one
+    intentional NOT RUN row proving it performed no mutable operations;
+    any other skipped inspection must not be promoted to a safe baseline.
+    """
+    heading = "Gate P8Q - NEW disposable VM independent P8P postboot blocker diagnosis (READ-ONLY)"
+    rows = text.splitlines()
+    if not rows or rows[0] != heading or len(rows) < 49:
         raise Blocked("P8Q accepted summary identity mismatch")
     statuses: dict[str, str] = {}
-    final = ""
-    for row in text.splitlines()[1:]:
-        parts = row.split()
-        if len(parts) != 2 or parts[0] not in ("PASS", "PENDING", "BLOCKED", "NOT RUN", "READONLY"):
+    final_key = "p8q.no-mutation.no-reboot.no-rearm.no-box.no-live-go"
+    allowed_skips = {"not-run.reboot-firewall-start-cloud-box-timers"}
+    status_row = re.compile(r"(PASS|PENDING|BLOCKED|NOT RUN|READONLY)[ \t]+([a-z0-9_.-]{3,82})\Z")
+    for line_number, row in enumerate(rows[1:], start=1):
+        match = status_row.fullmatch(row)
+        if match is None:
             raise Blocked("P8Q status format mismatch")
-        state, key = parts
-        if key in statuses or not re.fullmatch(r"[a-z0-9_.-]{3,82}", key):
-            raise Blocked("P8Q status id duplicate/unsafe")
+        state, key = match.groups()
+        if key in statuses:
+            raise Blocked("P8Q status id duplicate")
+        if state == "NOT RUN" and key not in allowed_skips:
+            raise Blocked("P8Q skipped unexpected protected check")
+        if key == final_key:
+            if state != "READONLY" or line_number != len(rows) - 1:
+                raise Blocked("P8Q outcome not final or not READONLY")
+        elif state == "READONLY":
+            raise Blocked("P8Q unexpected terminal outcome")
         statuses[key] = state
-        if state == "READONLY":
-            final = key
-    if final != "p8q.no-mutation.no-reboot.no-rearm.no-box.no-live-go":
+    if statuses.get(final_key) != "READONLY":
         raise Blocked("P8Q prior diagnostic was not a READONLY result")
     if any(value == "BLOCKED" for value in statuses.values()):
         raise Blocked("P8Q contains a blocked safety group")
