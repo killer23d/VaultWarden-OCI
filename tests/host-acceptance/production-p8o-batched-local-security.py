@@ -37,7 +37,7 @@ INSTALLED = Path("/opt/vaultwarden-oci/releases") / VERSION
 CURRENT = Path("/opt/vaultwarden-oci/current")
 STATE = Path("/var/lib/vaultwarden-oci")
 CONFIG = Path("/etc/vaultwarden-oci/config.toml")
-EVIDENCE = Path(pwd.getpwnam("ubuntu").pw_dir) / "vwoci-acceptance"
+EVIDENCE = Path("/home/ubuntu/vwoci-acceptance")
 P8M_ATTEMPT = EVIDENCE / "p8m-one-shot-disposable-restore-attempt.json"
 P8N_SUMMARY = EVIDENCE / "p8n-postrestore-20261105T192801Z-16689/summary.txt"
 ATTEMPT = EVIDENCE / "p8o-security-foundation-one-shot-attempt.json"
@@ -535,7 +535,7 @@ def main() -> int:
         report.verified = True
         return report.finish()
     except KeyboardInterrupt:
-        report.record("BLOCKED" if report.mutation_started else "PENDING",
+        report.record("BLOCKED",
                       "Interrupted during " + phase + "; do not retry after any host mutation")
         return report.finish()
     except Exception:
