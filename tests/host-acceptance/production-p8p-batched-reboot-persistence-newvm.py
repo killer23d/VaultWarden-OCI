@@ -449,7 +449,7 @@ def checkpoint_finish(value: dict[str, object]) -> None:
     exclusive_file(staged, (json.dumps(value, sort_keys=True) + "\n").encode("utf-8"))
     try:
         os.replace(staged, CHECKPOINT)
-        fd = os.open(EVIDENCE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(CHECKPOINT.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(fd)
         finally:
