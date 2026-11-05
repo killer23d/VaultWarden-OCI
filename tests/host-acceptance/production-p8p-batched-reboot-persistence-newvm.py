@@ -546,6 +546,10 @@ def main() -> int:
             saved = checkpoint_read()
             if saved.get("phase") != "requested" or saved.get("reviewed_commit") != pin:
                 raise Blocked("original requested reboot checkpoint not eligible for verification")
+            # A prior origin rearm attempt is never silently promoted to
+            # VERIFIED even if the firewall appears healthy after a crash.
+            if REARM_MARKER.exists() or REARM_MARKER.is_symlink():
+                raise Blocked("prior P8P firewall rearm attempted; require separate partial-state review")
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         folder = EVIDENCE / ("p8p-" + mode + "-" + stamp + "-" + str(os.getpid()))
         folder.mkdir(mode=0o700)
