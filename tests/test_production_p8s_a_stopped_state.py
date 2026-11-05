@@ -129,6 +129,10 @@ class P8SATests(unittest.TestCase):
         unknown = gate.reason_code(RuntimeError("AGE-SECRET=do-not-share"))
         self.assertEqual(unknown, "unclassified-safe-stop")
         self.assertNotIn("do-not-share", unknown)
+        self.assertEqual(gate.reason_code(FileNotFoundError("/secret/location")), "os.missing-file")
+        self.assertEqual(gate.reason_code(PermissionError("hidden key")), "os.permission-denied")
+        self.assertEqual(gate.reason_code(KeyError("encryption-secret")), "schema.missing-key")
+
 
     def test_invalid_diagnostic_phase_never_echoes_untrusted_value(self):
         with tempfile.TemporaryDirectory() as tmp:
