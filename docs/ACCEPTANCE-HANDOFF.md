@@ -190,3 +190,14 @@ The operator then separately confirmed active OCI serial-console access and ente
 6. Use the current repository and PR conventions. Correct defects in the smallest existing owner with regression tests/docs and a reviewable PR. Distinguish product fixes from acceptance-only evidence. A merged branch or passing CI alone does **not** authorize production cutover.
 
 **Next production stage classification: NOT RUN.** Do not claim production success or choose the final target without verified operator-specific details.
+
+
+## P8S — real disposable-host stopped-state acceptance accepted as HOLD (2026-11-05 UTC)
+
+The **NEW** disposable `vaultwarden-oci-7-vnic` ran the consolidated PR #411 P8S candidate at exact source commit `08de314333303d5ff671f81497723580ff394cc6`. **22/22 focused unit/regression tests PASS; P8S-A protected-host read-only acceptance HOLD/exit 0**, private sanitized evidence `/home/ubuntu/vwoci-acceptance/p8s-a-readonly-20261105T214536Z-3811/summary.txt`.
+
+**PASS**: original P8O–P8R evidence and original P8P reboot checkpoint/attempt continuity (P8P remains BLOCKED, P8R REARMED); pinned original dedicated ext4, restored SQLite SHA/integrity, operational Age/SOPS, 52 immutable product files and 12 installed systemd units; all app/Caddy/DNS/notifications/four timers stopped/disabled; no retained Docker containers or HTTP80/443 listeners; CrowdSec engine/host INPUT firewall active/enabled; Cloudflare Worker disabled/inactive; effective Cloudflare-only IPv4/IPv6 `DOCKER-USER` 443 guard; exact 27-check installed doctor schema and mandatory security/storage checks.
+
+**PENDING / deliberate HOLD**: absent generated/volatile stopped-runtime paths (not automatically repaired), **independent OCI/Cloudflare external ingress and hostname/Worker Route proof**, separate test-only Box prefix/destination, test-only data/SMTP and live TLS/start/rollback. **NOT RUN**: no firewall mutation, reboot, app/Docker start, DNS, Worker, SMTP, Box read/write/prune or timers in P8S. First two P8S read-only attempts returned BLOCKED because of an acceptance parser/reporting bug, were independently diagnosed and corrected in the same consolidated PR; do not rewrite that history.
+
+**Next gate P8T: NOT RUN**. The recommended next work is a **single batched read-only external-boundary discovery** (OCI instance/VNIC NSGs + subnet security-list union and public IPv4/IPv6 paths, independent Cloudflare DNS/Worker wildcard/route scope, OCI console, separate candidate test FQDN and isolated data/remote destination), using authoritative provider facts rather than inferring from local DOCKER-USER. Do not activate Caddy/Worker/ACME/SMTP/Box/timers with historical `bw.lazymocha.com` configuration. Once independently proven, use a different reviewed canary gate to test product-owned start with an explicitly isolated test config and stop/rollback procedure. **Production GO remains NO.**
