@@ -113,6 +113,9 @@ class P8TReadOnlyTests(unittest.TestCase):
         self.assertEqual(gate.review_cf_candidate(name, gate.ZONE, matches,
             [], [{"hostname":name, "enabled":True}], "203.0.113.7"), "BLOCKED")
         self.assertTrue(gate.route_collides("*lazymocha.com/*", name))
+        self.assertTrue(gate.route_collides("https://*.lazymocha.com/*", name))
+        self.assertEqual(gate.review_cf_candidate(name, gate.ZONE, matches,
+            [], [{"hostname":"lazymocha.com", "previews_enabled":True}], "203.0.113.7"), "BLOCKED")
         self.assertFalse(gate.route_collides("bw.lazymocha.com/*", name))
 
     def test_production_hostname_wildcard_and_wrong_origin_fail_closed(self):
