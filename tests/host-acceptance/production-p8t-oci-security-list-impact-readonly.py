@@ -140,8 +140,9 @@ def scan(sha, instance_id, region):
                     private["security_lists"].append({
                         "ref":ref,"security_list_id":sl_id,"subnet_id":subnet_id,
                         "display_name":data.get("display-name"),"rules":matches})
-                    for mark in sorted({cat.split(".")[-1] for m in matches for cat in m["categories"]}):
-                        rows.append(("BLOCKED","oci."+ref+".ipv4."+mark))
+                    for family, mark in sorted({tuple(cat.split(".")[-2:])
+                            for m in matches for cat in m["categories"]}):
+                        rows.append(("BLOCKED","oci."+ref+"."+family+"."+mark))
             if not offending:
                 rows.append(("PENDING","oci.no-global-violation-reobserved-in-this-subnet"))
             vcn=extra_get("vcn",vcn_id,region) if isinstance(vcn_id,str) else None
