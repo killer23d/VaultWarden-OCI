@@ -113,6 +113,10 @@ def accepted_r_summary(text: str) -> None:
         raise Blocked("accepted P8R protected coverage or outcome missing")
     if any(row.startswith(("BLOCKED", "HOLD", "REARMED")) for row in rows[1:-1]):
         raise Blocked("P8R summary contains unexpected terminal/blocked row")
+    if not any(row.startswith("NOT RUN") and "No additional reboot, Caddy/Vaultwarden" in row for row in rows[1:-1]):
+        raise Blocked("P8R expected negative operations record altered")
+    if not any(row.startswith("PASS") and "All five local origin/CrowdSec doctor controls now PASS" in row for row in rows[1:-1]):
+        raise Blocked("P8R accepted five-control result altered")
 
 
 def boot_time() -> int:
