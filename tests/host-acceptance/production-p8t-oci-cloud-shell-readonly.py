@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -136,6 +137,47 @@ def obvious_public_ingress(rule: dict[str, Any], p8t) -> bool:
     return p8t.port_intersects(options, 80) is True or p8t.port_intersects(options, 443) is True
 
 
+
+def categorized_http_exposure(rule: dict[str, Any], origin: str, p8t,
+                              trusted: dict[int, tuple]) -> tuple[str, ...]:
+    """Report port, IP family, and OCI origin; never reveal provider IDs.
+
+    Treat blanket public rules as blocking without a Cloudflare lookup.
+    With both official families available, also classify other public
+    TCP/80 and non-Cloudflare TCP/443 allowances.
+    """
+    if (not isinstance(rule, dict) or origin not in ("nsg", "security-list")
+            or str(rule.get("direction", "INGRESS")).upper() != "INGRESS"
+            or str(rule.get("protocol", "")).lower() not in ("6", "all", "-1")
+            or str(rule.get("source-type", "CIDR_BLOCK")).upper() != "CIDR_BLOCK"):
+        return ()
+    try:
+        source = ipaddress.ip_network(rule["source"], strict=True)
+    except (KeyError, TypeError, ValueError):
+        return ()
+    if source.is_private or source.is_loopback or source.is_link_local:
+        return ()
+    family = "ipv4" if source.version == 4 else "ipv6"
+    global_rule = str(source) in ("0.0.0.0/0", "::/0")
+    proto = str(rule.get("protocol", "")).lower()
+    options = rule.get("tcp-options") if proto == "6" else None
+    if not global_rule and set(trusted) != {4, 6}:
+        return ()
+    if not global_rule and p8t.rule_risk(rule, trusted) != "overexposed":
+        return ()
+    labels = []
+    for port in (80, 443):
+        if p8t.port_intersects(options, port) is not True:
+            continue
+        if port == 443 and not global_rule and any(
+                source.subnet_of(allowed) for allowed in trusted[source.version]):
+            continue
+        scope = ("global" if global_rule else
+                 "public" if port == 80 else "outside-cloudflare")
+        labels.append(f"oci.cloudshell.{origin}.{family}.{scope}-tcp{port}")
+    return tuple(labels)
+
+
 def verify(argv=None) -> int:
     parser = argparse.ArgumentParser(description="OCI Cloud Shell P8T read-only provider inventory")
     parser.add_argument("--expected-commit", required=True)
@@ -198,6 +240,7 @@ def verify(argv=None) -> int:
             rows.append(("PENDING", "oci.cloudshell-current-cloudflare-cidrs-unavailable"))
 
         all_known = True
+        violations: set[str] = set()
         for vnic_id in vnics:
             vnic = data_only(("network", "vnic", "get"), "--vnic-id", vnic_id, args.region)
             if not isinstance(vnic, dict) or vnic.get("id") != vnic_id:
@@ -222,7 +265,7 @@ def verify(argv=None) -> int:
                 rows.append(("PENDING", "oci.cloudshell-subnet-security-list-inventory-incomplete"))
                 continue
 
-            rules = []
+            attributed_rules: list[tuple[str, dict[str, Any]]] = []
             complete = True
             for list_id in lists:
                 security = data_only(("network", "security-list", "get"),
@@ -231,7 +274,7 @@ def verify(argv=None) -> int:
                 if not isinstance(ingress, list) or len(ingress) > 1024:
                     complete = False
                     break
-                rules.extend(ingress)
+                attributed_rules.extend(("security-list", entry) for entry in ingress)
             if complete:
                 for group_id in nsgs:
                     ingress = data_only(("network", "nsg", "rules", "list"),
@@ -239,20 +282,25 @@ def verify(argv=None) -> int:
                     if not isinstance(ingress, list) or len(ingress) > 1024:
                         complete = False
                         break
-                    rules.extend(ingress)
-            if not complete or len(rules) > 2048:
+                    attributed_rules.extend(("nsg", entry) for entry in ingress)
+            if not complete or len(attributed_rules) > 2048:
                 all_known = False
                 rows.append(("PENDING", "oci.cloudshell-effective-rule-inventory-incomplete"))
                 continue
 
-            if any(obvious_public_ingress(rule, p8t) for rule in rules):
-                rows.append(("BLOCKED", "oci.cloudshell-manifest-global-public-http-https-ingress"))
-                return p8t.emit(None, rows, "BLOCKED")
+            rules = [entry for _, entry in attributed_rules]
+            classified_here = set()
+            for origin, entry in attributed_rules:
+                classified_here.update(categorized_http_exposure(
+                    entry, origin, p8t, trusted))
+            violations.update(classified_here)
             if set(trusted) == {4, 6}:
                 judgment = p8t.review_oci_rules(rules, trusted)
-                rows.append((judgment, "oci.cloudshell-nsg-plus-subnet-rule-union"))
                 if judgment == "BLOCKED":
-                    return p8t.emit(None, rows, "BLOCKED")
+                    if not classified_here:
+                        violations.add("oci.cloudshell.unclassified-http-ingress-overexposure")
+                else:
+                    rows.append((judgment, "oci.cloudshell-nsg-plus-subnet-rule-union"))
             else:
                 rows.append(("PENDING", "oci.cloudshell-current-allowed-source-comparison-pending"))
 
@@ -272,6 +320,14 @@ def verify(argv=None) -> int:
             rows.append(("PASS", "oci.cloudshell-all-attached-vnics-visited"))
         else:
             rows.append(("PENDING", "oci.cloudshell-at-least-one-vnic-inventory-incomplete"))
+        if violations:
+            rows.extend(("BLOCKED", key) for key in sorted(violations))
+            rows.extend([
+                ("PENDING", "oci.cloudshell-original-production-vm-separation-needs-second-identity"),
+                ("PENDING", "oci.cloudshell-console-recovery-not-tested"),
+                ("NOT RUN", "oci.cloudshell-no-provider-iam-network-or-service-mutations"),
+            ])
+            return p8t.emit(None, rows, "BLOCKED")
     except Exception:
         rows.append(("PENDING", "oci.cloudshell-readonly-audit-incomplete"))
     rows.extend([
