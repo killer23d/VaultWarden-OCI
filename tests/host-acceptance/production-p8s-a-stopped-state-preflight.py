@@ -39,7 +39,7 @@ R_SUMMARY = EVIDENCE / "p8r-origin-rearm-20261105T210337Z-2487/summary.txt"
 R_ATTEMPT = EVIDENCE / "p8r-one-shot-postboot-origin-rearm-attempt.json"
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 R_HEADING = "Gate P8R - NEW disposable VM stopped-only postboot origin firewall rearm"
-R_FINAL = "REARMED   P8R host-local firewall only; no public/Box/Worker/production GO"
+R_FINAL = f"{'REARMED':<10} P8R host-local firewall only; no public/Box/Worker/production GO"
 
 
 class Blocked(RuntimeError):
