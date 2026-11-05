@@ -590,7 +590,9 @@ def main() -> int:
             report.add("PASS", "One-shot preboot kernel ID and protected config/SQLite/Age/SOPS/volume/security hashes durably pinned")
             report.add("PENDING", "Local reboot will disconnect SSH; OCI serial console recovery access required")
             report.add("NOT RUN", "No app, Caddy, DNS, Worker, SMTP, Box backup/prune, timer, restore or disk wipe")
-            report.finish("REBOOT_REQUESTED")
+            if report.finish("REBOOT_REQUESTED") != 0:
+                print("BLOCKED: preboot evidence could not be safely recorded; no reboot request")
+                return 2
             print("P8P: requesting exactly ONE disposable new-VM reboot; SSH may disconnect now.")
             sys.stdout.flush()
             if not reboot_once():
