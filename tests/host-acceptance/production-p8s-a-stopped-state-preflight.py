@@ -126,17 +126,22 @@ def boot_time() -> int:
     raise Blocked("kernel boot timestamp unavailable")
 
 
-def read_preflight(p8p, p8r) -> dict[str, object]:
+def read_preflight(p8p, p8r, enter=lambda _phase: None) -> dict[str, object]:
+    enter("prior.evidence-metadata")
     p8p.private_dir(EVIDENCE, {0, pwd.getpwnam("ubuntu").pw_uid})
     p8p.private_dir(R_SUMMARY.parent, {0})
     p8p.private_dir(p8r.P8Q_REPORT.parent, {0})
     if (R_SUMMARY.is_symlink() or R_ATTEMPT.is_symlink() or
             p8r.P8Q_REPORT.is_symlink()):
         raise Blocked("prior evidence symlink not authorized")
+    enter("prior.p8r-accepted-summary")
     summary = p8p.private_read(R_SUMMARY).decode("utf-8", "strict")
     accepted_r_summary(summary)
+    enter("prior.p8q-accepted-summary")
     p8r.p8q_statuses(p8p.private_read(p8r.P8Q_REPORT).decode("utf-8", "strict"))
+    enter("prior.p8p-original-checkpoint")
     original = p8p.checkpoint_read()
+    enter("prior.p8r-durable-attempt")
     marker = json.loads(p8p.private_read(R_ATTEMPT, limit=8192))
     if (not isinstance(marker, dict) or marker.get("schema") != 1 or
             marker.get("gate") != "p8r" or marker.get("host") != HOST or
@@ -149,8 +154,10 @@ def read_preflight(p8p, p8r) -> dict[str, object]:
             marker.get("postboot_id") != p8p.boot_id() or
             marker.get("preboot_id") != original.get("original_boot_id")):
         raise Blocked("accepted pre/postboot one-shot continuity invalid")
+    enter("prior.p8r-current-kernel")
     if R_SUMMARY.lstat().st_mtime < boot_time():
         raise Blocked("unreviewed reboot after accepted P8R")
+    enter("prior.p8o-foundation")
     p8p.accepted_p8o()
     return original
 
@@ -195,32 +202,58 @@ def main(argv: list[str] | None = None) -> int:
             not source_clean(P8P, P8P_BRANCH, P8P_SHA) or
             not source_clean(P8Q, P8Q_BRANCH, P8Q_SHA) or
             not source_clean(P8R, P8R_BRANCH, P8R_SHA)):
-        print("BLOCKED: P8S-A requires exact clean sources, NEW Ubuntu 26.04 ARM64 VM and sudo -n")
+        print("BLOCKED: P8S requires exact clean reviewed branches, NEW Ubuntu 26.04 ARM64 VM and sudo -n")
         return 2
+
     report = None
     rows: list[tuple[str, str]] = []
+    phase = ["prior.helper-import"]
+
+    def enter(label: str) -> None:
+        # Labels are authored constants only. Never include raw exception text,
+        # private report content, path values, identities or host command output.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{3,64}", label):
+            raise Blocked("unsafe diagnostic phase")
+        phase[0] = label
+
     try:
         p8p = import_checked(P8P, "production-p8p-batched-reboot-persistence-newvm.py", "p8s_a_prior_p8p")
         p8r = import_checked(P8R, "production-p8r-postboot-origin-rearm-batch.py", "p8s_a_prior_p8r")
-        original = read_preflight(p8p, p8r)
+        enter("prior.evidence-root-ownership")
+        p8p.private_dir(EVIDENCE, {0, pwd.getpwnam("ubuntu").pw_uid})
+        # Create a fresh private diagnostics directory *before* replaying all
+        # historical evidence, so any failure remains actionable after one run.
+        # P8S-A is observational; it has no one-shot mutation marker.
+        enter("private.report-creation")
         report = folder_private()
-        phase = report / "snapshot"
-        phase.mkdir(mode=0o700)
-        record = p8p.Report(phase, "p8s-a")
-        protected = p8p.snapshot(record, phase, after_boot=True)
+        enter("prior.evidence-metadata")
+        original = read_preflight(p8p, p8r, enter)
+        rows.append(("PASS", "P8O/P8P/P8Q/P8R immutable historical evidence and original one-shot continuity validated"))
+
+        enter("protected.snapshot")
+        snapshot_dir = report / "snapshot"
+        snapshot_dir.mkdir(mode=0o700)
+        record = p8p.Report(snapshot_dir, "p8s-a")
+        protected = p8p.snapshot(record, snapshot_dir, after_boot=True)
+        enter("protected.hash-parity")
         p8p.compare_paths(original, protected)
+        rows.append(("PASS", "Original dedicated ext4, historic restored SQLite/SOPS/Age and immutable product/units unchanged"))
+
+        enter("doctor.helper-import")
         p5 = p8p.load_helper(p8p.P5_FILE, "p8s_a_doctor")
-        checks, path_state, edge_ready = p8p.doctor(p5, phase, after_boot=True)
+        enter("doctor.27-checks-and-security")
+        checks, path_state, edge_ready = p8p.doctor(p5, snapshot_dir, after_boot=True)
         if (len(checks) != 27 or not edge_ready or
                 checks.get("crowdsec.cloudflare") != "FAIL" or
                 path_state not in ("PASS", "PENDING")):
             raise Blocked("protected stopped-host doctor or origin guard mismatch")
+
+        enter("postflight.kernel-continuity")
         if R_SUMMARY.lstat().st_mtime < boot_time():
             raise Blocked("kernel changed during read-only preflight")
+
         rows.extend([
-            ("PASS", "Pinned original P8O/P8P/P8Q and P8R REARMED evidence; P8P BLOCKED retained"),
-            ("PASS", "Original boot checkpoint, P8R attempt marker and current kernel continuity"),
-            ("PASS", "Original encrypted authority, 52 immutable files, 12 units, dedicated ext4, SQLite SHA/integrity"),
+            ("PASS", "Original P8P BLOCKED outcome retained and P8R REARMED evidence verified"),
             ("PASS", "No app, DNS, timers, notifications, retained Docker containers or HTTP 80/443 listeners"),
             ("PASS", "CrowdSec engine/INPUT bouncer active; Worker disabled and inactive"),
             ("PASS", "Validated Cloudflare CIDRs and both-family effective DOCKER-USER 443 source policy"),
@@ -233,13 +266,17 @@ def main(argv: list[str] | None = None) -> int:
         ])
         return write_report(report, rows, "HOLD")
     except Exception:
-        print("BLOCKED: P8S-A evidence, protected state or read-only diagnostic failed; no repair attempted")
+        # A previous P8S-A returned only a generic BLOCKED before a report
+        # existed. Keep evidence-specific private error text suppressed, but
+        # publish a static phase label so the next operator turn can fix it.
+        message = "Read-only acceptance failed at " + phase[0] + "; preserve VM and original markers"
+        print("BLOCKED: " + message)
         if report is not None:
             try:
-                rows.append(("BLOCKED", "Evidence/protected-state drift; preserve host and private snapshot without retry"))
+                rows.append(("BLOCKED", message))
                 return write_report(report, rows, "BLOCKED")
             except Exception:
-                pass
+                print("BLOCKED: private diagnostic summary unavailable; no host repair attempted")
         return 2
 
 
