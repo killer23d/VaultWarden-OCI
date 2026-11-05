@@ -135,11 +135,27 @@ class P8TReadOnlyTests(unittest.TestCase):
              self.assertRaises(gate.Blocked):
             gate.cf_paginate("dummy", "/zones/candidate/dns_records", limit=1)
         def pages(_token, path):
-            p = 1 if "page=1" in path else 2
+            p = 1 if "&page=1&" in path or "?page=1&" in path else 2
             return {"result": [{"name": f"r{p}"}], "result_info": {"total_pages": 2}}
         with mock.patch.object(gate, "cf_api", side_effect=pages):
             found = gate.cf_paginate("dummy", "/zones/candidate/dns_records", limit=3)
         self.assertEqual([x["name"] for x in found], ["r1","r2"])
+
+    def test_cloudflare_get_only_endpoint_allowlist(self):
+        doc={"success":True, "result":[], "result_info":{"total_pages":1}}
+        with mock.patch.object(gate, "request_bytes", return_value=__import__("json").dumps(doc).encode()) as req:
+            zone=gate.cf_api("test-token", "/zones?name=lazymocha.com&page=1&per_page=100")
+            self.assertEqual(zone["result"], [])
+            req.assert_called_once()
+            self.assertEqual(req.call_args.args[0],
+                "https://api.cloudflare.com/client/v4/zones?name=lazymocha.com&page=1&per_page=100")
+        for url in ("/zones?name=lazymocha.com&foo=write",
+                    "/zones/"+"a"*32+"/dns_records?type=A&method=POST",
+                    "/accounts/"+"a"*32+"/workers/domains?update=1"):
+            with self.subTest(url=url), mock.patch.object(gate, "request_bytes") as req:
+                with self.assertRaises(gate.Blocked):
+                    gate.cf_api("test-token", url)
+                req.assert_not_called()
 
     def test_oci_cli_rejects_mutation_before_subprocess(self):
         with mock.patch.object(gate.subprocess, "run") as mockrun:
