@@ -1,7 +1,7 @@
 # P8V: layered-origin security and production-acceptance work plan
 
 **Status: planning only. NOT a passed gate or authorization to alter provider or VM state.**
-**Target:** eventually `v2`; this PR is intentionally stacked on draft rc.13
+**Target:** eventually the primary release branch; this PR is intentionally stacked on draft rc.13
 `security/rc13-cloudflare-origin-layered` (PR #415) until rc.13 code is reviewed.
 **Base candidate pin:** `816b644f651d154edb705f1995f53522a917c51f`.
 **Installed on disposable ARM64 VM:** immutable `0.1.0-rc.12`, *not* rc.13.
@@ -37,7 +37,7 @@ and both-family iptables safeguards; don't remove the latter to clear a gate.
 
 ## Latest operator evidence, with time-dependent findings
 
-- PR #414 P8T read-only diagnostics were merged into `v2` at
+- PR #414 P8T read-only diagnostics were merged into the primary release branch at
   `c891999563d37c735331d8f781edbf5f0c1d0fa0`.
 - Draft PR #415 versioned rc.13 API fallback at
   `816b644f651d154edb705f1995f53522a917c51f` has
