@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""P8T OCI Cloud Shell independent network proof; read-only, sanitized.
+
+Run ONLY in pre-authenticated OCI Cloud Shell against a privately selected
+disposable instance OCID and region. No packages or IAM changes; no VNIC,
+NSG, subnet, serial console, DNS or application mutations. No identifiers
+or provider response bodies printed. This does not authorize a live canary.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import ipaddress
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.dont_write_bytecode = True
+os.umask(0o077)
+SOURCE = Path(__file__).resolve().parents[2]
+P8T = Path(__file__).with_name("production-p8t-external-boundary-readonly.py")
+REGION_RE = re.compile(r"[a-z]{2}-[a-z0-9-]+-[0-9]+\Z")
+OCID_RE = re.compile(r"ocid1\.[a-z][a-z0-9_-]*\.oc[0-9]+\.[a-z0-9.-]+\Z")
+ALLOWED = frozenset({
+    ("compute", "instance", "get"),
+    ("compute", "vnic-attachment", "list"),
+    ("network", "vnic", "get"),
+    ("network", "subnet", "get"),
+    ("network", "security-list", "get"),
+    ("network", "nsg", "rules", "list"),
+    ("network", "ipv6", "list"),
+})
+
+
+def module():
+    spec = importlib.util.spec_from_file_location("p8t_shared_network_rules", P8T)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("pinned P8T shared rule file missing")
+    obj = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(obj)
+    return obj
+
+
+def cli_failure_code(stderr: bytes) -> str:
+    """Return a source-owned diagnostic only; never echo CLI stderr or data."""
+    data = stderr[:8192].decode("utf-8", "replace").lower()
+    for marker, code in (
+        ("notauthorizedornotfound", "not-authorized-or-not-found"),
+        ("notauthenticated", "authentication-rejected"),
+        ("configfilenotfound", "config-file-unavailable"),
+        ("delegation_token", "delegation-token-issue"),
+        ("invalidcredential", "credential-invalid"),
+        ("no such option", "cli-argument-unsupported"),
+        ("no such command", "cli-subcommand-unsupported"),
+        ("toomanyrequests", "rate-limited"),
+        ("sslerror", "tls-unavailable"),
+        ("timed out", "timeout"),
+        ("connection refused", "connection-unavailable"),
+    ):
+        if marker in data:
+            return code
+    return "cli-nonzero-unclassified"
+
+
+def data_only(command: tuple[str, ...], key: str, value: str,
+              region: str, *, extra: tuple[str, ...] = (),
+              instance_filter: str | None = None,
+              cli: str = "oci", diagnostic: list[str] | None = None) -> Any | None:
+    """One allowlisted read-only OCI query, inheriting Cloud Shell delegation.
+
+    The prior verifier forced extra OCI_CLI_AUTO_PROMPT/PAGER values and used
+    a 35s process timeout, unlike the two proven direct CLI GET calls. This
+    uses the unchanged Cloud Shell environment and a 75s process bound.
+    """
+    def unavailable(code: str) -> None:
+        if diagnostic is not None:
+            diagnostic.append(code)
+        return None
+
+    if (command not in ALLOWED or not OCID_RE.fullmatch(value)
+            or not REGION_RE.fullmatch(region)
+            or not key.startswith("--") or extra not in ((), ("--all",))):
+        return unavailable("preflight-argument-rejected")
+    is_attachment_list = command == ("compute", "vnic-attachment", "list")
+    if is_attachment_list:
+        if (key != "--compartment-id" or not instance_filter
+                or not OCID_RE.fullmatch(instance_filter)
+                or not instance_filter.startswith("ocid1.instance.")
+                or extra != ("--all",)):
+            return unavailable("preflight-instance-filter-invalid")
+    elif instance_filter is not None:
+        return unavailable("preflight-unexpected-filter")
+    args = [cli, *command, key, value]
+    if is_attachment_list:
+        args.extend(["--instance-id", instance_filter])
+    args.extend([*extra, "--region", region, "--output", "json", "--max-retries", "0",
+                 "--connection-timeout", "4", "--read-timeout", "10"])
+    try:
+        proc = subprocess.run(
+            args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=75)
+    except subprocess.TimeoutExpired:
+        return unavailable("process-timeout")
+    except OSError:
+        return unavailable("cli-execution-unavailable")
+    if proc.returncode != 0:
+        return unavailable(cli_failure_code(proc.stderr))
+    if not proc.stdout or len(proc.stdout) > 1024 * 1024:
+        return unavailable("cli-response-empty-or-oversized")
+    try:
+        doc = json.loads(proc.stdout)
+    except (UnicodeError, ValueError):
+        return unavailable("cli-response-json-invalid")
+    if not isinstance(doc, dict) or "data" not in doc:
+        return unavailable("cli-response-data-missing")
+    return doc["data"]
+
+def obvious_public_ingress(rule: dict[str, Any], p8t) -> bool:
+    """Block manifest broad TCP/80 or TCP/443, even without current CIDRs."""
+    if not isinstance(rule, dict):
+        return False
+    if rule.get("direction", "INGRESS") != "INGRESS":
+        return False
+    if str(rule.get("protocol", "")).lower() not in ("6", "all", "-1"):
+        return False
+    if rule.get("source-type", "CIDR_BLOCK") != "CIDR_BLOCK":
+        return False
+    source = rule.get("source")
+    if source not in ("0.0.0.0/0", "::/0"):
+        return False
+    options = rule.get("tcp-options") if str(rule.get("protocol", "")).lower() == "6" else None
+    return p8t.port_intersects(options, 80) is True or p8t.port_intersects(options, 443) is True
+
+
+
+def categorized_http_exposure(rule: dict[str, Any], origin: str, p8t,
+                              trusted: dict[int, tuple]) -> tuple[str, ...]:
+    """Report port, IP family, and OCI origin; never reveal provider IDs.
+
+    Treat blanket public rules as blocking without a Cloudflare lookup.
+    With both official families available, also classify other public
+    TCP/80 and non-Cloudflare TCP/443 allowances.
+    """
+    if (not isinstance(rule, dict) or origin not in ("nsg", "security-list")
+            or str(rule.get("direction", "INGRESS")).upper() != "INGRESS"
+            or str(rule.get("protocol", "")).lower() not in ("6", "all", "-1")
+            or str(rule.get("source-type", "CIDR_BLOCK")).upper() != "CIDR_BLOCK"):
+        return ()
+    try:
+        source = ipaddress.ip_network(rule["source"], strict=True)
+    except (KeyError, TypeError, ValueError):
+        return ()
+    if source.is_private or source.is_loopback or source.is_link_local:
+        return ()
+    family = "ipv4" if source.version == 4 else "ipv6"
+    global_rule = str(source) in ("0.0.0.0/0", "::/0")
+    proto = str(rule.get("protocol", "")).lower()
+    options = rule.get("tcp-options") if proto == "6" else None
+    if not global_rule and set(trusted) != {4, 6}:
+        return ()
+    if not global_rule and p8t.rule_risk(rule, trusted) != "overexposed":
+        return ()
+    labels = []
+    for port in (80, 443):
+        if p8t.port_intersects(options, port) is not True:
+            continue
+        if port == 443 and not global_rule and any(
+                source.subnet_of(allowed) for allowed in trusted[source.version]):
+            continue
+        scope = ("global" if global_rule else
+                 "public" if port == 80 else "outside-cloudflare")
+        labels.append(f"oci.cloudshell.{origin}.{family}.{scope}-tcp{port}")
+    return tuple(labels)
+
+
+def verify(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="OCI Cloud Shell P8T read-only provider inventory")
+    parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--instance-id", required=True, help="Private instance OCID; never paste into chat")
+    parser.add_argument("--region", required=True)
+    args = parser.parse_args(argv)
+
+    if (not re.fullmatch(r"[0-9a-f]{40}", args.expected_commit)
+            or not OCID_RE.fullmatch(args.instance_id)
+            or not args.instance_id.startswith("ocid1.instance.")
+            or not REGION_RE.fullmatch(args.region)
+            or shutil.which("oci") is None):
+        print("BLOCKED: invalid pinned source, Cloud Shell CLI, region or private instance identifier")
+        return 2
+    p8t = module()
+    if not p8t.source_clean(args.expected_commit):
+        print("BLOCKED: P8T Cloud Shell requires exact clean reviewed branch")
+        return 2
+
+    rows: list[tuple[str, str]] = []
+    try:
+        instance_diagnostics: list[str] = []
+        instance = data_only(("compute", "instance", "get"), "--instance-id",
+                             args.instance_id, args.region,
+                             diagnostic=instance_diagnostics)
+        if not isinstance(instance, dict):
+            reason = instance_diagnostics[0] if instance_diagnostics else "cli-data-not-object"
+            rows.append(("PENDING", "oci.cloudshell-instance-get-" + reason))
+            return p8t.emit(None, rows, "HOLD")
+        if instance.get("id") != args.instance_id:
+            rows.append(("BLOCKED", "oci.cloudshell-provider-instance-id-mismatch"))
+            return p8t.emit(None, rows, "BLOCKED")
+        compartment = instance.get("compartment-id")
+        if not isinstance(compartment, str) or not OCID_RE.fullmatch(compartment):
+            rows.append(("PENDING", "oci.cloudshell-instance-compartment-unverified"))
+            return p8t.emit(None, rows, "HOLD")
+        rows.append(("PASS", "oci.cloudshell-authoritative-instance-get"))
+        if instance.get("display-name") == p8t.HOST:
+            rows.append(("PASS", "oci.cloudshell-selected-instance-friendly-name-matches-host"))
+        else:
+            rows.append(("PENDING", "oci.cloudshell-selected-instance-needs-identity-crosscheck"))
+
+        attached = data_only(("compute", "vnic-attachment", "list"), "--compartment-id",
+                             compartment, args.region, extra=("--all",),
+                             instance_filter=args.instance_id)
+        if not isinstance(attached, list):
+            rows.append(("PENDING", "oci.cloudshell-attached-vnic-list-unavailable"))
+            return p8t.emit(None, rows, "HOLD")
+        vnics = [row.get("vnic-id") for row in attached
+                 if isinstance(row, dict) and row.get("lifecycle-state") == "ATTACHED"]
+        if (not 1 <= len(vnics) <= 8 or len(vnics) != len(set(vnics))
+                or any(not isinstance(v, str) or not OCID_RE.fullmatch(v) for v in vnics)):
+            rows.append(("PENDING", "oci.cloudshell-vnic-attachment-identity-incomplete"))
+            return p8t.emit(None, rows, "HOLD")
+        rows.append(("PASS", "oci.cloudshell-attached-vnics-identified"))
+
+        trusted, cf_rows = p8t.official_cidr_observations()
+        rows.extend(cf_rows)
+        if set(trusted) != {4, 6}:
+            rows.append(("PENDING", "oci.cloudshell-current-cloudflare-cidrs-unavailable"))
+
+        all_known = True
+        violations: set[str] = set()
+        for vnic_id in vnics:
+            vnic = data_only(("network", "vnic", "get"), "--vnic-id", vnic_id, args.region)
+            if not isinstance(vnic, dict) or vnic.get("id") != vnic_id:
+                all_known = False
+                rows.append(("PENDING", "oci.cloudshell-vnic-details-unavailable"))
+                continue
+            subnet_id = vnic.get("subnet-id")
+            nsgs = vnic.get("nsg-ids", [])
+            if (not isinstance(subnet_id, str) or not OCID_RE.fullmatch(subnet_id)
+                    or not isinstance(nsgs, list) or len(nsgs) > 12
+                    or any(not isinstance(x, str) or not OCID_RE.fullmatch(x) for x in nsgs)):
+                all_known = False
+                rows.append(("PENDING", "oci.cloudshell-vnic-network-attachments-invalid"))
+                continue
+            subnet = data_only(("network", "subnet", "get"), "--subnet-id",
+                               subnet_id, args.region)
+            lists = subnet.get("security-list-ids") if isinstance(subnet, dict) else None
+            if (not isinstance(subnet, dict) or subnet.get("id") != subnet_id
+                    or not isinstance(lists, list) or len(lists) > 12
+                    or any(not isinstance(x, str) or not OCID_RE.fullmatch(x) for x in lists)):
+                all_known = False
+                rows.append(("PENDING", "oci.cloudshell-subnet-security-list-inventory-incomplete"))
+                continue
+
+            attributed_rules: list[tuple[str, dict[str, Any]]] = []
+            complete = True
+            for list_id in lists:
+                security = data_only(("network", "security-list", "get"),
+                                     "--security-list-id", list_id, args.region)
+                ingress = security.get("ingress-security-rules") if isinstance(security, dict) else None
+                if not isinstance(ingress, list) or len(ingress) > 1024:
+                    complete = False
+                    break
+                attributed_rules.extend(("security-list", entry) for entry in ingress)
+            if complete:
+                for group_id in nsgs:
+                    ingress = data_only(("network", "nsg", "rules", "list"),
+                                        "--nsg-id", group_id, args.region, extra=("--all",))
+                    if not isinstance(ingress, list) or len(ingress) > 1024:
+                        complete = False
+                        break
+                    attributed_rules.extend(("nsg", entry) for entry in ingress)
+            if not complete or len(attributed_rules) > 2048:
+                all_known = False
+                rows.append(("PENDING", "oci.cloudshell-effective-rule-inventory-incomplete"))
+                continue
+
+            rules = [entry for _, entry in attributed_rules]
+            classified_here = set()
+            for origin, entry in attributed_rules:
+                classified_here.update(categorized_http_exposure(
+                    entry, origin, p8t, trusted))
+            violations.update(classified_here)
+            if set(trusted) == {4, 6}:
+                judgment = p8t.review_oci_rules(rules, trusted)
+                if judgment == "BLOCKED":
+                    if not classified_here:
+                        violations.add("oci.cloudshell.unclassified-http-ingress-overexposure")
+                else:
+                    rows.append((judgment, "oci.cloudshell-nsg-plus-subnet-rule-union"))
+            else:
+                rows.append(("PENDING", "oci.cloudshell-current-allowed-source-comparison-pending"))
+
+            if vnic.get("public-ip"):
+                rows.append(("PASS", "oci.cloudshell-public-ipv4-field-present"))
+            else:
+                rows.append(("PENDING", "oci.cloudshell-public-ipv4-field-unverified"))
+            ipv6 = data_only(("network", "ipv6", "list"), "--vnic-id",
+                             vnic_id, args.region, extra=("--all",))
+            if not isinstance(ipv6, list):
+                rows.append(("PENDING", "oci.cloudshell-vnic-ipv6-inventory-unavailable"))
+            elif ipv6:
+                rows.append(("PENDING", "oci.cloudshell-ipv6-assigned-requires-route-proof"))
+            else:
+                rows.append(("PASS", "oci.cloudshell-no-ipv6-assigned-on-vnic"))
+        if all_known:
+            rows.append(("PASS", "oci.cloudshell-all-attached-vnics-visited"))
+        else:
+            rows.append(("PENDING", "oci.cloudshell-at-least-one-vnic-inventory-incomplete"))
+        if violations:
+            rows.extend(("BLOCKED", key) for key in sorted(violations))
+            rows.extend([
+                ("PENDING", "oci.cloudshell-original-production-vm-separation-needs-second-identity"),
+                ("PENDING", "oci.cloudshell-console-recovery-not-tested"),
+                ("NOT RUN", "oci.cloudshell-no-provider-iam-network-or-service-mutations"),
+            ])
+            return p8t.emit(None, rows, "BLOCKED")
+    except Exception:
+        rows.append(("PENDING", "oci.cloudshell-readonly-audit-incomplete"))
+    rows.extend([
+        ("PENDING", "oci.cloudshell-original-production-vm-separation-needs-second-identity"),
+        ("PENDING", "oci.cloudshell-console-recovery-not-tested"),
+        ("NOT RUN", "oci.cloudshell-no-provider-iam-network-or-service-mutations"),
+    ])
+    return p8t.emit(None, rows, "HOLD")
+
+
+if __name__ == "__main__":
+    raise SystemExit(verify())
