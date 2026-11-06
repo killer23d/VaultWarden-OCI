@@ -23,6 +23,7 @@ from .cli import CommandResult, DoctorCheck, run_command
 CLOUDFLARE_IPV4_URL = "https://www.cloudflare.com/ips-v4"
 CLOUDFLARE_IPV6_URL = "https://www.cloudflare.com/ips-v6"
 CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+CLOUDFLARE_IPS_API_URL = CLOUDFLARE_API + "/ips"
 CROWDSEC_REPO_INSTALLER = "https://install.crowdsec.net"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_INSTALLER_BYTES = 512 * 1024
@@ -173,14 +174,72 @@ def _http_text(url: str, maximum: int = MAX_RESPONSE_BYTES) -> str:
         raise EdgeError("HTTPS response is not UTF-8") from exc
 
 
-def fetch_cloudflare_policy(*, now: int | None = None, fetcher: Fetcher = _http_text) -> CloudflarePolicy:
-    timestamp = int(time.time()) if now is None else int(now)
+def parse_cloudflare_api_policy(text: str, *, fetched_at: int) -> CloudflarePolicy:
+    """Validate the official, public /client/v4/ips dual-stack result as one unit.
+
+    Never trust a partial or synthetic list; the legacy endpoints are considered
+    only after this complete API response has failed validation.
+    """
+    if not isinstance(text, str) or not text:
+        raise EdgeError("Cloudflare IP API returned an invalid response")
+    try:
+        if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise EdgeError("Cloudflare IP API response exceeds the allowed size")
+        payload = json.loads(text)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        if isinstance(exc, EdgeError):
+            raise
+        raise EdgeError("Cloudflare IP API response is not valid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise EdgeError("Cloudflare IP API did not report success")
+    data = payload.get("result")
+    if not isinstance(data, dict):
+        raise EdgeError("Cloudflare IP API result is missing")
+    values: list[list[str]] = []
+    for name in ("ipv4_cidrs", "ipv6_cidrs"):
+        family = data.get(name)
+        if (
+            not isinstance(family, list)
+            or not 1 <= len(family) <= 64
+            or any(
+                not isinstance(item, str)
+                or not item
+                or item != item.strip()
+                or "\n" in item
+                or "\r" in item
+                for item in family
+            )
+        ):
+            raise EdgeError("Cloudflare IP API has an invalid or incomplete IP family")
+        values.append(family)
     return validate_policy(
-        fetcher(CLOUDFLARE_IPV4_URL, MAX_RESPONSE_BYTES),
-        fetcher(CLOUDFLARE_IPV6_URL, MAX_RESPONSE_BYTES),
-        fetched_at=timestamp,
+        "\n".join(values[0]),
+        "\n".join(values[1]),
+        fetched_at=fetched_at,
         source="current",
     )
+
+
+def fetch_cloudflare_policy(*, now: int | None = None, fetcher: Fetcher = _http_text) -> CloudflarePolicy:
+    """Prefer official JSON dual-stack API; retain only official legacy fallback."""
+    timestamp = int(time.time()) if now is None else int(now)
+    try:
+        return parse_cloudflare_api_policy(
+            fetcher(CLOUDFLARE_IPS_API_URL, MAX_RESPONSE_BYTES),
+            fetched_at=timestamp,
+        )
+    except (EdgeError, OSError, TimeoutError, UnicodeError):
+        try:
+            return validate_policy(
+                fetcher(CLOUDFLARE_IPV4_URL, MAX_RESPONSE_BYTES),
+                fetcher(CLOUDFLARE_IPV6_URL, MAX_RESPONSE_BYTES),
+                fetched_at=timestamp,
+                source="current",
+            )
+        except (EdgeError, OSError, TimeoutError, UnicodeError) as exc:
+            raise EdgeError(
+                "official Cloudflare IP API and legacy feeds are unavailable or invalid"
+            ) from exc
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
