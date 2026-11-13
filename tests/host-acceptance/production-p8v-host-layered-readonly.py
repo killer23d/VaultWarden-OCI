@@ -179,7 +179,7 @@ def product_units_dormant():
         if unit.endswith('@.service'):
             files = command(['systemctl', 'list-unit-files', '--all',
                              '--no-legend', '--plain', unit])
-            records = [line.split() for line in files.splitlines() if line.strip()]
+            records = [line.split()[:2] for line in files.splitlines() if line.strip()]
             require(records == [[unit, 'static']], 'notify-template-inventory-unrecognized')
             instances = command(['systemctl', 'list-units', '--all',
                                  '--no-legend', '--plain', '--full',
