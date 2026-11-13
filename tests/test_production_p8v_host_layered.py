@@ -1,0 +1,50 @@
+"""P8V-B bounded offline firewall and source-pin negative-path tests."""
+import importlib.util
+import unittest
+from pathlib import Path
+from unittest import mock
+
+PATH = Path(__file__).parent / 'host-acceptance/production-p8v-host-layered-readonly.py'
+spec = importlib.util.spec_from_file_location('p8v_host', PATH)
+host = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(host)
+
+HOOK = '-N DOCKER-USER\n-A DOCKER-USER -p tcp -o vwoci0 -m conntrack --ctdir ORIGINAL --ctorigdstport 443 -m comment --comment vaultwarden-oci:cloudflare-https -j VWOCI-CF-HTTPS\n'
+CHAIN = '-N VWOCI-CF-HTTPS\n-A VWOCI-CF-HTTPS -s 173.245.48.0/20 -j RETURN\n-A VWOCI-CF-HTTPS -s 103.21.244.0/22 -j RETURN\n-A VWOCI-CF-HTTPS -j DROP\n'
+CIDRS = ('173.245.48.0/20', '103.21.244.0/22')
+
+
+class HostPolicyTests(unittest.TestCase):
+    def test_exact_dual_stack_style_family_policy(self):
+        self.assertTrue(host.check_filter(HOOK, CHAIN, CIDRS))
+
+    def test_no_final_drop_denied(self):
+        self.assertFalse(host.check_filter(HOOK, CHAIN.rsplit('\n', 2)[0] + '\n', CIDRS))
+
+    def test_preceding_accept_bypass_denied(self):
+        self.assertFalse(host.check_filter(HOOK + '-A DOCKER-USER -j ACCEPT\n', CHAIN, CIDRS))
+
+    def test_duplicate_jump_denied(self):
+        self.assertFalse(host.check_filter(HOOK + HOOK.split('\n')[1] + '\n', CHAIN, CIDRS))
+
+    def test_missing_ipv6_or_ipv4_allow_denied(self):
+        self.assertFalse(host.check_filter(HOOK, CHAIN, CIDRS + ('2400:cb00::/32',)))
+
+    def test_cidr_reorder_denied(self):
+        self.assertFalse(host.check_filter(HOOK, CHAIN, tuple(reversed(CIDRS))))
+
+    def test_bridge_or_original_direction_mismatch_denied(self):
+        self.assertFalse(host.check_filter(HOOK.replace('vwoci0', 'docker0'), CHAIN, CIDRS))
+        self.assertFalse(host.check_filter(HOOK.replace('ORIGINAL', 'REPLY'), CHAIN, CIDRS))
+
+    def test_interrupted_transition_guard_not_mistaken_for_finished_policy(self):
+        guard = '-A DOCKER-USER -p tcp -o vwoci0 -m conntrack --ctdir ORIGINAL --ctorigdstport 443 -m comment --comment vaultwarden-oci:cloudflare-guard -j DROP\n'
+        self.assertFalse(host.check_filter(HOOK + guard, CHAIN, CIDRS))
+
+    def test_missing_git_checkout_is_not_source_pinned(self):
+        with mock.patch.object(host, 'ROOT', Path('/nonexistent/p8v-source')):
+            self.assertFalse(host.pinned('a' * 40))
+
+
+if __name__ == '__main__':
+    unittest.main()
