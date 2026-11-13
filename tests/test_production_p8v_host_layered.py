@@ -46,5 +46,40 @@ class HostPolicyTests(unittest.TestCase):
             self.assertFalse(host.pinned('a' * 40))
 
 
+    def test_template_uses_readonly_unit_file_and_instance_inventory(self):
+        calls = []
+        def read(args, seconds=20):
+            calls.append(tuple(args))
+            if 'list-unit-files' in args:
+                return 'vaultwarden-oci-notify@.service static\n'
+            if 'list-units' in args:
+                return ''
+            self.fail('unexpected command')
+        with mock.patch.object(host, 'UNITS', ('vaultwarden-oci-notify@.service',)), \
+                mock.patch.object(host, 'command', side_effect=read):
+            host.product_units_dormant()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('start', ' '.join(' '.join(c) for c in calls))
+
+    def test_dormant_unit_check_separates_real_enabled_service(self):
+        unit = 'vaultwarden-oci-backup.timer'
+        with mock.patch.object(host, 'UNITS', (unit,)), \
+                mock.patch.object(host, 'command', return_value=
+                    'LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\n'):
+            with self.assertRaisesRegex(host.HostGap, 'product-service-or-timer-not-dormant'):
+                host.product_units_dormant()
+
+    def test_live_listener_is_explicitly_blocked(self):
+        with mock.patch.object(host, 'command', return_value=
+                'LISTEN 0 128 0.0.0.0:443 0.0.0.0:*\n'):
+            with self.assertRaisesRegex(host.HostGap, 'live-application-listener'):
+                host.listeners_closed()
+
+    def test_stopped_host_absent_bridge_remains_unverified(self):
+        with mock.patch.object(host, 'command', return_value='bridge\nhost\nnone\n'):
+            with self.assertRaisesRegex(host.HostGap,
+                    'bridge-not-instantiated-on-stopped-host'):
+                host.docker_bridge()
+
 if __name__ == '__main__':
     unittest.main()

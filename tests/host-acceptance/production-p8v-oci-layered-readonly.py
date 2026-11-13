@@ -22,7 +22,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 os.umask(0o077)
 ROOT = Path(__file__).resolve().parents[2]
-BRANCH = "audit/rc13-p8v-readonly-implementation-20261113"
+BRANCH = "audit/rc13-p8v-hold-diagnostics-20261113"
 HOST = "vaultwarden-oci-7-vnic"
 REGION = "us-sanjose-1"
 OCID = re.compile(r"ocid1\.[a-z][a-z0-9_-]*\.oc[0-9]+\.[a-z0-9.-]+\Z")
@@ -290,10 +290,58 @@ def evaluate(snapshot: dict) -> list[tuple[str, str]]:
     return rows
 
 
-def inspect(provider: Provider, instance_id: str) -> list[tuple[str, str]]:
+def protected_target_inventory(path: Path, selected_id: str) -> frozenset[str]:
+    """Bind provider reads to the exact private P8T target, not a regex-picked OCID.
+
+    The historical security-list attachments are intentionally NOT compared:
+    P8T independently changed them after this inventory was recorded.
+    """
+    try:
+        parent = path.parent.lstat()
+        meta = path.lstat()
+        require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.geteuid()
+                and stat.S_IMODE(parent.st_mode) == 0o700,
+                "p8t-evidence-directory-invalid")
+        require(stat.S_ISREG(meta.st_mode) and not path.is_symlink()
+                and meta.st_uid == os.geteuid() and stat.S_IMODE(meta.st_mode) == 0o600
+                and 0 < meta.st_size <= 262144, "p8t-evidence-file-invalid")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            raw = stream.read(262145)
+        require(len(raw) <= 262144, "p8t-evidence-oversized")
+        doc = json.loads(raw)
+        require(isinstance(doc, dict) and doc.get("instance_id") == selected_id,
+                "p8t-instance-not-equal-selected")
+        items = doc.get("subnets")
+        require(isinstance(items, list) and 1 <= len(items) <= 8,
+                "p8t-previous-subnet-map-incomplete")
+        ids = [item.get("subnet_id") for item in items if isinstance(item, dict)]
+        require(len(ids) == len(items) and len(set(ids)) == len(ids)
+                and all(isinstance(x, str) and OCID.fullmatch(x) for x in ids),
+                "p8t-previous-subnet-map-invalid")
+        return frozenset(ids)
+    except Incomplete:
+        raise
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise Incomplete("p8t-protected-inventory-unavailable") from exc
+
+
+def instance_identity_rows(inst: object, selected_id: str) -> list[tuple[str, str]]:
+    """OCI display names are mutable labels, not authoritative VM identities."""
+    require(isinstance(inst, dict) and inst.get("id") == selected_id,
+            "provider-instance-id-not-equal-selected")
+    rows = [("PASS", "provider-instance-id-matches-protected-selection")]
+    if inst.get("display-name") == HOST:
+        rows.append(("PASS", "provider-friendly-name-matches-host"))
+    else:
+        rows.append(("PENDING", "provider-friendly-name-differs-from-host"))
+    return rows
+
+
+def inspect(provider: Provider, instance_id: str,
+            expected_subnets: frozenset[str]) -> list[tuple[str, str]]:
     inst = provider.read(("compute", "instance", "get"), instance_id)
-    require(isinstance(inst, dict) and inst.get("id") == instance_id
-            and inst.get("display-name") == HOST, "instance-identity-mismatch")
+    rows = instance_identity_rows(inst, instance_id)
     comp = inst.get("compartment-id")
     require(isinstance(comp, str) and OCID.fullmatch(comp), "instance-compartment-unverified")
     raw = provider.read(("compute", "vnic-attachment", "list"), comp, instance=instance_id)
@@ -303,7 +351,9 @@ def inspect(provider: Provider, instance_id: str) -> list[tuple[str, str]]:
     require(1 <= len(ids) <= 8 and len(ids) == len(set(ids))
             and all(isinstance(x, str) and OCID.fullmatch(x) for x in ids),
             "attached-vnic-incomplete")
-    require(len(raw) == len(attached), "vnic-attachment-lifecycle-unknown")
+    require(all(isinstance(x, dict) and x.get("lifecycle-state") in
+                ("ATTACHED", "DETACHED") for x in raw),
+            "vnic-attachment-lifecycle-unknown")
     snapshot = {"vnics": []}
     for vnic_id in ids:
         vnic = provider.read(("network", "vnic", "get"), vnic_id)
@@ -313,6 +363,7 @@ def inspect(provider: Provider, instance_id: str) -> list[tuple[str, str]]:
         require(isinstance(sid, str) and OCID.fullmatch(sid), "vnic-subnet-missing")
         subnet = provider.read(("network", "subnet", "get"), sid)
         require(isinstance(subnet, dict) and subnet.get("id") == sid, "subnet-identity-mismatch")
+        require(sid in expected_subnets, "live-subnet-not-in-private-p8t-target-map")
         vid = subnet.get("vcn-id")
         require(isinstance(vid, str) and OCID.fullmatch(vid), "vcn-identity-unverified")
         vcn = provider.read(("network", "vcn", "get"), vid)
@@ -332,18 +383,33 @@ def inspect(provider: Provider, instance_id: str) -> list[tuple[str, str]]:
             ng_rules = provider.read(("network", "nsg", "rules", "list"), ng)
             require(isinstance(ng_rules, list) and len(ng_rules) <= 1024, "nsg-rules-schema")
             groups.append({"rules": ng_rules})
-        ipv6 = provider.read(("network", "ipv6", "list"), vnic_id)
-        priv = provider.read(("network", "private-ip", "list"), sid)
+        # These supplementary inventory reads may be unavailable in Cloud
+        # Shell. Keep evaluating the *complete security-rule union* while
+        # independently reporting the missing IPv6/private-IP evidence.
+        try:
+            ipv6 = provider.read(("network", "ipv6", "list"), vnic_id)
+        except Incomplete:
+            ipv6 = None
+            rows.append(("PENDING", "oci-ipv6-assignment-read-unavailable"))
+        try:
+            priv = provider.read(("network", "private-ip", "list"), sid)
+        except Incomplete:
+            priv = None
+            rows.append(("PENDING", "oci-private-ip-read-unavailable"))
         if not isinstance(priv, list):
             priv = None
         scope = subnet.get("compartment-id")
-        subnets = (provider.read(("network", "subnet", "list"), scope, vcn=vid)
-                   if isinstance(scope, str) and OCID.fullmatch(scope) else None)
+        subnets = None
+        if isinstance(scope, str) and OCID.fullmatch(scope):
+            try:
+                subnets = provider.read(("network", "subnet", "list"), scope, vcn=vid)
+            except Incomplete:
+                rows.append(("PENDING", "oci-other-subnet-read-unavailable"))
         snapshot["vnics"].append({"vnic": vnic, "subnet": subnet, "vcn": vcn,
                                   "security_lists": sls, "default": default,
                                   "nsg_rules": groups, "ipv6": ipv6, "private_ips": priv,
                                   "approved_vnics": ids, "subnets": subnets})
-    return evaluate(snapshot)
+    return rows + evaluate(snapshot)
 
 
 def private_write(rows: list[tuple[str, str]], commit: str, outcome: str) -> Path:
@@ -368,6 +434,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="P8V-A read-only OCI transport acceptance")
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--instance-id", required=True)
+    parser.add_argument("--p8t-private-inventory", type=Path, required=True)
     parser.add_argument("--region", default=REGION)
     args = parser.parse_args(argv)
     if (args.region != REGION or not isinstance(args.instance_id, str)
@@ -378,7 +445,8 @@ def main(argv=None) -> int:
         return 2
     rows: list[tuple[str, str]] = []
     try:
-        rows = inspect(Provider(args.region), args.instance_id)
+        expected_subnets = protected_target_inventory(args.p8t_private_inventory, args.instance_id)
+        rows = inspect(Provider(args.region), args.instance_id, expected_subnets)
     except Incomplete as exc:
         rows.append(("PENDING", str(exc)))
     except Exception:

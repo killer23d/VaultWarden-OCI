@@ -1,6 +1,9 @@
 """P8V OCI independent union and fail-closed protocol regressions (offline)."""
 import importlib.util
 import unittest
+import os
+import json
+import tempfile
 from pathlib import Path
 
 FILE = Path(__file__).parent / 'host-acceptance/production-p8v-oci-layered-readonly.py'
@@ -96,6 +99,37 @@ class OCIUnionTests(unittest.TestCase):
         with self.assertRaises(p8v.Incomplete):
             p8v.evaluate({'vnics': [{'security_lists': None}]})
 
+
+    def test_selected_oci_identity_independent_from_mutable_display_name(self):
+        target = 'ocid1.instance.oc1.us-sanjose-1.a1b2c3'
+        other = 'ocid1.instance.oc1.us-sanjose-1.another'
+        rows = p8v.instance_identity_rows(
+            {'id': target, 'display-name': 'temporary-disposable'}, target)
+        self.assertIn(('PASS', 'provider-instance-id-matches-protected-selection'), rows)
+        self.assertIn(('PENDING', 'provider-friendly-name-differs-from-host'), rows)
+        self.assertNotIn(('PASS', 'provider-friendly-name-matches-host'), rows)
+        with self.assertRaisesRegex(p8v.Incomplete, 'provider-instance-id-not-equal-selected'):
+            p8v.instance_identity_rows({'id': other, 'display-name': p8v.HOST}, target)
+
+    def test_private_p8t_map_requires_matching_id_and_protected_subnet(self):
+        chosen = 'ocid1.instance.oc1.us-sanjose-1.a1b2c3'
+        subnet = 'ocid1.subnet.oc1.us-sanjose-1.d4e5f6'
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            os.chmod(root, 0o700)
+            file = root / 'p8t-private.json'
+            file.write_text(json.dumps({
+                'instance_id': chosen, 'subnets': [{'subnet_id': subnet}],
+                'security_lists': ['historical-and-not-asserted'],
+            }), encoding='utf-8')
+            os.chmod(file, 0o600)
+            self.assertEqual(p8v.protected_target_inventory(file, chosen), frozenset([subnet]))
+            with self.assertRaisesRegex(p8v.Incomplete, 'p8t-instance-not-equal-selected'):
+                p8v.protected_target_inventory(
+                    file, 'ocid1.instance.oc1.us-sanjose-1.unknown')
+            os.chmod(file, 0o644)
+            with self.assertRaisesRegex(p8v.Incomplete, 'p8t-evidence-file-invalid'):
+                p8v.protected_target_inventory(file, chosen)
 
 if __name__ == '__main__':
     unittest.main()

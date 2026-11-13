@@ -22,7 +22,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 os.umask(0o077)
 ROOT = Path(__file__).resolve().parents[2]
-BRANCH = 'audit/rc13-p8v-readonly-implementation-20261113'
+BRANCH = 'audit/rc13-p8v-hold-diagnostics-20261113'
 HOST = 'vaultwarden-oci-7-vnic'
 RELEASE = Path('/opt/vaultwarden-oci/releases/0.1.0-rc.12')
 CURRENT = Path('/opt/vaultwarden-oci/current')
@@ -173,29 +173,51 @@ def storage_identity():
                 'secrets-or-config-custody-drift')
 
 
-def services_stopped():
+def product_units_dormant():
+    """Read-only systemd inspection; template units require a separate query."""
     for unit in UNITS:
+        if unit.endswith('@.service'):
+            files = command(['systemctl', 'list-unit-files', '--all',
+                             '--no-legend', '--plain', unit])
+            records = [line.split()[:2] for line in files.splitlines() if line.strip()]
+            require(records == [[unit, 'static']], 'notify-template-inventory-unrecognized')
+            instances = command(['systemctl', 'list-units', '--all',
+                                 '--no-legend', '--plain', '--full',
+                                 'vaultwarden-oci-notify@*.service'])
+            require(not instances.strip(), 'notify-instance-currently-loaded')
+            continue
         state = command(['systemctl', 'show', '--no-pager', unit,
                          '-p', 'LoadState', '-p', 'ActiveState', '-p', 'UnitFileState'])
         values = dict(line.split('=', 1) for line in state.splitlines() if '=' in line)
         require(values.get('LoadState') == 'loaded', 'product-unit-not-loaded')
-        if unit.endswith('@.service'):
-            require(values.get('UnitFileState') == 'static', 'notify-template-drift')
-        else:
-            require(values.get('ActiveState') == 'inactive'
-                    and values.get('UnitFileState') not in
-                    ('enabled','enabled-runtime','linked','linked-runtime'),
-                    'product-service-or-timer-not-dormant')
+        require(values.get('ActiveState') == 'inactive'
+                and values.get('UnitFileState') not in
+                ('enabled', 'enabled-runtime', 'linked', 'linked-runtime'),
+                'product-service-or-timer-not-dormant')
+
+
+def listeners_closed():
+    """Only TCP listeners are inspected; malformed ss output cannot imply PASS."""
     sockets = command(['ss', '-H', '-lnt'])
     for row in sockets.splitlines():
         parts = row.split()
         require(len(parts) >= 4, 'listener-output-unrecognized')
         tail = re.search(r':([0-9]{1,5})$', parts[3])
         require(tail is not None, 'listener-port-unrecognized')
-        require(int(tail.group(1)) not in (80, 443, 2375, 2376), 'live-application-listener')
-    require(not command(['docker', 'ps', '-a', '--format', '{{.ID}}'], seconds=30).strip(),
-            'unexpected-existing-docker-container')
+        require(int(tail.group(1)) not in (80, 443, 2375, 2376),
+                'live-application-listener')
 
+
+def containers_absent():
+    require(not command(['docker', 'ps', '-a', '--format', '{{.ID}}'],
+                        seconds=30).strip(), 'unexpected-existing-docker-container')
+
+
+def services_stopped():
+    """Compatibility wrapper; the P8V report evaluates each independently."""
+    product_units_dormant()
+    listeners_closed()
+    containers_absent()
 
 def parse_filter(listing: str, chain: str):
     rules = []
@@ -255,7 +277,7 @@ def origin_structure():
 def docker_bridge():
     names = command(['docker', 'network', 'ls', '--format', '{{.Name}}'], seconds=30)
     if 'vaultwarden-oci-backend' not in names.splitlines():
-        raise HostGap('inactive-docker-bridge-not-present-for-inspection')
+        raise HostGap('bridge-not-instantiated-on-stopped-host')
     raw = command(['docker', 'network', 'inspect', 'vaultwarden-oci-backend'], seconds=30)
     try:
         payload = json.loads(raw)
@@ -317,7 +339,9 @@ def main(argv=None):
     tasks = [('identity', host_identity), ('installed-rc12-vs-source-rc13', release_identity),
              ('immutable-recovery-continuity', prior_continuity),
              ('dedicated-ext4-and-encrypted-custody', storage_identity),
-             ('stopped-services-and-ports', services_stopped),
+             ('product-units-and-timers-dormant', product_units_dormant),
+             ('network-listeners-closed', listeners_closed),
+             ('docker-container-inventory-empty', containers_absent),
              ('installed-iptables-ip6tables-structure', origin_structure),
              ('docker-bridge-owner', docker_bridge),
              ('candidate-source-only-tests', source_tests)]
@@ -330,17 +354,25 @@ def main(argv=None):
         'secrets-or-config-custody-drift', 'product-service-or-timer-not-dormant',
         'live-application-listener', 'unexpected-existing-docker-container',
         'installed-origin-firewall-structure-drift', 'bounded-source-regression-failed',
-        'docker-bridge-ownership-drift',
+        'docker-bridge-ownership-drift', 'notify-instance-currently-loaded',
     }
     for label, fn in tasks:
         try:
             result = fn()
             if label == 'candidate-source-only-tests':
                 count = result
-            rows.append(('PASS' if result != 'PENDING' else 'PENDING', label))
+            if result == 'PENDING':
+                rows.append(('PENDING', label + '-stale-lkg-does-not-authorize-start'))
+            else:
+                rows.append(('PASS', label))
         except HostGap as exc:
-            status = 'BLOCKED' if str(exc) in critical else 'PENDING'
-            rows.append((status, label + '-unverified'))
+            # HostGap is always a finite, source-authored diagnostic. Never
+            # forward subprocess stderr, secrets, filesystem content or IDs.
+            reason = str(exc)
+            if not re.fullmatch(r'[a-z][a-z0-9-]{1,96}', reason):
+                reason = 'readonly-check-unclassified'
+            status = 'BLOCKED' if reason in critical else 'PENDING'
+            rows.append((status, label + '-' + reason))
         except Exception:
             rows.append(('PENDING', label + '-read-failed'))
     rows.extend([('PENDING', 'direct-origin-packet-path-not-observed'),
