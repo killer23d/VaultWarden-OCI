@@ -1380,6 +1380,39 @@ def _iptables_healthy(binary: str, networks: Iterable[ipaddress._BaseNetwork], r
         return False
     if runner([binary, "-w", "-C", "DOCKER-USER", *guard[2:]]).ok:
         return False
+    # -C proves that the rule exists, but not that it is reached. An
+    # earlier DOCKER-USER ACCEPT or RETURN would let direct-origin packets
+    # bypass the Cloudflare source filter. Inspect the effective hook order
+    # independently of chain contents.
+    hook = runner([binary, "-w", "-S", "DOCKER-USER"])
+    if not hook.ok:
+        return False
+    try:
+        hook_rules = [
+            shlex.split(line)
+            for line in hook.stdout.splitlines()
+            if line.startswith("-A DOCKER-USER ")
+        ]
+    except ValueError:
+        return False
+    if not hook_rules:
+        return False
+    first = hook_rules[0]
+    expected = jump[2:]
+    if len(first) != len(expected) + 2 or first[:2] != ["-A", "DOCKER-USER"]:
+        return False
+    # iptables -S may normalize the argument order, but must neither omit
+    # nor add any predicate, nor duplicate a privileged match option.
+    options = first[2:]
+    required = (
+        ("-p", "tcp"), ("-o", BRIDGE_IFACE), ("-m", "conntrack"),
+        ("--ctdir", "ORIGINAL"), ("--ctorigdstport", "443"),
+        ("-m", "comment"), ("--comment", RULE_COMMENT), ("-j", CHAIN),
+    )
+    if sorted(zip(options[::2], options[1::2])) != sorted(required):
+        return False
+    if sum(RULE_COMMENT in rule for rule in hook_rules) != 1:
+        return False
     listing = runner([binary, "-w", "-S", CHAIN])
     if not listing.ok:
         return False

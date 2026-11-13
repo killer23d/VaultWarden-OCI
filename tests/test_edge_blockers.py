@@ -40,9 +40,14 @@ arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 
 class ExactPolicyRunner:
-    def __init__(self, policy: edge.CloudflarePolicy, *, extra_rule: bool = False) -> None:
+    def __init__(
+        self, policy: edge.CloudflarePolicy, *, extra_rule: bool = False,
+        leading_accept: bool = False, duplicate_jump: bool = False,
+    ) -> None:
         self.policy = policy
         self.extra_rule = extra_rule
+        self.leading_accept = leading_accept
+        self.duplicate_jump = duplicate_jump
 
     def __call__(self, argv, *, env=None, cwd=None):
         call = tuple(argv)
@@ -63,6 +68,14 @@ class ExactPolicyRunner:
                 )
                 joined = " ".join(call)
                 return result(argv, code=0 if " ".join(required) in joined else 1)
+        if call[:4] == (binary, "-w", "-S", "DOCKER-USER"):
+            jump = "-A DOCKER-USER " + " ".join(
+                edge._rule(binary, edge.RULE_COMMENT, edge.CHAIN)[2:]
+            )
+            rules = ([ "-A DOCKER-USER -j ACCEPT" ] if self.leading_accept else []) + [jump]
+            if self.duplicate_jump:
+                rules.append(jump)
+            return result(argv, "\n".join(rules) + "\n")
         if call[:4] == (binary, "-w", "-S", edge.CHAIN):
             networks = self.policy.ipv4 if binary == "iptables" else self.policy.ipv6
             lines = [f"-A {edge.CHAIN} -s {network} -j RETURN" for network in networks]
@@ -166,6 +179,20 @@ class EdgeBlockerTests(unittest.TestCase):
                 "iptables",
                 policy.ipv4,
                 ExactPolicyRunner(policy, extra_rule=True),
+            )
+        )
+        self.assertFalse(
+            edge._iptables_healthy(
+                "iptables",
+                policy.ipv4,
+                ExactPolicyRunner(policy, leading_accept=True),
+            )
+        )
+        self.assertFalse(
+            edge._iptables_healthy(
+                "ip6tables",
+                policy.ipv6,
+                ExactPolicyRunner(policy, duplicate_jump=True),
             )
         )
 
