@@ -44,7 +44,7 @@ release is immutable rc.12. Never use the original VM, original recovered data,
 
 | Gate | Evidence | Classification |
 | --- | --- | --- |
-| P8T private SSH correction / isolated subnet | Operator-reported post-change authenticated private SSH and OCI GET closeout; PR #417 integrated into `v2` | PASS (historical only) |
+| P8T private SSH correction / isolated subnet | Operator-reported post-change authenticated private SSH and OCI GET closeout; PR #417 integrated into the primary release branch | PASS (historical only) |
 | Original strict P8T Cloudflare-only OCI 443 gate | Globally sourced OCI TCP443 retained | BLOCKED/2 (historical, immutable) |
 | rc.13 source candidate | PR #415 remains draft; candidate source has no installed-host proof | PENDING |
 | P8V-A current OCI union / public 80 / private 22 / public 443 | Implemented offline; operator GET/list not yet run | NOT RUN |
