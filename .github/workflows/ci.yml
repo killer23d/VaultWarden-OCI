@@ -293,6 +293,8 @@ jobs:
           PYTHONPATH=. python3 tests/test_setup_storage.py -v
           PYTHONPATH=. python3 tests/test_update_workflow.py -v
           PYTHONPATH=. python3 tests/test_immutable_vwctl_bytecode.py -v
+      - name: Exercise P8V fail-closed OCI and host checks on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_*layered.py' -v
       - name: Verify Resolute Docker repository advertises Arm64
         run: |
           docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"
