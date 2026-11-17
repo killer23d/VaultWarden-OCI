@@ -187,7 +187,7 @@ def validate_source(rows: list[tuple[str, str]]) -> None:
         expected = (
             "trusted_proxies cloudflare", "trusted_proxies_strict",
             "client_ip_headers CF-Connecting-IP",
-            "dns cloudflare {env.CLOUDFLARE_API_TOKEN}",
+            "dns cloudflare {{env.CLOUDFLARE_API_TOKEN}}",
             "@admin path /admin*", "enable_ipv6: true",
         )
         add(rows, "PASS" if all(term in runtime for term in expected) else "BLOCKED",
