@@ -230,3 +230,69 @@ Combining reviewed source changes into `v2` is only development
 integration. The strict historical P8T OCI-only public TCP443 BLOCKED/2
 remains immutable. No rc.13 live installation, Cloudflare/OCI policy
 mutation, backup/restore, reboot or production GO is authorized.
+
+
+## Non-production scope correction — 2026-11-17
+
+The operator explicitly clarified that the currently inspected
+Cloudflare zone/network and `vaultwarden-oci-7-vnic` OCI ARM64 host
+are **non-production test infrastructure** intended to validate
+configurations for **future production sites**. Older test
+hostnames, recovered rc.12 application state, encrypted recovery
+material and the historical backup remote remain protected test
+assets. References above to an "original production" VM, zone or
+hostname are **historical terminology, not evidence of a live
+production deployment**. No existing live production environment
+was modified by P8V acceptance or the source integration.
+
+Cloudflare's existing exact DNS record, wildcard, Worker Route and
+Custom Domain are operator-reported test configuration. Their
+presence alone is **not** an unsafe overlap; the current
+effective-route outcome is HOLD/PENDING until the operator and
+independent reviewer identify the request path, intended Worker
+roles, test origin and absence of reference-state access. A
+verified wrong origin, insecure direct-origin route or use of
+recovered state is BLOCKED. The earlier conservative blanket
+"overlap = BLOCKED" assertion was made before the scope
+clarification and is superseded for the laboratory assessment.
+See [P8V future-site lab routing HOLD](P8V-CANARY-ISOLATION-HOLD-20261117.md).
+
+The latest **read-only ARM64 host run** (source from reviewed
+`v2` development branch) returned **8 PASS / 4 PENDING /
+0 BLOCKED / 1 NOT RUN — HOLD/1** and **52 bounded source tests
+PASS**. The host still contains immutable installed rc.12;
+protected recovery continuity, dedicated ext4 storage, dormant
+services/timers, listener and container absence all passed.
+Expired Cloudflare LKG, non-instantiated Docker bridge, external
+origin packet-path and proposed canary routing/data/backup
+isolation remain PENDING; no live rc.13 startup, refresh,
+reboot, restore or backup was attempted. Historical P8T strict
+OCI-only TCP443 BLOCKED remains immutable as the result of that
+older gate, not as a current test-host production incident.
+
+The future-site release **remains HOLD**. Proceed only with
+independent effective-route review, test-only blank-data isolation
+and separately authorized live acceptance when ready.
+
+
+## November 17 software-release focus — test infrastructure retained
+
+The operator reports that the existing Cloudflare exact hostname
+targets the test VM, the wildcard is described as effective, the
+matching Worker Route and Custom Domain are intentionally test-owned,
+and an independent review was completed. The candidate still uses
+**existing recovered data**. These observations do not reclassify
+historic test evidence, prove live rc.13 security, or justify
+destructive testing on the reference VM. Treat it as a protected,
+stopped, non-production recovery fixture.
+
+The goal is to release a **codebase suitable for installation at future
+production sites**, with infrastructure setup documented as an
+administrator procedure. See [OCI site setup](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md)
+and [Software release readiness](DEVELOPMENT.md#software-release-readiness-versus-site-deployment).
+No further repeated OCI/Cloudflare discovery of this same test site
+is required simply to clear a historical HOLD. Genuine remaining
+code-release gates include isolated fresh rc.13 install/start,
+direct-origin denial, functional checks and encrypted restore on
+**blank test data** with separate approval. All remain NOT RUN; a
+software production GO has not been declared.
