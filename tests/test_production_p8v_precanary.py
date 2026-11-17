@@ -75,6 +75,14 @@ class PrecanaryTests(unittest.TestCase):
         self.assertEqual(rows, [
             ("PASS", "manual-a"), ("BLOCKED", "manual-b"), ("PENDING", "manual-c")])
 
+    def test_unsupported_positive_claim_remains_pending_without_reviewer(self):
+        sample = json.loads(json.dumps(gate.TEMPLATE))
+        sample["cloudflare"]["dns_no_wildcards"] = True
+        rows = []
+        gate.validate_attestation(rows, sample)
+        self.assertIn(("PENDING", "cloudflare-dns-no-wildcards"), rows)
+        self.assertNotIn(("PASS", "cloudflare-dns-no-wildcards"), rows)
+
     def test_blank_template_cannot_pretend_approval(self):
         rows = []
         gate.validate_attestation(rows, gate.TEMPLATE)
