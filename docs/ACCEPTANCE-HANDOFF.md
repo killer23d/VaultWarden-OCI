@@ -273,3 +273,26 @@ older gate, not as a current test-host production incident.
 The future-site release **remains HOLD**. Proceed only with
 independent effective-route review, test-only blank-data isolation
 and separately authorized live acceptance when ready.
+
+
+## November 17 software-release focus — test infrastructure retained
+
+The operator reports that the existing Cloudflare exact hostname
+targets the test VM, the wildcard is described as effective, the
+matching Worker Route and Custom Domain are intentionally test-owned,
+and an independent review was completed. The candidate still uses
+**existing recovered data**. These observations do not reclassify
+historic test evidence, prove live rc.13 security, or justify
+destructive testing on the reference VM. Treat it as a protected,
+stopped, non-production recovery fixture.
+
+The goal is to release a **codebase suitable for installation at future
+production sites**, with infrastructure setup documented as an
+administrator procedure. See [OCI site setup](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md)
+and [Software release readiness](DEVELOPMENT.md#software-release-readiness-versus-site-deployment).
+No further repeated OCI/Cloudflare discovery of this same test site
+is required simply to clear a historical HOLD. Genuine remaining
+code-release gates include isolated fresh rc.13 install/start,
+direct-origin denial, functional checks and encrypted restore on
+**blank test data** with separate approval. All remain NOT RUN; a
+software production GO has not been declared.

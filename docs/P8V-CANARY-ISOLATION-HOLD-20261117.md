@@ -270,3 +270,36 @@ Cloudflare-only origin protection through Docker NAT/FORWARD/userland-proxy,
 correct cache-expiry/start/restart behavior, functional TLS/admin/SMTP/
 CrowdSec, private SSH/serial rollback and test-only encrypted backup/restore.
 These live or destructive tests need separate explicit consent.
+
+
+### Final operator lab classification — release scope only
+
+The operator subsequently clarified the inspected OCI VM and Cloudflare
+configuration are **not live production**. Their latest read-only
+classification reports:
+
+| Item | Operator-reported result | Release implication |
+| --- | --- | --- |
+| Exact DNS target | This non-production test VM | Matches the intended laboratory destination, not a separate clean-site proof |
+| Wildcard | Effective (operator description) | Keep the observation; Cloudflare exact DNS normally takes precedence, so do not infer precise wildcard DNS semantics from this label alone |
+| Matching Worker Route | Intended test policy | Not a defect solely because a Route exists |
+| Worker Custom Domain | Intended test Worker | Worker can be the origin; verify its intended onward request behavior where needed |
+| Candidate data | **Existing recovered data** | **Not eligible** for clean-install/destructive/restore acceptance; preserve it untouched |
+| Independent review | Reported completed | Record this status without inventing reviewer identity, signed attestation or external packet-path evidence |
+
+This ends the need for repeated non-mutating inventory of this same
+test routing/host configuration. The existing DNS/Worker overlap is
+not a production configuration incident. No additional CLI probing of
+the old VCN/VM is required merely to make the stopped-host report
+show PASS for intentionally absent containers or stale cache.
+
+**Codebase goal:** accept/release the software for **future** production
+sites, not the historical test site. The remaining genuine release
+evidence is a **fresh blank-data rc.13 installation**, real end-to-end
+security/functional verification, and test-only encrypted recovery on
+a disposable target, as described in
+[Software release readiness](DEVELOPMENT.md#software-release-readiness-versus-site-deployment)
+and [Host acceptance](HOST-ACCEPTANCE.md). These mutating checks are
+**NOT RUN** for rc.13 and require separate consent. Current software
+status remains **HOLD**; do not promote the recovered-state lab VM to
+production or treat passing CI as a live deployment authorization.

@@ -63,12 +63,64 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 Real-host acceptance is described in [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md); the accepted Ubuntu 26.04 ARM64 specifics are in [the agent handoff](ACCEPTANCE-HANDOFF.md). Each unavailable gate/architecture/provider remains `NOT RUN`, even if a different gate on the same OS passed.
 
+## Software release readiness versus site deployment
+
+**Two different approvals:** this project can be reviewed, tested and
+prepared for a software release without converting its current OCI or
+Cloudflare *test laboratory* into production. A future customer/site
+operator uses [Install](INSTALL.md) and, for OCI, the
+[Cloud Shell and private SSH guide](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md)
+to create **their own** site. Those network instructions are not
+instructions to mutate the historical acceptance VCN or recovered VM.
+
+A green PR workflow is necessary but **not** the whole production
+software release gate. The source release decision requires a bounded
+evidence statement, against **the exact proposed release candidate**:
+
+| Release evidence | Required result |
+| --- | --- |
+| Immutable source and dependencies | Reviewed release commit/tag, exact component digests and supported OS/architecture contract; no floating code/version |
+| Permanent CI | All required quality/unit, native Ubuntu and relevant Caddy/security/Docker/crypto integration jobs successful on that commit |
+| Clean first install | Real supported Ubuntu/architecture with separate **blank** persistent data disk; install/custody/config/start/doctor and no root fallback demonstrated |
+| Origin protection | Real fail-closed Cloudflare policy before Docker HTTPS publication, external non-Cloudflare denial including forwarding/NAT/userland-proxy and IPv4/IPv6 where relevant; no HTTP80 or public SSH22 exposure |
+| Application function | Cloudflare HTTPS/Caddy TLS, admin outer gate and token, SMTP, local health and CrowdSec Worker Fail Open invocation demonstrated on **test-only** credentials |
+| Recovery | Test-only local+remote encrypted backup, read-back and **disposable** restore with offline identity; no writes/prune to historical remote or recovered application database |
+| Lifecycle | Intended systemd/timer operation, controlled startup, restart/reboot persistence, policy/cache expiry, failure/quarantine and approved rollback |
+| Supported upgrade claim | Test the actual supported predecessor transition; if not exercised, document that no such upgrade claim is accepted |
+| Documentation and release | New-site guide complete, limitations and \`NOT RUN\` coverage explicit, approved release notes/tag and distinct code release decision |
+
+The real-host acceptance checks belong in [Host acceptance](HOST-ACCEPTANCE.md).
+For development evidence, a single isolated **disposable blank-data**
+acceptance host suffices for a scoped candidate rehearsal; it is not
+necessary to repeat Cloudflare/OCI provider inventory or rebuild the
+network of a stopped historical reference host merely to repeat old
+PASS/HOLD findings. **However**, source/unit CI and stopped-host
+inspection alone cannot demonstrate live packet denial or encrypted
+recovery. Treat any unrun required live behavior as \`NOT RUN\` rather
+than declaring the release ready.
+
+**Preserve recovered reference state.** A test VM containing a recovered
+database, secrets or a reused offsite destination is not a suitable
+clean-install, destructive failure-injection or disposable restore
+target. Do not wipe it, reconfigure its live firewall, start an
+unaccepted release, or run real backup/restore merely to satisfy a
+release checklist. Use distinct blank storage and test-only
+credentials/destinations with separate explicit authorization.
+
+When candidate evidence is complete, review the exact Git diff, record
+PASS/FAIL/NOT RUN for each accepted architecture and external
+dependency, approve an immutable tag/release and write a truthful
+release statement. Until then the source is a **release candidate**,
+not a validated production software release. Do not confuse
+"software released for future production sites" with "the
+historical test network/VM is now production."
+
 ## Release workflow
 
 1. Start from the current release branch/head and read `AGENTS.md`, `docs/PROJECT-BOUNDARY.md`, and `docs/DECISIONS.md`.
 2. Change the smallest existing owner; do not create a parallel authority.
 3. Run proportional unit/integration validation and inspect secret/security boundaries.
-4. For release candidates, run disposable real-host acceptance on both supported architectures where environments are available and record unavailable coverage as `NOT RUN`.
+4. For release candidates, use the [software release readiness](#software-release-readiness-versus-site-deployment) gate: validate the exact code candidate on safely isolated blank test data; record unavailable architecture/provider coverage as `NOT RUN`, not PASS.
 5. Review the complete diff for stale generation/stage naming, duplicate logic, boot-volume fallback, parser/frontend disagreement, explicit-recipient override risk, and reintroduced non-goals.
 6. Open a reviewable PR; do not self-merge unless the human explicitly instructs it.
 

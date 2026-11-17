@@ -31,6 +31,15 @@ In Cloudflare DNS, create or confirm a record like this:
 
 There must be **exactly one A record** for the final vault hostname, with **no explicit AAAA record**. The updater does not create records, enable the proxy, or publish IPv6. If you are replacing an existing server, **do not move the A record to the new IP until the new app starts**.
 
+**Worker routing:** Cloudflare's CrowdSec Worker **Route** is a filter in
+front of the intended Caddy origin. A **Worker Custom Domain**, however,
+makes the Worker itself the origin; it is not automatically a route to
+Vaultwarden. For a new site, verify the final matching DNS/Worker path
+and avoid an unintended Worker-owned hostname that cannot be maintained
+by the appliance's single-A-record updater. Wildcard/route presence
+alone is not proof of an unsafe path: confirm the effective target.
+See [Security](SECURITY.md) and, for OCI, [the private access guide](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md).
+
 Create **two separate Cloudflare user API tokens** using [Cloudflare tokens](CLOUDFLARE-TOKENS.md):
 
 - `cloudflare_api_token` — Zone / Zone / Read and Zone / DNS / Edit on your zone; used for Caddy certificate challenges **and DNS updates**.
@@ -41,6 +50,18 @@ The appliance discovers Cloudflare Zone ID and Account ID itself. It also genera
 Prepare an authenticated SMTP account. Use `starttls` for a provider's port 587 or `force_tls` for implicit TLS on 465, as your provider instructs. Make sure your chosen sender address is allowed. Operational HTTPS failure notifications are **optional**, not part of basic SMTP setup.
 
 ## 3. Download the correct code and identify the disk
+
+**Source selection matters.** The branch command below is for the
+currently reviewed **development** codebase; a successful clone of a
+moving branch does **not** establish a production-ready software
+release. For a real site, select the separately **approved immutable
+release tag/commit**, verify its exact source SHA and \`versions.toml\`
+component digests, and only then install. Do not assume that the
+repository's default branch or a \`--use-latest\` dependency override
+is an approved application release. See [the software release
+workflow](DEVELOPMENT.md#software-release-readiness-versus-site-deployment).
+
+
 
 In the Ubuntu terminal:
 
