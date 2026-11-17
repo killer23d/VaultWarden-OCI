@@ -12,6 +12,8 @@ This is the **first-time, interactive installation** guide. The installer handle
 | SMTP | Server hostname, port, security mode, allowed sender address, username and password |
 | Recovery storage | A safe place **off the server** for a recovery-kit ZIP and another safe place for its passphrase |
 
+**OCI network prerequisite:** For an OCI-hosted appliance, follow [Cloud Shell and private-only SSH](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md) **before first start**. Configure private SSH via approved Private Network Access, verify it first, and ensure no effective public TCP22/80 ingress or unexpected NSG/list rules. OCI public TCP443 alone is not proof of Cloudflare-only origin protection. Never edit a shared default security list simply to close SSH on one VM.
+
 **Disk safety:** Setup refuses production storage on the boot disk. Formatting the wrong separate disk can still destroy its contents. **Check the device name and size before confirming.**
 
 A few terms: **A record** means hostname-to-IPv4; **Proxied** means Cloudflare's orange cloud; **DNS sync / DDNS** keeps that *existing* A record's address current; **offline Age identity** is the private key you keep off the server for recovery.

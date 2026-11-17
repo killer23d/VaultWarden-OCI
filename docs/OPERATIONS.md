@@ -4,6 +4,8 @@ These operations apply to supported Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS 
 
 `dashboard.sh` is the normal day-2 human interface. `vwctl` remains the single implementation and mutation authority: the dashboard reads stable status/doctor output and delegates every state-changing action to `vwctl`. Its only direct command is bounded read-only `journalctl` display.
 
+**OCI administrator access:** Before using SSH or changing network rules, consult [Cloud Shell network modes and private-only SSH](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md). Use Cloud Shell Public Network for GitHub clones, OCI Service Network for provider readback, and Private Network Access for authenticated SSH to the approved VM **private IPv4**. Do not open public TCP22 as a troubleshooting workaround; independently verify all attached security lists and NSGs. The documented P8T private SSH correction is accepted only for its disposable host, not a reusable automatic network change.
+
 ## Dashboard
 
 **Prerequisite:** a completed installation with valid dedicated storage.

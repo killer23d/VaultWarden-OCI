@@ -6,7 +6,7 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 
 ## New here? Follow this path
 
-1. Prepare a fresh Ubuntu server, attach a **separate data disk**, and make sure you know which disk is the boot disk.
+1. Prepare a fresh Ubuntu server, attach a **separate data disk**, and make sure you know which disk is the boot disk. For OCI, configure and verify **private-only SSH** before deploying; use [the Cloud Shell and private SSH guide](docs/OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md).
 2. In Cloudflare, prepare **one Proxied (orange-cloud) A record** for your vault hostname (and no explicit AAAA record). Create **two separate API tokens** for DNS/certificates and CrowdSec. See [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md).
 3. Have an authenticated SMTP account ready for invitations and other Vaultwarden emails.
 4. Download the **source described by this guide**:
@@ -75,6 +75,7 @@ The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, g
 | Guide | Purpose |
 | --- | --- |
 | [Install](docs/INSTALL.md) | First install, first start, safe advanced options |
+| [OCI Cloud Shell & private SSH](docs/OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md) | Public/Service/Private network modes, disabling public SSH22 safely, readback and recovery |
 | [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md) | Exact scopes for the two credentials |
 | [Configuration](docs/CONFIGURATION.md) | Editing settings, SMTP, optional notifications |
 | [Operations](docs/OPERATIONS.md) | Dashboard, DNS sync, timers, security and updates |
