@@ -55,9 +55,9 @@ Prepare an authenticated SMTP account. Use `starttls` for a provider's port 587 
 currently reviewed **development** codebase; a successful clone of a
 moving branch does **not** establish a production-ready software
 release. For a real site, select the separately **approved immutable
-release tag/commit**, verify its exact source SHA and \`versions.toml\`
+release tag/commit**, verify its exact source SHA and `versions.toml`
 component digests, and only then install. Do not assume that the
-repository's default branch or a \`--use-latest\` dependency override
+repository's default branch or a `--use-latest` dependency override
 is an approved application release. See [the software release
 workflow](DEVELOPMENT.md#software-release-readiness-versus-site-deployment).
 
@@ -73,6 +73,24 @@ cd VaultWarden-OCI
 ```
 
 The branch is explicit because the repository's default branch is a different implementation.
+
+**For a separately approved immutable software release, use the following
+*alternative* clone instead of the development-branch example above**
+(replace the placeholder with an actual project release tag that has been
+reviewed and published):
+
+```bash
+git clone --branch '<APPROVED_RELEASE_TAG>' --single-branch \
+  https://github.com/killer23d/VaultWarden-OCI.git VaultWarden-OCI
+cd VaultWarden-OCI
+git rev-parse HEAD
+git status --porcelain
+```
+
+Verify the resulting commit against the approved release record before
+running `setup.sh`. A blank status output means the checkout is clean,
+**not** that the candidate passed host acceptance. There is no approved
+stable tag implied by the placeholder.
 
 Inspect storage **without changing it**:
 

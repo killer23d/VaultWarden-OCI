@@ -87,7 +87,7 @@ evidence statement, against **the exact proposed release candidate**:
 | Recovery | Test-only local+remote encrypted backup, read-back and **disposable** restore with offline identity; no writes/prune to historical remote or recovered application database |
 | Lifecycle | Intended systemd/timer operation, controlled startup, restart/reboot persistence, policy/cache expiry, failure/quarantine and approved rollback |
 | Supported upgrade claim | Test the actual supported predecessor transition; if not exercised, document that no such upgrade claim is accepted |
-| Documentation and release | New-site guide complete, limitations and \`NOT RUN\` coverage explicit, approved release notes/tag and distinct code release decision |
+| Documentation and release | New-site guide complete, limitations and `NOT RUN` coverage explicit, approved release notes/tag and distinct code release decision |
 
 The real-host acceptance checks belong in [Host acceptance](HOST-ACCEPTANCE.md).
 For development evidence, a single isolated **disposable blank-data**
@@ -96,7 +96,7 @@ necessary to repeat Cloudflare/OCI provider inventory or rebuild the
 network of a stopped historical reference host merely to repeat old
 PASS/HOLD findings. **However**, source/unit CI and stopped-host
 inspection alone cannot demonstrate live packet denial or encrypted
-recovery. Treat any unrun required live behavior as \`NOT RUN\` rather
+recovery. Treat any unrun required live behavior as `NOT RUN` rather
 than declaring the release ready.
 
 **Preserve recovered reference state.** A test VM containing a recovered

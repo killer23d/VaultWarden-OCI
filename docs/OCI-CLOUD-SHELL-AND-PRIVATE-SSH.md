@@ -31,9 +31,9 @@ while all administrator SSH remains reachable **only by private IPv4**.
 | Resource | New-site choice | Do not do |
 | --- | --- | --- |
 | Compartment, region, VCN | Choose an authorized compartment/region and non-overlapping private CIDR; record the VCN and subnet identities privately | Copy a past acceptance target's OCIDs or route table without review |
-| Subnet and routing | Dedicated public IPv4 subnet for the HTTPS origin, with its own reviewed route table and an enabled internet gateway; route \`0.0.0.0/0\` to that gateway when public IPv4 egress/ingress is required | Assume a public IP or internet gateway alone enables correct routing |
+| Subnet and routing | Dedicated public IPv4 subnet for the HTTPS origin, with its own reviewed route table and an enabled internet gateway; route `0.0.0.0/0` to that gateway when public IPv4 egress/ingress is required | Assume a public IP or internet gateway alone enables correct routing |
 | Ingress policy | A dedicated security list and, if needed, **explicitly reviewed** NSGs; confirm their additive union | Reuse a permissive shared default list, or assume an NSG can deny a security-list allow |
-| Compute | Supported Ubuntu 24.04 or 26.04, \`arm64\` or \`amd64\`; one primary private IPv4 and optional public IPv4 for Cloudflare-proxied HTTPS | Expose guest TCP22 publicly merely because the subnet is public |
+| Compute | Supported Ubuntu 24.04 or 26.04, `arm64` or `amd64`; one primary private IPv4 and optional public IPv4 for Cloudflare-proxied HTTPS | Expose guest TCP22 publicly merely because the subnet is public |
 | Persistent data | Separate attached OCI Block Volume/dedicated filesystem; verify the actual guest device before any format | Use boot/root volume as application state or copy old recovered data into a fresh-site test |
 | Management and recovery | Cloud Shell Private Network Access, a trusted guest SSH key/host key, and separately verified serial/Console fallback | Remove the only working SSH path or depend on a shared-default-list rollback that reopens TCP22 |
 
@@ -64,7 +64,7 @@ while all administrator SSH remains reachable **only by private IPv4**.
    OCI security lists and NSGs are **additive**, not deny-list overrides.
    Keep Docker IPv4 **and** IPv6 origin filtering in the appliance even if
    OCI assigns no public IPv6. Do not maintain a static Cloudflare CIDR
-   list in OCI: the appliance's \`DOCKER-USER\` policy owns the validated
+   list in OCI: the appliance's `DOCKER-USER` policy owns the validated
    Cloudflare ranges. When starting from an existing subnet, follow the
    change-controlled procedure below instead of replacing attachments
    before private SSH and rollback are proven.
@@ -75,7 +75,7 @@ while all administrator SSH remains reachable **only by private IPv4**.
    Volume and attach it under the instance's **Attached block volumes**.
    Paravirtualized attachment is normally visible to the guest after
    attachment; an iSCSI attachment has additional connect steps. On Ubuntu,
-   inspect \`lsblk\`, \`findmnt\` and the device's stable identifiers,
+   inspect `lsblk`, `findmnt` and the device's stable identifiers,
    then let the supported appliance installer handle the separately
    consented filesystem provisioning. Do **not** format or mount the boot
    disk as application storage; a recovered test disk is not blank.
@@ -97,7 +97,7 @@ while all administrator SSH remains reachable **only by private IPv4**.
    Domains for *effective* matching, not simple presence: a **Worker
    Route** runs before an external origin; a **Worker Custom Domain**
    makes a Worker the origin and may need an explicit onward
-   \`fetch()\` to reach Caddy. For this appliance, prove the intended
+   `fetch()` to reach Caddy. For this appliance, prove the intended
    Cloudflare → Caddy path, origin-only filtering and the CrowdSec
    Fail Open requirement; do not assume a Worker Custom Domain pointing
    to some other test service is compatible with the appliance's
