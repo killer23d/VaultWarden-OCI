@@ -307,12 +307,12 @@ def fresh_review(value: object, *, now: datetime | None = None) -> tuple[str, st
 
 
 def attest_flags(rows: list[tuple[str, str]], group: object,
-                 flags: tuple[str, ...], label: str) -> None:
+                 flags: tuple[str, ...], label: str, *, corroborated: bool = True) -> None:
     if not isinstance(group, dict):
         add(rows, "PENDING", label + "-section-not-provided")
         return
     for field in flags:
-        outcome = "PASS" if group.get(field) is True else (
+        outcome = "PASS" if group.get(field) is True and corroborated else (
             "BLOCKED" if group.get(field) is False else "PENDING"
         )
         add(rows, outcome, label + "-" + field.replace("_", "-"))
@@ -322,21 +322,23 @@ def validate_attestation(rows: list[tuple[str, str]], doc: dict) -> None:
     if set(doc) != {"schema_version", "review", "cloudflare", "storage", "management"} or doc.get("schema_version") != 1:
         add(rows, "PENDING", "precanary-attestation-schema-incomplete")
         return
-    add(rows, *fresh_review(doc["review"]))
+    review_status, review_reason = fresh_review(doc["review"])
+    add(rows, review_status, review_reason)
+    corroborated = review_status == "PASS"
     cloudflare = doc["cloudflare"]
     if isinstance(cloudflare, dict):
         add(rows, *fqdn_status(cloudflare.get("zone"), cloudflare.get("test_fqdn")))
     else:
         add(rows, "PENDING", "test-zone-or-fqdn-unselected")
-    attest_flags(rows, cloudflare, CLOUDFLARE_FLAGS, "cloudflare")
+    attest_flags(rows, cloudflare, CLOUDFLARE_FLAGS, "cloudflare", corroborated=corroborated)
     storage = doc["storage"]
     if isinstance(storage, dict):
         add(rows, *data_path_status(storage.get("test_data_path")))
         add(rows, *backup_status(storage.get("test_backup_target")))
     else:
         add(rows, "PENDING", "canary-storage-section-not-provided")
-    attest_flags(rows, storage, STORAGE_FLAGS, "storage")
-    attest_flags(rows, doc["management"], MANAGEMENT_FLAGS, "management")
+    attest_flags(rows, storage, STORAGE_FLAGS, "storage", corroborated=corroborated)
+    attest_flags(rows, doc["management"], MANAGEMENT_FLAGS, "management", corroborated=corroborated)
     add(rows, "PENDING", "manual-attestation-never-proves-host-path-or-packet-denial")
 
 
