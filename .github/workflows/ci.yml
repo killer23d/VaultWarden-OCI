@@ -299,6 +299,8 @@ jobs:
         run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_oci_provider_batch.py' -v
       - name: Exercise P8V pre-canary read-only negative paths on native ARM64
         run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_precanary.py' -v
+      - name: Exercise P8V public DNS proposal negative paths on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_dns_proposal.py' -v
       - name: Verify Resolute Docker repository advertises Arm64
         run: |
           docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"
