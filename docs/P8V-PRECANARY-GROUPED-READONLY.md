@@ -90,7 +90,7 @@ Offline tests cover malformed/missing/duplicate/overlapping IP families, API-fir
 4. **Interrupted transitions:** separately authorize mocked/current policy failures, 72h expired cache, malformed API/legacy feed failures, Docker stop/restart, partial publication, rollback, retry and reboot. Capture both-family guard state. Any unintended accept interval = BLOCKED, stop and quarantine.
 5. **Functional and recovery canary:** independently approve login/admin, Caddy TLS, Worker/CrowdSec, SMTP, **test-only** encrypted recovery publication/readback and natural timers. Destructive restore, prune, real remote writes, reboots and production hostname cutover each need their own scoped approval.
 
-**Next operator decision:** review the new PR and exact SHA, run the one grouped P8V-C read-only Cloud Shell command, then provide sanitized statuses. For any Cloudflare Dashboard facts that are still unavailable, request operator-led private verification, not elevated API permissions. Production remains HOLD.
+**Next operator decision:** review the new PR and exact SHA, run the one grouped P8V-C read-only Cloud Shell command, then provide sanitized statuses. For any Cloudflare Dashboard facts that are still unavailable, request operator-led private verification, not elevated API permissions. Future production-site release readiness remains HOLD.
 
 ## Actual operator execution: 2026-11-17 P8V-C
 
@@ -254,15 +254,18 @@ dedicated OCI security-list and original production VM untouched.
 
 ## v2 source integration and 2026-11-17 operator conflict
 
-See [P8V canary isolation HOLD](P8V-CANARY-ISOLATION-HOLD-20261117.md).
-The operator accepted the **candidate** test FQDN but reported an existing
-exact DNS record, DNS wildcard, Worker Route overlap and Worker Custom
-Domain overlap. Production settings were reported unchanged and an
-independent reviewer is **available**, not yet finished. The test
-hostname's no-overlap design requirement is **BLOCKED/2** pending
-independent mapping or a new isolated test name. Do not treat the
-previous P8V-D public resolver-unavailable HOLD as disproving the
-later operator Dashboard report.
+See [P8V future-site lab routing HOLD](P8V-CANARY-ISOLATION-HOLD-20261117.md).
+The operator initially accepted a **candidate** test FQDN and reported
+an exact DNS record, wildcard, Worker Route and Custom Domain present.
+A later operator clarification establishes that **neither Cloudflare
+nor the OCI host serves live production**; both are test infrastructure
+for future production-site deployment validation. The earlier automatic
+"any overlap = BLOCKED/2" interpretation was too broad for an intentional
+laboratory topology. The current effective-routing assessment is
+**HOLD/PENDING until the actual path and Worker destination are reviewed**.
+Confirmed wrong-origin/recovered-state exposure or direct-origin bypass
+remains BLOCKED. Independent review is AVAILABLE, not complete.
+P8V-D's prior unavailable recursive DNS outcome is unchanged.
 
 Once the reviewed feature PR stack is merged to the `v2` development branch,
 archived commands above naming individual
@@ -278,3 +281,31 @@ Merging source to `v2` does not install rc.13, approve a canary,
 clear the stale Cloudflare last-known-good state, prove NAT/forwarding
 or userland-proxy denial, or authorize real backup/restore operations.
 Production remains HOLD.
+
+
+### Latest stopped-host evidence — November 17 (test laboratory)
+
+The operator ran the exact clean `v2` development source on the
+Ubuntu 26.04 ARM64 test VM and obtained **8 PASS, 4 PENDING,
+0 BLOCKED, 1 NOT RUN — HOLD/1** with **52 bounded source tests
+passed**. Installed rc.12, ext4 storage/custody continuity, stopped
+services/timers, zero application listeners, zero Docker containers
+and source regressions passed. The four pending items are stale
+Cloudflare LKG, dormant bridge, independent external packet witness
+and effective Cloudflare/test-data/backup isolation. No live operations
+were performed or approved.
+
+Do not re-run the same host check solely to clear expected stopped
+state PENDING findings. Next collect a single effective-route mapping
+of the **existing test-only Cloudflare setup** with an available
+independent reviewer; a matching wildcard, Worker Route or Custom
+Domain is acceptable only when its effective behavior is intentional
+and isolation is demonstrated. The historic absence-only private
+attestation fields cannot express this safely and must not be forced
+true. Preserve earlier reports without rewriting them.
+
+This repository contains development source for **future production
+sites**; today's Cloudflare zone and OCI host are **not** production.
+Future production GO still requires newly approved rc.13 live security
+and recovery validation on blank test state, not merely documentation
+or CI.

@@ -9,7 +9,12 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 1. Prepare a fresh Ubuntu server, attach a **separate data disk**, and make sure you know which disk is the boot disk. For OCI, configure and verify **private-only SSH** before deploying; use [the Cloud Shell and private SSH guide](docs/OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md).
 2. In Cloudflare, prepare **one Proxied (orange-cloud) A record** for your vault hostname (and no explicit AAAA record). Create **two separate API tokens** for DNS/certificates and CrowdSec. See [Cloudflare tokens](docs/CLOUDFLARE-TOKENS.md).
 3. Have an authenticated SMTP account ready for invitations and other Vaultwarden emails.
-4. Download the **source described by this guide**:
+4. Download the **source described by this guide**. The command uses
+   the current **development** branch for evaluation; it is **not** a
+   stable software release selection. A future production installation
+   must use the separately approved immutable tag or reviewed commit,
+   with the exact source/version pins confirmed under
+   [software release readiness](docs/DEVELOPMENT.md#software-release-readiness-versus-site-deployment):
 
    ```bash
    sudo apt-get update
