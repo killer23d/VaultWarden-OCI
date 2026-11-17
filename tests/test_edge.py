@@ -412,6 +412,8 @@ timeout_seconds = 15
                 bouncer_dropin=dropin_parent / "vaultwarden-oci.conf",
                 remediation_config=root / "run/bouncer.yaml",
                 caddy_log=root / "caddy/access.log",
+                remediation_start_token=root / "run/remediation-start.token",
+                fail_open_confirmation=root / "state/fail-open-confirmation.json",
             )
             installer = root / "installer.sh"
             installer.write_text("exit 0\n", encoding="utf-8")
