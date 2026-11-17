@@ -84,6 +84,13 @@ def temp_paths(root: Path) -> runtime.Paths:
 
 class RuntimeContractTests(unittest.TestCase):
     def setUp(self) -> None:
+        # The historical literal image-pin fixtures are AMD64. Pin their
+        # architecture explicitly so these tests never depend on the runner.
+        self._fixture_arch = mock.patch(
+            "vaultwarden_oci.update_versions.platform.machine",
+            return_value="x86_64",
+        )
+        self._fixture_arch.start()
         self._admin_hash = mock.patch.object(
             secrets, "derive_admin_basic_auth_hash", return_value="$2a$14$test-admin-hash"
         )
@@ -96,6 +103,7 @@ class RuntimeContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._vaultwarden_admin_hash.stop()
         self._admin_hash.stop()
+        self._fixture_arch.stop()
 
     def test_config_to_runtime_rendering_validation_and_scope(self) -> None:
         import tomllib
@@ -155,6 +163,29 @@ class RuntimeContractTests(unittest.TestCase):
         invalid["smtp"]["password"] = "plaintext-forbidden"
         with self.assertRaisesRegex(runtime.RuntimeConfigError, "unknown smtp"):
             runtime.parse_config(invalid)
+
+    def test_arm64_fixture_renders_arm64_image_digests(self) -> None:
+        import tomllib
+
+        cfg = runtime.parse_config(tomllib.loads(config_text()))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = temp_paths(root)
+            paths.transient.mkdir(parents=True)
+            versions = root / "versions.toml"
+            versions.write_text(versions_text(), encoding="utf-8")
+            # Verify the real ARM64 selection independently from the AMD64
+            # fixture used by the older rendering and lifecycle assertions.
+            with mock.patch(
+                "vaultwarden_oci.update_versions.platform.machine",
+                return_value="aarch64",
+            ):
+                runtime.render(cfg, versions, paths)
+            compose = paths.compose.read_text(encoding="utf-8")
+            dockerfile = paths.dockerfile.read_text(encoding="utf-8")
+        self.assertIn("vaultwarden/server:1.37.1@sha256:" + "b" * 64, compose)
+        self.assertIn("FROM caddy:2.11.4-builder-alpine@sha256:" + "d" * 64, dockerfile)
+        self.assertIn("FROM caddy:2.11.4-alpine@sha256:" + "f" * 64, dockerfile)
 
     def test_sops_age_boundary_materialization_and_non_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

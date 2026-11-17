@@ -145,7 +145,43 @@ jobs:
                       path.as_posix() in {'README.md', 'docs/INSTALL.md'}
                       and line.strip() == 'git clone --branch v2 --single-branch https://github.com/killer23d/VaultWarden-OCI.git'
                   )
-                  if generation_pattern.search(line) and not technical_version_pattern.search(line) and not is_required_checkout:
+                  # Git source branch v2 is not a product generation.
+                  # Only known source-pin guard/test and handoff lines qualify.
+                  approved_branch_reference = (
+                      (
+                          path.as_posix() in {
+                              'docs/P8V-CANARY-ISOLATION-HOLD-20261117.md',
+                              'docs/P8V-PRECANARY-GROUPED-READONLY.md',
+                              'docs/P8V-GROUPED-OCI-PROVIDER-READONLY.md',
+                              'docs/ACCEPTANCE-HANDOFF.md',
+                          }
+                          and 'v2' in line
+                          and any(term in line.lower() for term in (
+                              'branch', 'source', 'clone', 'sha',
+                              'integrat', 'development',
+                          ))
+                      )
+                      or (
+                          path.as_posix() in {
+                              'tests/host-acceptance/production-p8v-host-layered-readonly.py',
+                              'tests/host-acceptance/production-p8v-oci-layered-readonly.py',
+                              'tests/host-acceptance/production-p8v-oci-provider-batch-readonly.py',
+                              'tests/host-acceptance/production-p8v-precanary-readonly.py',
+                          }
+                          and line.strip().startswith('return ')
+                          and 'BRANCH' in line
+                          and ('"v2"' in line or "'v2'" in line)
+                      )
+                      or (
+                          path.as_posix() == 'tests/test_production_p8v_integrated_source_pins.py'
+                          and 'self.assert_pin(' in line
+                          and '"v2"' in line
+                      )
+                  )
+                  if (generation_pattern.search(line)
+                          and not technical_version_pattern.search(line)
+                          and not is_required_checkout
+                          and not approved_branch_reference):
                       violations.append(f'{path}:{number}:{line.strip()}')
                       continue
                   if any(pattern.search(line) for pattern in other_patterns):
@@ -293,6 +329,16 @@ jobs:
           PYTHONPATH=. python3 tests/test_setup_storage.py -v
           PYTHONPATH=. python3 tests/test_update_workflow.py -v
           PYTHONPATH=. python3 tests/test_immutable_vwctl_bytecode.py -v
+      - name: Exercise P8V fail-closed OCI and host checks on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_*layered.py' -v
+      - name: Exercise batched OCI provider negative paths on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_oci_provider_batch.py' -v
+      - name: Exercise P8V pre-canary read-only negative paths on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_precanary.py' -v
+      - name: Exercise P8V public DNS proposal negative paths on native ARM64
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_dns_proposal.py' -v
+      - name: Exercise merged v2 gate pins and Cloudflare conflict negative paths
+        run: python3 -B -m unittest discover -s tests -p 'test_production_p8v_integrated_source_pins.py' -v
       - name: Verify Resolute Docker repository advertises Arm64
         run: |
           docker_release="$(curl -fsSL https://download.docker.com/linux/ubuntu/dists/resolute/Release)"

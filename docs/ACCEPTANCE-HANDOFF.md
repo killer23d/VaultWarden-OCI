@@ -208,3 +208,25 @@ The **NEW** disposable `vaultwarden-oci-7-vnic` ran the consolidated PR #411 P8S
 **PENDING / deliberate HOLD**: absent generated/volatile stopped-runtime paths (not automatically repaired), **independent OCI/Cloudflare external ingress and hostname/Worker Route proof**, separate test-only Box prefix/destination, test-only data/SMTP and live TLS/start/rollback. **NOT RUN**: no firewall mutation, reboot, app/Docker start, DNS, Worker, SMTP, Box read/write/prune or timers in P8S. First two P8S read-only attempts returned BLOCKED because of an acceptance parser/reporting bug, were independently diagnosed and corrected in the same consolidated PR; do not rewrite that history.
 
 **Next gate P8T: NOT RUN**. The recommended next work is a **single batched read-only external-boundary discovery** (OCI instance/VNIC NSGs + subnet security-list union and public IPv4/IPv6 paths, independent Cloudflare DNS/Worker wildcard/route scope, OCI console, separate candidate test FQDN and isolated data/remote destination), using authoritative provider facts rather than inferring from local DOCKER-USER. Do not activate Caddy/Worker/ACME/SMTP/Box/timers with historical `bw.lazymocha.com` configuration. Once independently proven, use a different reviewed canary gate to test product-owned start with an explicitly isolated test config and stop/rollback procedure. **Production GO remains NO.**
+
+## November 17, 2026 — rc.13 v2 source-integration handoff
+
+This dated appendix does **not** supersede the October rc.11/rc.12
+acceptance record. The stopped disposable Ubuntu 26.04 ARM64 appliance
+remains installed immutable **rc.12**. P8V-A/P8V-B/P8V-C/P8V-D are
+read-only source/provider/stopped-host evidence with HOLD results, not
+rc.13 deployment or an external non-Cloudflare packet-denial witness.
+
+The operator reported an accepted proposed test hostname and confirmed
+Cloudflare zone ownership, but also an **existing DNS record, wildcard
+DNS, overlapping Worker route and overlapping Worker Custom Domain**.
+Independent reviewer availability was reported, not approval. See
+[P8V canary isolation HOLD](P8V-CANARY-ISOLATION-HOLD-20261117.md)
+for exact scope and stop conditions. Canary hostname isolation is
+BLOCKED pending independent mapping or selection of a new isolated
+test name. Do not clear these blockers from passing CI alone.
+
+Combining reviewed source changes into `v2` is only development
+integration. The strict historical P8T OCI-only public TCP443 BLOCKED/2
+remains immutable. No rc.13 live installation, Cloudflare/OCI policy
+mutation, backup/restore, reboot or production GO is authorized.

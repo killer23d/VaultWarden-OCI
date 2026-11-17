@@ -14,6 +14,7 @@ Do not use broad Docker cleanup, delete appliance state, bypass the dedicated-st
 
 | Symptom | Go to |
 | --- | --- |
+| OCI Cloud Shell cannot clone / private SSH unavailable / public SSH accidentally exposed | [Cloud Shell modes, private-only SSH and recovery](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md) |
 | Setup cannot use the data disk | [Setup cannot find or accept storage](#setup-cannot-find-or-accept-storage) |
 | Setup stopped while handing off the recovery identity/kit | [Setup stops during recovery custody](#setup-stops-during-recovery-custody) |
 | Setup stops at SOPS with `[Errno 18]` | [SOPS install fails with cross-device link](#sops-install-fails-with-cross-device-link) |
