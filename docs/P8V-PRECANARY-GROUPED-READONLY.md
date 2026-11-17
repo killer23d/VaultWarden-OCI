@@ -201,3 +201,53 @@ evidence remain preserved, not rerun merely because this public DNS
 proposal runs. For private SSH and management fallback use the accepted
 PNA administrator guide; never reopen public SSH by attaching the old
 shared default OCI list. **No live canary authorization.**
+
+### Actual P8V-D Public Network result — 2026-11-17
+
+Operator executed the exact clean checked-out source
+`97c823b8ed3f2929743e3fc9aed21c16286b7462` using
+OCI Cloud Shell **Public Network** as `freedom`. Observed
+**1 PASS / 7 PENDING / 0 BLOCKED / 1 NOT RUN — HOLD/1**
+(`P8VD_EXIT=1`).
+
+The only PASS was lexical separation of proposed
+`vwoci-rc13-canary.lazymocha.com` from the production hostname.
+The candidate A/AAAA/CNAME probes, wildcard-clue probes and NS
+lookups all returned resolver-unavailable/incomplete, not proof of
+record absence. These classifications **do not identify a root cause**:
+the scanner intentionally conflates network/HTTP errors, invalid JSON
+and incomplete provider response schemas into a sanitized unavailable
+result. Never claim Cloud Shell egress is blocked from these reasons alone,
+and never treat zero observed DNS answers as zone or Worker clearance.
+
+Owner-private source report (do not attach its JSON to GitHub):
+`/home/freedom/vwoci-acceptance/p8v-dns-proposal-20261117T215054Z-639.json`.
+Zero DNS/Worker/OCI changes were made. The source revision's nine GitHub
+CI jobs, including native Ubuntu 26.04 ARM64, all passed
+([run 44183697896](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44183697896)).
+No rerun of the same public DoH probes is needed to make progress.
+
+**Next non-mutating group: Cloudflare Dashboard inspection.**
+An approved operator and independent reviewer should review the exact
+Cloudflare account and active `lazymocha.com` zone; inspect
+**DNS > Records** for exact canary A/AAAA/CNAME entries, relevant `*`
+wildcards (both DNS-only and proxied), and existing production records.
+Then review **Workers & Pages > [each relevant Worker] > Settings >
+Domains & Routes** (some dashboard versions have a **Domains** tab)
+for Worker Routes, wildcard hostname/path patterns and Custom Domains
+intersecting either the candidate or production host. A route matching a
+wildcard may overlap even with no visible exact candidate DNS record.
+See [Cloudflare DNS wildcard guidance](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/),
+[Worker route guidance](https://developers.cloudflare.com/workers/configuration/routing/routes/),
+and [Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/).
+**Read only:** do not add, remove, disable or change anything; do not broaden
+the existing Worker Routes API token after its historical HTTP403.
+
+Record the operator/reviewer and UTC observed time only in the owner-private
+mode-0600 template previously created by P8V-C; mark
+`true` only for actually verified facts, `false` for a confirmed conflict
+and `null` for unknown. A self-review is not two-person independent evidence.
+Do not mark backup/dataset/serial-console or external packet-path proofs PASS
+on the basis of Dashboard inspection. Cloudflare DNS and Worker inspection
+alone cannot release the canary. Preserve the rc.12 stopped appliance,
+dedicated OCI security-list and original production VM untouched.
