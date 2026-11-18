@@ -5,6 +5,19 @@ appliance commands, and they are not a replacement for the supported
 `setup.sh`, `vwctl`, or the complete
 [Host acceptance](../../docs/HOST-ACCEPTANCE.md) checklist.
 
+**rc.13 disposable-host audit note:** The numbered `rc13-p3g9*` and
+`rc13-p3g11*` files are pinned, one-off acceptance scripts for a
+specific disposable VM and fixed test artifacts. They are not reusable
+site-install or production runbooks. In particular, the G9B/G11F restore
+handoffs are destructive even when guarded by interactive consent;
+**do not replay them on another host or against historical Box objects**.
+Their actual PASS/HOLD outcomes, immutable object identifiers and
+unexecuted follow-up limits are recorded in
+[Host acceptance](../../docs/HOST-ACCEPTANCE.md). Source-level reusable
+regression coverage remains in ordinary `tests/test_*.py` and the
+regular CI suites. After phase reconciliation, preserve the audit
+history without retaining duplicate active acceptance infrastructure.
+
 | Tool | Appropriate target | Effect |
 | --- | --- | --- |
 | `production-new-host-preflight.py` | New blank-data Ubuntu 26.04 ARM64 candidate, exact reviewed source commit | Read-only version/source/host/boot-disk/blank-volume inventory and private evidence; no format or installation consent |
