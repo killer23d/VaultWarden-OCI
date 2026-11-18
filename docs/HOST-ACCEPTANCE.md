@@ -180,8 +180,8 @@ that approval does not retroactively expand P1.
 operator-reported evidence checkpoint after the immutable P0/P1 and
 historical-infrastructure records above. The disposable new host is
 `vaultwarden-oci-8`, Ubuntu 26.04 ARM64 with native Python 3.14.
-The executed P2/P3 source was `v2` and
-`acceptance/p2-rc13-blank-install-20261118`, both pinned at
+The executed P2/P3 source was the reviewed candidate commit,
+tracked on `acceptance/p2-rc13-blank-install-20261118` and pinned at
 `fd56313255c97992dc55c1475d94477597b88602`
 (`0.1.0-rc.13`, after PR #432). Earlier P0/P1 evidence was pinned to a
 *different* source commit; it is not silently rebadged as a P0/P1 run
