@@ -209,6 +209,38 @@ against this exact P2 candidate.
 | P3-G7 negative Age recovery paths — **PASS for wrong key and tamper** | The actual installed P3-G3 backup was proven unchanged and the runtime healthy. A newly generated synthetic Age private key (not the configured recipient) was rejected by `verify_local(..., record=False)` with an Age decryption failure. Using the matching offline test identity from secure hidden paste, a separate temporary ciphertext copy with one trailing byte changed also failed at Age decryption. Original `.vwrec` checksum and persistent config, SOPS and recovery state were unchanged; both application containers and CrowdSec Worker remained healthy with doctor showing no FAIL. Final `P3_G7_EXIT=0 PASS` | Demonstrates authenticated ciphertext failure closed before live mutation. No restore, offsite transport, public DNS change or Worker restart; tmpfs negative-test files were cleaned up. This does not substitute for an actual successful restore or cloud roundtrip |
 | P3-G8 actual restore engine into private scratch — **PASS for isolated promotion and new operational custody** | On pinned `0.1.0-rc.13` ARM64 host, the exact P3-G3 archive SHA-256 and dedicated storage were checked before `recovery.restore_recovery(artifact, identity, paths=isolated_paths, runner=isolated_runner, start=False)`. Matching offline test identity was supplied by hidden prompt; real Age/SOPS cryptography, staged application/Caddy state, and promoted to isolated `/run/vaultwarden-oci/p3g8-*` paths. The engine generated a distinct operational Age identity and rotated/validated SOPS recipients; restored SQLite `PRAGMA integrity_check` returned `ok` and Caddy data/config were present. Docker version/inspect were intercepted only in this sandbox, with no Docker stop/remove call. Private scratch was cleaned; original archive and live config, SOPS, operational Age key and recovery record remained unchanged, containers healthy and CrowdSec Worker invocation preserved; `P3_G8_EXIT=0 PASS` | Proves real recovery-engine implementation on the real archive **with redirected temporary paths**, not complete live host restore or production boot. Docker lifecycle was intentionally simulated for sandbox isolation; actual stopped-container promotion/start, offsite retrieval and public origin cutover are NOT RUN |
 
+
+**P3 phase closeout / production software acceptance boundary:** Against the
+*installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
+P3-G1 through P3-G8 have operator-reported PASS evidence for supported
+first start and health, verified local TLS, Caddy outer and Vaultwarden
+inner Admin authentication, accepted Admin SMTP HTTP response, safe
+untrusted-IP handling, the exact 60/1m Admin threshold, consistent local
+encrypted backup, independent offline-key decryption and corruption
+rejection, fail-closed restore consent, and **real recovery promotion/
+operational SOPS rekey into isolated temporary paths**. Latest checks
+report doctor WARN with no FAIL, healthy/unpaused app containers,
+`recovery.local=PASS`, and unchanged invocation-bound CrowdSec Worker.
+This does **not** constitute a released production GO.
+
+Nine additional permanent, fixture-only regression tests in
+`tests/test_runtime_prestart_paths.py` were introduced by PR #434 and
+merged into the integration branch as commit
+`03c4cd6a375dc944acc36e2b11ee0aed064fa204` after these host
+runs. They record the CrowdSec log-only prestart cause and preserve
+fail-closed behavior without a product implementation change. **Do not
+silently attribute live-host results to this later merge commit**.
+
+The remaining independently evidenced requirements are a deliberately
+authorized **full** restore on disposable host data with real container
+stop/start, controlled offsite ciphertext roundtrip and decryption,
+service/timer/reboot persistence with Worker re-arm, a genuine browser
+Admin/client and mailbox delivery test, and external non-Cloudflare
+origin denial. Existing production-facing DNS remains unchanged;
+remote offsite publishing and automation were intentionally disabled.
+No new historical provider/VM inventory files were added.
+
+
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
 P2 shell command placed an error handler immediately after a Python
 heredoc redirection, causing an `IndentationError` in the supposed
