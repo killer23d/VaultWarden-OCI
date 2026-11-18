@@ -481,6 +481,38 @@ Vaultwarden implementation defect.
 
 
 
+### rc.13 P4-D controlled application restart — November 18, 2026 UTC
+
+**PASS — real supported `vwctl restart` on disposable VM8, bounded to
+application lifecycle, not a boot-persistence or scheduled-timer PASS.**
+The operator executed the reviewed/pinned
+[P4-D pre/post one-host tool](https://github.com/killer23d/VaultWarden-OCI/blob/b35b8557981903d02fec318dff37938e31580a45/tests/host-acceptance/rc13-p4d-controlled-restart.py),
+SHA-256 `fe87672cf6ac6ee1bc01cd392a1155bf4dc8e756a1b9c3befc62b803f7445ab0`,
+after verifying that its separate source preflight matched the prior
+P4-A tool's immutable SHA-256. The operator reported
+`P4_D_PREFLIGHT_EXIT=0`, `vwctl restart` exit 0, and
+`P4_D_EXIT=0 CONTROLLED_RESTART_PASS`,
+`P4_D_WRAPPER_EXIT=0`. Output and root-private evidence are scoped to
+`ubuntu@vaultwarden-oci-8`, Ubuntu 26.04 ARM64, Python 3.14.
+
+| P4-D observation | Scope and status |
+| --- | --- |
+| Immutable selection and storage — **PASS** | All **52** installed release blobs continued to match the original actual host-tested Git commit `fd56313255c97992dc55c1475d94477597b88602` (`0.1.0-rc.13`) before and after restart; protected dedicated ext4 UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, no root fallback. |
+| Preflight/restored state — **PASS** | Independent read-only SQLite memory snapshot `integrity_check=ok`; 1 synthetic user and 1 original cipher, original cipher-record digest `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`, both before and after. No new recovery/restore action. |
+| Actual supported restart — **PASS** | The installed `sudo -n vwctl restart` exited successfully; independent postflight compared pre/post full Docker container IDs and proved **both Vaultwarden and Caddy were recreated**, running, healthy and unpaused. |
+| Security/runtime/HTTPS — **PASS** | The doctor remained `PASS` with no failed required checks; known CrowdSec Worker invocation `a80be9e43af84a24b505b9e4b127abeb` unchanged and boot-disabled; TLS-verified private Caddy returned Web/API/unauthenticated Admin `200/200/401`. The test did not independently re-run authenticated browser SMTP. |
+| Saved operational policy — **unchanged** | Background target/timers remained inactive/disabled (`automation.overall=FAIL` expected with CLI status exit 1); backup policy local-only, both retention fields zero. No backup publication, remote mutation, Cloudflare DNS change, Ubuntu host package change or VM reboot. |
+| Future lifecycle — **NOT RUN** | Genuine boot-owned target/timer activation after reboot, Worker restart plus fresh Route Fail Open confirmation, external direct-origin denial, and live supported-predecessor upgrade remain separate gates. The previously accepted real client/Admin/SMTP browser evidence from P4-A stays accepted and is not superseded by this stage's unauthenticated-only HTTP check. |
+
+An intentional early stop after an unsuccessful restart would have been a
+**HOLD** with no automatic retry; that error path was not exercised.
+Raw restart logs and the private pre/post container-ID evidence remain
+off-repository in an owner-private acceptance folder; no values or
+private keys are included here. The temporary one-host tool will be
+removed from the active tree before final PR. **RELEASE_GO=HOLD**.
+
+
+
 
 ## Acceptance record
 
