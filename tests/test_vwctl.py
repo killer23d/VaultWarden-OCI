@@ -213,6 +213,7 @@ class VwctlUnitTests(unittest.TestCase):
             with (
                 mock.patch.object(update_cli, "__file__", str(package / "update_cli.py")),
                 mock.patch.object(cli, "main", return_value=0),
+                mock.patch.object(update_versions.platform, "machine", return_value="x86_64"),
                 redirect_stdout(output),
             ):
                 code = update_cli._versions_command(["versions"])
