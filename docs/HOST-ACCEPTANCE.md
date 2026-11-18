@@ -214,6 +214,8 @@ against this exact P2 candidate.
 
 | P3-G11A root rclone inventory — **PASS for configured root remote; cloud access HOLD** | First read-only run on disposable `vaultwarden-oci-8` confirmed local-only backup policy, retention zero, installed `rclone v1.60.1-DEV`, and no root remotes, ending `P3_G11A_EXIT=0 ROOT_REMOTE_SETUP_REQUIRED`. A later operator rerun with the same guard confirmed the same disabled backup/retention policy and now listed the root remote `bw-backup:`, ending `P3_G11A_EXIT=0 INVENTORY_PASS_ONLY`. Operator specified the offsite parent `bw-backup:bw-backup`. | **Remote connectivity, directory existence, encrypted object inventory, ciphertext readback, offline Age decryption from remote, and populated-vault restore remain NOT RUN**. The remote name alone does not establish its backend/encryption or recoverability. Next P3-G11B checks the parent read-only before any test-only upload or remote restore authorization; do not overwrite or alter historical objects. The installed release, automatic offsite publication, retention and public DNS are unchanged. |
 
+| P3-G11B existing Box backup parent metadata — **PASS read-only; cryptographic recovery HOLD** | On disposable `vaultwarden-oci-8`, exact pinned read-only G11B script `d8d9bc24ffa23a219430d63529401f0d0f216e89` confirmed LOCAL-ONLY backup policy/zero retention, root `bw-backup:` remote, and accessible directory `bw-backup:bw-backup`. One-level listing returned 3 directories and 4 files; a bounded four-level recursive metadata scan found **9 `.vwrec` files**, including historical October 2026 objects (example `recovery-20261031T032317Z-7d36795f.vwrec`, 358680 bytes). Final output `P3_G11B_EXIT=0 REMOTE_METADATA_PASS_ONLY; REMOTE_RESTORE=HOLD`. | **Only metadata/reachability proof.** No archive bytes downloaded, Age/SOPS key tested, upload/overwrite/deletion, remote restore or historical-object mutation; prior October archives were not created by this disposable host and must not be mistaken for the current host's recovery points. Next requires a separate nonempty disposable vault state and fresh, uniquely isolated upload plus read-back and independent Age verification before any remotely sourced destructive restore. |
+
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
@@ -286,9 +288,12 @@ test user and test item, create an encrypted recovery point, verify it,
 perform a narrowly scoped offsite ciphertext upload/readback, and require
 separate approval before an actual remote restore. Confirm the known
 user/item afterward. Never use historical Box objects as mutable test
-targets. P3-G11A confirms rclone is installed but root has no remote configured;
-configure a separate root-owned test remote and perform guarded read-only
-remote discovery before any upload, deletion or remote restore. Keep backup.remote empty and both retention periods zero until
+targets. P3-G11A now confirms root remote configuration and P3-G11B confirms
+read-only reachability to `bw-backup:bw-backup` plus nine historical
+encrypted-object candidates. Do not interpret these as proof of the
+current test-host's backup decryptability or attempt to restore them.
+Use a new unique test-only remote directory and a populated disposable
+vault before any authorized upload or remote restore. Keep backup.remote empty and both retention periods zero until
 separately approved; leave the existing Cloudflare A record unchanged.
 The CrowdSec Worker Fail Open confirmation remains invocation-bound:
 avoid reboot/invocation change without re-confirmation. Browser Admin,
