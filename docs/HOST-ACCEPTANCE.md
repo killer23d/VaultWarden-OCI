@@ -204,6 +204,7 @@ against this exact P2 candidate.
 | P3-G2C inner Admin and application SMTP route — **PASS for in-container HTTPS, mailbox receipt unverified** | Using the installed release and existing SOPS custody, POST `/admin/` with the original recoverable Vaultwarden Admin token returned HTTP 200 over verified TLS; the `VW_ADMIN` session cookie satisfied Secure/HttpOnly/SameSite Strict checks. Authenticated `/admin/users` returned HTTP 200 and a JSON list; `/admin/` and `/admin/users/overview` both returned HTTP 200; one POST `/admin/test/smtp` returned HTTP 200 over verified TLS. Subsequent doctor remained WARN/no FAIL and CrowdSec Worker kept its original invocation | Proves accepted inner application routes with a genuine session, but **HTTP 200 is not independent mailbox-delivery proof**; recipient receipt not confirmed. Browser/UI rendering and the native browser SMTP workflow NOT RUN; actual 429 threshold and independent Cloudflare/public origin traffic NOT RUN. One test message was submitted, do not repeat automatically |
 | P3-G3 first local encrypted recovery — **PASS, offline decryption still NOT RUN** | On the disposable ARM64 host, installed `vwctl backup` returned 0; LOCAL-ONLY and both retention paths disabled. Created `/var/lib/vaultwarden-oci/backups/recovery-20261118T202543Z-e3ef03c7.vwrec` (348,440 bytes), SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`, Age v1 envelope, owned root mode 0600; hash and size independently matched recovery state. `recovery.local=PASS`, overall doctor WARN with zero FAIL, both application containers resumed healthy/unpaused and CrowdSec Worker invocation preserved | Local encryption/envelope/hash and supported backup health are verified, **not** the ability of the separately held offline Age private identity to decrypt and verify SOPS/manifest; no offsite upload, restore, prune, or automated timer. No claim that this test key demonstrates secure production custody |
 | P3-G4 independent offline-key verification — **PASS on exact P3-G3 artifact** | Using the supported interactive `vwctl recovery verify --file` with the matching test offline Age private identity provided by hidden paste, the application returned `PASS verified recovery` for the exact file created at `2026-11-18T20:25:43Z`, size 348,440 bytes and SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`. Cryptographic Age decryption, manifest/member checksums and offline SOPS custody completed. Wrapper confirmed a **new** artifact-bound `verified_objects` record; doctor remained WARN with zero FAIL and Worker/containers remained healthy and unchanged | Validated decryptability with this **disposable test identity**, not secure production custody; earlier operator test transcript exposed this private identity. No restore, offsite publication, external-cloud readback, browser SMTP/mailbox receipt or public ingress verification was performed |
+| P3-G5 and G5R restore refusal/preflight/cancellation — **PASS after external-wrapper TTY correction** | First wrapper stopped safely before tests due to incorrect `stdin` TTY assumption in a heredoc. Corrected `P3-G5R` preflight verified original rc.13 source, dedicated storage, unchanged 348,440-byte P3-G3 artifact SHA-256, healthy runtime and Worker invocation. Non-TTY `restore --file` without `--identity` refused; non-TTY restore with dummy identity but no `--confirm RESTORE` refused. Matching Age test identity provided by hidden interactive input passed exact `verify_local(..., record=False)` cryptographic preflight; real `_restore_approved` helper with forced `CANCEL` refused authorization. Recovery metadata, config, encrypted SOPS bytes remained unchanged; Caddy/Vaultwarden healthy and Worker preserved. Final `P3_G5R_EXIT=0 PASS` | This is a real preflight of the backup plus exercised consent logic in-process, **not** a destructive restore or the CLI's complete interactive restore transaction. No service stop/promotion, offsite transfer, DNS mutation, or reboot. Same test-only offline identity custody limitation applies |
 
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
 P2 shell command placed an error handler immediately after a Python
@@ -231,16 +232,18 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next software gate:** P3-G5 bounded non-destructive restore
-authorization checks for the exact P3-G4-verified local `.vwrec`: confirm
-non-TTY missing identity and missing `--confirm RESTORE` failures, verify
-a valid decrypted preflight reaches the final operator consent, then
-deliberately **CANCEL** without touching live state. Do **not** grant
-`RESTORE`, start/restart services, publish to offsite, or change
-Cloudflare DNS in this gate. A complete destructive restore on a
-separately approved disposable data state remains NOT RUN. Mailbox
-receipt, actual browser UI/SMTP, 429 threshold, real-client origin
-denial and timer/reboot acceptance remain distinct uncompleted gates.
+**Next software gate:** P3-G6 verify Caddy's live Admin request
+rate limiting with a bounded, deliberate burst from the appliance's
+internal loopback client after confirming the configured 60/minute (or
+explicitly configured) budget, against the installed Caddy. The test
+must not alter Admin credentials, Worker routes, Cloudflare DNS,
+containers, or persist a test configuration. A rate-limit threshold
+test may briefly produce HTTP 429 **only for that internal client IP**;
+stop and record unexpected responses. Browser UI/SMTP/mailbox receipt
+and independently sourced Cloudflare-only origin-denial evidence
+remain separate pending gates. Full destructive restore, offsite
+recovery, timer enablement/reboot and production GO require distinct
+approvals and are not implied by the P3-G5R cancellation PASS.
 
 ## Acceptance record
 
