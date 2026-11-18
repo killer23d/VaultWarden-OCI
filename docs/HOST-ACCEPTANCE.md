@@ -218,6 +218,8 @@ against this exact P2 candidate.
 
 | P3-G11C populated-fixture readiness — **PASS, READ-ONLY; upload HOLD** | On the disposable Ubuntu 26.04 ARM64 host, the SHA-256-pinned `tests/host-acceptance/rc13-p3g11c-populated-vault-readonly.sh` at `8c9715b92f0e47530e9b51263473e3b8ac800cce` passed installed release, dedicated disk, and local-only retention-zero policy checks. An online read-only SQLite snapshot reported `users=1`, `ciphers=1`, and integrity `ok`. The secret-free record fingerprint was `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`. Final result `P3_G11C_EXIT=0 POPULATED_FIXTURE_READY; REMOTE_UPLOAD=HOLD`. | Shows a nonempty synthetic fixture **before** cloud backup; no uploaded .vwrec, independent remote Age/SOPS decryption, or restored record equivalence yet. This fingerprint must match the subsequent pre-backup fixture and restored records for an item-level data-recovery claim. Existing historical Box objects, saved offsite policy, timers, remote retention, public DNS, and Worker invocation were not changed by G11C. |
 
+| P3-G11D authorized populated-vault offsite snapshot — **PASS upload/readback + independent Age/SOPS; remote restore HOLD** | Following fresh read-only fixture, disk, Worker, lock, and Box parent guards, operator explicitly entered `AUTHORIZE P3-G11D UPLOAD`. The supported one-time `vwctl backup --remote` command created local `/var/lib/vaultwarden-oci/backups/recovery-20261118T215628Z-a478ee3e.vwrec` (348,440 bytes, SHA-256 `48c46b90e4a2b0004d920b286df2c2649c6a80bcf34bd6be038ffe3eefb7e749`) and published to `bw-backup:bw-backup/acceptance-rc13-vm8-20261118T215615Z-208eae43675f/recovery-20261118T215628Z-a478ee3e.vwrec`. Product re-downloaded the object and checksum-verified the ciphertext. Operator independently selected the test offline Age key via hidden-input chooser; `vwctl recovery verify --from-remote` confirmed the exact remote object's manifest and SOPS. Post-run populated-record fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`, containers, doctor, CrowdSec Worker invocation and local-only/retention-zero policy remained unchanged. Final `P3_G11D_EXIT=0 UPLOAD_READBACK_AGE_PASS; REMOTE_RESTORE=HOLD`. | Upload consent **was not restore consent**. No remotely sourced live restore or independent post-remote-restore record comparison has occurred. Historical Box objects were not altered; the isolated folder holds the newly created test recovery point. Preserve that exact remote object and its offline identity; create a deliberate second *post-backup* synthetic cipher, then restore the prior point with fresh independent authorization and prove the second record disappears while the original baseline returns. No DNS, timers, retention or release GO change. |
+
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
@@ -281,27 +283,28 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next acceptance boundary:** Read-only P3-G11C confirms one synthetic
-Vaultwarden user and one saved item with secret-free cipher fingerprint
-`10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`.
-P3-G11B confirmed the parent `bw-backup:bw-backup` and nine existing
-historical .vwrec candidates, which must remain untouched. The separate
-guarded P3-G11D script at
-`tests/host-acceptance/rc13-p3g11d-offsite-test-backup.sh`
-is staged on the acceptance branch, **not yet executed**. Only after fresh
-fixture/dedicated-disk/Worker/remote preflight and explicit operator
-`AUTHORIZE P3-G11D UPLOAD` may it create a uniquely named test-only
-Box subfolder and invoke one supported `vwctl backup --remote` override.
-The product checks readback; a separate interactive remote Age/SOPS
-verification must complete with the correct disposable offline identity.
-Actual remotely sourced destructive restore is **not authorized**; later
-compare restored user, item, and cipher fingerprint. Keep saved
-backup.remote empty, retention both zero, historical Box objects, public
-Cloudflare DNS and production-facing routes unchanged. The Worker Fail
-Open confirmation remains invocation-bound: do not reboot or restart it
-without re-confirmation. Browser Admin/mailbox receipt, real external
-origin denial, service/timer persistence and stable production GO remain
+**Next acceptance boundary:** P3-G11D has passed the explicitly
+authorized *one-time* upload, product download/SHA-256 readback and
+separate offline Age/SOPS verification of the populated one-user/one-item
+recovery point. Preserve the exact isolated Box object and the original
+cipher fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`.
+Create one additional *synthetic* saved item on the disposable VM AFTER
+that snapshot to establish a visible post-backup delta; do not modify the
+original item. The next independently authorized destructive gate must
+verify the exact remote ciphertext and the pre-restore delta, then run
+the supported interactive `vwctl restore --from-remote ... --start`
+with separate operator consent and an explicit final `RESTORE`.
+Post-restore verify SQLite integrity, the original one-user/one-cipher
+fingerprint, absence of the second cipher, operational SOPS, healthy
+Caddy/Vaultwarden, local verified TLS/Admin and unchanged CrowdSec Worker.
+Do not automatically retry a failed restore. Existing historical Box
+objects, saved local-only backup policy and retention zero, public
+Cloudflare A record, timers and origin rules remain unchanged; Worker
+Fail Open confirmation is invocation-bound, so no restart/reboot before
+separate re-arm proof. Browser Admin/mailbox receipt, real external
+origin denial, service/timer persistence and production release GO remain
 HOLD.
+
 
 ## Acceptance record
 
