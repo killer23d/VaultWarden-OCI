@@ -196,7 +196,10 @@ against this exact P2 candidate.
 | P3 Cloudflare DNS dry run — **PASS, publication HOLD** | Existing Proxied A record and token/API access verified in read-only `vwctl dns update --dry-run` | Existing A-record origin did **not** match this disposable host. **No DNS write/cutover** was performed |
 | P3 local origin/CrowdSec — **PASS** | `vwctl edge refresh` and `vwctl crowdsec setup` completed; `edge.cloudflare.cidrs`, `edge.cloudflare.iptables`, `crowdsec.engine`, `crowdsec.hub` and `crowdsec.firewall` all reported `PASS` | Doctor checks verify configured local policy, not an independently witnessed non-Cloudflare packet denial via Docker NAT/FORWARD |
 | P3 Worker Route and Fail Open — **PASS for invocation-bound security** | Pre-start Cloudflare API inventory found zero matching routes/custom domains; `vwctl crowdsec remediation-start` succeeded with boot-disabled Worker; operator set newly created routes to Fail Open; `confirm-fail-open` succeeded; 0600 confirmation bound to the unchanged systemd invocation; all **six** origin/CrowdSec doctor checks reported `PASS` | Worker Routes now exist and can affect the pre-existing DNS origin. Fail Open is operator-attested; no synthetic request or current independent Cloudflare read-back of the route failure mode is claimed |
-| P3-F overall doctor — **HOLD for live readiness** | Final `doctor --json` reported all six security gates `PASS`, but `overall=FAIL` with sole remaining failure `runtime.paths`; the appliance target remained stopped, with no TCP80/443 listeners | The exact `runtime.paths` reason was not examined. Do **not** assume this FAIL is harmless solely because the app was stopped; inspect and resolve or validate its lifecycle transition before claiming doctor PASS |
+| P3-F initial overall doctor — **FAIL before first start, subsequently diagnosed** | Final prestart `doctor --json` reported all six security gates `PASS`, but `overall=FAIL` with `runtime.paths`; the appliance remained stopped | P3-G0 proved this was a genuinely partial state created by CrowdSec's required log acquisition; the prestart FAIL is preserved, not relabelled as PASS |
+| P3-G0/G0R diagnosis — **PASS for investigation, runtime still HOLD before start** | Eight focused source regression tests passed on the host. Root-owned base/run/transient/lock 0700/0600 passed, CrowdSec-created `vaultwarden/log/vaultwarden.log` was the sole application subtree precreated (65532:65532); Caddy/data/volatile directories and rendered files absent. Worker active and boot-disabled, invocation `a80be9e43af84a24b505b9e4b127abeb` unchanged; source inspection confirmed CrowdSec setup creates that log and supported lifecycle owns the remaining materialization | Exact `runtime.paths=FAIL` reason: `runtime paths are only partially materialized`. First diagnostic wrapper misclassified `systemctl is-enabled` nonzero/disabled as unavailable; corrected `systemctl show UnitFileState=disabled` resolved that wrapper error. No hot-patch or early doctor PASS |
+| P3-G1 supported start — **PASS** | Installed `0.1.0-rc.13` `vwctl start` exit 0 with same dedicated ext4/UUID ownership. Vaultwarden and custom Caddy running/healthy on exact ARM64 image pins; required Caddy modules and derived Argon2id Admin PHC/Basic Auth hashes verified; `runtime.paths=PASS`, six origin/CrowdSec checks PASS, Worker invocation unchanged; `status.runtime=running`; doctor `overall=WARN`, **zero FAIL** | Warnings `recovery.local`, `recovery.offsite`, `recovery.rclone` remain; automation target/timers deliberately not activated and status reports automation FAIL. No DNS update, public cutover, backup, reboot, or external traffic test |
+| P3-G2A local TLS/application — **PASS for local-only checks** | Using real Caddy loopback with hostname/SNI and verified certificate, Web Vault `GET /` returned HTTP 200, API config HTTP 200, unauthenticated `/admin` HTTP 401; Caddy trusted-proxy/Admin outer Basic Auth and per-client rate-limit configuration recognized; doctor WARN with recovery-only warnings | No authenticated browser Admin login/SMTP test, true Cloudflare client-IP confirmation, actual threshold/429, independently measured direct-origin denial, or public HTTPS cutover; DNS still points to another origin |
 
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
 P2 shell command placed an error handler immediately after a Python
@@ -213,20 +216,21 @@ introduced by this record.
 
 **Not run / release HOLD:** fresh-install variants requiring separately
 disposable blank state (interactive generated-custody, headless custody
-rejection, failed bootstrap, root-only rejection), live `vwctl start`,
-full post-start doctor/status, Caddy/Vaultwarden TLS and Admin browser
-navigation/rate limiting, DNS cutover, independent Cloudflare-only
-external packet denial, full systemd/reboot persistence, backed-up
-offsite test-only ciphertext/readback and guided restore, and a
-supported-predecessor upgrade/rollback. The historical
+rejection, failed bootstrap, root-only rejection), authenticated browser
+Admin session/navigation and Admin-originated SMTP, independent mailbox
+receipt, actual real-client Cloudflare identity/rate-limit behavior and
+public origin packet denial, DNS cutover, full systemd/timer/reboot
+persistence, encrypted test-only local/offsite backup readback and guided
+restore, and supported-predecessor upgrade/rollback. The historical
 recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next P3-G boundary:** Diagnose the `runtime.paths` FAIL without
-inventing a PASS; then exercise controlled app start, Caddy/Vaultwarden
-health, and independent origin denial. Keep DNS mutation, destructive
-restore and production release approval separately gated.
+**Next software gate:** P3-G2B authenticated Admin outer gate and benign
+untrusted-header tests against localhost. Treat full Admin UI/SMTP
+and real-client/public origin behavior as separate pending evidence;
+do not mutate the existing A record to obtain a PASS. Then move to
+test-only recovery and deliberate lifecycle/reboot acceptance.
 
 ## Acceptance record
 
