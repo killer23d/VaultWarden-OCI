@@ -347,23 +347,9 @@ if other_warns:
 passed('doctor zero FAIL; required runtime/origin/CrowdSec/recovery.local PASS; storage independently verified')
 print('INFO: offsite/rclone WARN/SKIP remain open as separate P3-G11 acceptance evidence')
 
-# Operator claims are required but are ATTESTATIONS, not independently observed PASS.
-print('INFO: answers below do NOT authorize P3-G9B or any restore')
-questions = (
-    ('DISPOSABLE', 'This exact VM has no irreplaceable data and may have downtime only if G9B is separately authorized'),
-    ('CUSTODY', 'Matching test Age private identity is held separately off-host and available for G9B'),
-    ('ROLLBACK', 'Independent off-host recovery/rollback option exists if local restore or disk fails'),
-    ('TEST_DATA', 'A specific known test vault state dating from before 2026-11-18 20:25:43 UTC is documented for G9C'),
-)
-try:
-    with open('/dev/tty', 'r+', encoding='utf-8', buffering=1) as tty:
-        for tag, question in questions:
-            tty.write(f'ATTEST {tag}: {question}\nType YES, or anything else to HOLD: ')
-            answer = tty.readline().strip()
-            if answer != 'YES': hold('missing operator attestation: ' + tag)
-            passed('ATTESTED (not independently verified): ' + tag)
-except OSError:
-    hold('interactive /dev/tty unavailable for operator readiness attestation')
+# Human attestations happen in the unprivileged calling Bash, not sudo/Python.
+# Python's stdin is the script heredoc and sudo may have a separate/no TTY.
+print('INFO: no restore authorization; operator attestations follow outside sudo')
 
 print('IMPACT: restore replaces /etc/vaultwarden-oci/config.toml and secrets.sops.yaml;')
 print('        /var/lib/vaultwarden-oci/data, caddy/data and caddy/config;')
@@ -374,6 +360,29 @@ print('UNCHANGED: original encrypted .vwrec under backups, recovery.json record,
 print('        existing public DNS/A record, Cloudflare routes and CrowdSec Worker invocation.')
 print('FOLLOW-UP: G9B requires separate consent, fresh preflight and interactive uppercase RESTORE;')
 print('           G9C must prove SQLite/test state, operational SOPS, Caddy, app TLS/Admin and doctor.')
-print('P3_G9A_EXIT=0 READINESS_PASS_ONLY; P3_G9B=HOLD_UNTIL_SEPARATELY_AUTHORIZED')
 PY
+
+# The calling operator's Bash opens the terminal only AFTER all privileged
+# read-only validations pass. The heredoc is not a substitute for a TTY.
+if ! exec 3<>/dev/tty; then
+  hold 'operator terminal unavailable; run from an interactive SSH/console TTY'
+fi
+
+attest() {
+  local tag="$1" question="$2" answer
+  printf 'ATTEST %s: %s\nType YES, or anything else to HOLD: ' "$tag" "$question" >&3
+  if ! IFS= read -r answer <&3; then
+    hold "terminal input unavailable for $tag"
+  fi
+  [ "$answer" = 'YES' ] || hold "missing operator attestation: $tag"
+  printf 'PASS: ATTESTED (not independently verified): %s\n' "$tag"
+}
+
+printf '%s\n' 'INFO: answers below do NOT authorize P3-G9B or any restore'
+attest 'DISPOSABLE' 'This exact VM has no irreplaceable data and may have downtime only if G9B is separately authorized'
+attest 'CUSTODY' 'Matching test Age private identity is held separately off-host and available for G9B'
+attest 'ROLLBACK' 'Independent off-host recovery/rollback option exists if local restore or disk fails'
+attest 'TEST_DATA' 'A specific known test vault state dating from before 2026-11-18 20:25:43 UTC is documented for G9C'
+exec 3>&-
+printf '%s\n' 'P3_G9A_EXIT=0 READINESS_PASS_ONLY; P3_G9B=HOLD_UNTIL_SEPARATELY_AUTHORIZED'
 P3G9A
