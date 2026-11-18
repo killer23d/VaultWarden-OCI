@@ -113,7 +113,7 @@ against the actual block-volume identity. Private JSON stays
 mode 0600 under the invoking operator's `vwoci-acceptance`; share
 only sanitized summary/output and the exit label.
 
-**Next software checks after a clean P0, with separate explicit approval:**
+**P0 handoff plan recorded before P2 (subsequently performed in part):**
 use the existing [Install](INSTALL.md) workflow with a distinct
 test-only hostname, a new offline Age identity, approved blank data disk
 and test-only credentials. First the supported `setup.sh install
@@ -135,7 +135,7 @@ P1 dry run of the **supported installer** reported `P1_EXIT=0`
 and confirmed its no-format/no-install boundary. The operator supplied
 a new *public* offline Age recipient, but the offline private-key custody
 and the disk's actual provider attachment are **not yet approved**.
-rc.13 has not been installed, started or tested with real external traffic.
+At the P1 checkpoint, rc.13 had not yet been installed, started or tested with real external traffic. The later P2/P3 results below are separate evidence against a newer pinned release candidate.
 
 During the P1 wrapper, the unprivileged checkout reported
 `fatal: .git/index: index file open failed: Permission denied`.
@@ -168,9 +168,65 @@ fi
 ```
 
 **Boundary:** P1's successful dry run only proves installer input/host
-acceptance with no changes. It does **not** approve formatting the
+acceptance with no changes. Standing alone, it did **not** approve formatting the
 50 GiB candidate, validate independent offline-key custody, prove
 Cloudflare/SMTP/backup integration, or grant a future production GO.
+P2 was later separately approved and performed on this disposable host;
+that approval does not retroactively expand P1.
+
+### Current rc.13 P2/P3 software acceptance evidence — November 18, 2026 UTC
+
+**Interim source-release record, not a production GO.** This is the next
+operator-reported evidence checkpoint after the immutable P0/P1 and
+historical-infrastructure records above. The disposable new host is
+`vaultwarden-oci-8`, Ubuntu 26.04 ARM64 with native Python 3.14.
+The executed P2/P3 source was `v2` and
+`acceptance/p2-rc13-blank-install-20261118`, both pinned at
+`fd56313255c97992dc55c1475d94477597b88602`
+(`0.1.0-rc.13`, after PR #432). Earlier P0/P1 evidence was pinned to a
+*different* source commit; it is not silently rebadged as a P0/P1 run
+against this exact P2 candidate.
+
+| Gate / status | Observed operator evidence | Limit or pending proof |
+| --- | --- | --- |
+| P2 first install — **PASS, with wrapper exception** | Supported `sudo ./setup.sh install --auto --confirm-format --data-device /dev/oracleoci/oraclevdb --offline-recipient <test public recipient>` succeeded; release, copied source bytes, config, root-only state, storage and SOPS recipients/decryption passed after installation | One external shell-wrapper preformat Python gate had an invalid heredoc/guard and did **not** run; do not claim that particular preformat check passed |
+| P2 independent post-install storage reconciliation — **PASS** | Disposable 50 GiB `/dev/oracleoci/oraclevdb` resolves to `/dev/sda`; real block disk, stable by-id alias, disjoint boot/root lineage, ext4, mounted at `/var/lib/vaultwarden-oci` on a different filesystem from `/`; UUID, fstab, identity/marker and Docker mount dependency match; immutable rc.13 release and 0600 root-only files passed | Proves the installed boundary and a separate data disk, not retroactive execution of the skipped preformat wrapper gate |
+| P2 explicit off-host recipient — **PASS for test-only configuration** | Preserved supplied Age *public* recipient alongside the separate on-host operational recipient; SOPS decrypts with operational identity | The disposable offline **private** identity appeared in an operator terminal transcript; it is **not** secure production custody evidence. Never commit or publish the identity, secret values or private logs |
+| P3 config and SMTP — **PASS for local configuration and server acceptance** | Supported `vwctl config edit` and `secrets edit` committed; `config validate` and `secrets validate` passed; initial `smtp.invalid` placeholder was corrected; IPv4 DNS resolved; direct authenticated TLS SMTP reported `category=accepted` | SMTP *mailbox receipt* and browser Admin SMTP test were not independently verified; no public application start |
+| P3 Cloudflare DNS dry run — **PASS, publication HOLD** | Existing Proxied A record and token/API access verified in read-only `vwctl dns update --dry-run` | Existing A-record origin did **not** match this disposable host. **No DNS write/cutover** was performed |
+| P3 local origin/CrowdSec — **PASS** | `vwctl edge refresh` and `vwctl crowdsec setup` completed; `edge.cloudflare.cidrs`, `edge.cloudflare.iptables`, `crowdsec.engine`, `crowdsec.hub` and `crowdsec.firewall` all reported `PASS` | Doctor checks verify configured local policy, not an independently witnessed non-Cloudflare packet denial via Docker NAT/FORWARD |
+| P3 Worker Route and Fail Open — **PASS for invocation-bound security** | Pre-start Cloudflare API inventory found zero matching routes/custom domains; `vwctl crowdsec remediation-start` succeeded with boot-disabled Worker; operator set newly created routes to Fail Open; `confirm-fail-open` succeeded; 0600 confirmation bound to the unchanged systemd invocation; all **six** origin/CrowdSec doctor checks reported `PASS` | Worker Routes now exist and can affect the pre-existing DNS origin. Fail Open is operator-attested; no synthetic request or current independent Cloudflare read-back of the route failure mode is claimed |
+| P3-F overall doctor — **HOLD for live readiness** | Final `doctor --json` reported all six security gates `PASS`, but `overall=FAIL` with sole remaining failure `runtime.paths`; the appliance target remained stopped, with no TCP80/443 listeners | The exact `runtime.paths` reason was not examined. Do **not** assume this FAIL is harmless solely because the app was stopped; inspect and resolve or validate its lifecycle transition before claiming doctor PASS |
+
+**Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
+P2 shell command placed an error handler immediately after a Python
+heredoc redirection, causing an `IndentationError` in the supposed
+preformat gate while the shell continued to the real installer. The
+installer itself reported success, and the independent read-only
+post-install disk/boot-identity reconciliation passed. This was a
+**test-wrapper defect**, not evidence of a product installer defect.
+Future acceptance wrappers must use a correctly closed heredoc with
+explicit checked status and an immediate stop before any destructive
+command; verify a script's actual gate outcome, not only its final exit
+code. No additional permanent VM/provider test infrastructure is
+introduced by this record.
+
+**Not run / release HOLD:** fresh-install variants requiring separately
+disposable blank state (interactive generated-custody, headless custody
+rejection, failed bootstrap, root-only rejection), live `vwctl start`,
+full post-start doctor/status, Caddy/Vaultwarden TLS and Admin browser
+navigation/rate limiting, DNS cutover, independent Cloudflare-only
+external packet denial, full systemd/reboot persistence, backed-up
+offsite test-only ciphertext/readback and guided restore, and a
+supported-predecessor upgrade/rollback. The historical
+recovered-data reference host and its Box objects are **not** used for
+this rehearsal. Stable production software release approval is
+**NOT RUN**.
+
+**Next P3-G boundary:** Diagnose the `runtime.paths` FAIL without
+inventing a PASS; then exercise controlled app start, Caddy/Vaultwarden
+health, and independent origin denial. Keep DNS mutation, destructive
+restore and production release approval separately gated.
 
 ## Acceptance record
 
