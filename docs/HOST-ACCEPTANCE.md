@@ -208,17 +208,19 @@ against this exact P2 candidate.
 | P3-G6 real Admin rate-limit threshold — **PASS for internal loopback client** | The installed Caddy module had the validated Admin limit `60 events / 1m` keyed on `{client_ip}`. Sixty consecutive authenticated Admin `GET /admin/` requests returned HTTP 200; the bounded burst observed HTTP 429 on the next request. The unrelated unauthenticated `/api/config` endpoint continued to return HTTP 200. Live post-test doctor, both healthy/unpaused application containers and unchanged CrowdSec Worker invocation all passed; `P3_G6_EXIT=0 PASS` | Demonstrates the active Caddy Admin outer rate-limit boundary and separation from a non-Admin endpoint for the internal loopback client, **not** a real Cloudflare client. Brief internal client throttling was expected; no DNS/Worker/config/service changes. Browser-rendered UI/SMTP receipt and external origin validation are NOT RUN |
 | P3-G7 negative Age recovery paths — **PASS for wrong key and tamper** | The actual installed P3-G3 backup was proven unchanged and the runtime healthy. A newly generated synthetic Age private key (not the configured recipient) was rejected by `verify_local(..., record=False)` with an Age decryption failure. Using the matching offline test identity from secure hidden paste, a separate temporary ciphertext copy with one trailing byte changed also failed at Age decryption. Original `.vwrec` checksum and persistent config, SOPS and recovery state were unchanged; both application containers and CrowdSec Worker remained healthy with doctor showing no FAIL. Final `P3_G7_EXIT=0 PASS` | Demonstrates authenticated ciphertext failure closed before live mutation. No restore, offsite transport, public DNS change or Worker restart; tmpfs negative-test files were cleaned up. This does not substitute for an actual successful restore or cloud roundtrip |
 | P3-G8 actual restore engine into private scratch — **PASS for isolated promotion and new operational custody** | On pinned `0.1.0-rc.13` ARM64 host, the exact P3-G3 archive SHA-256 and dedicated storage were checked before `recovery.restore_recovery(artifact, identity, paths=isolated_paths, runner=isolated_runner, start=False)`. Matching offline test identity was supplied by hidden prompt; real Age/SOPS cryptography, staged application/Caddy state, and promoted to isolated `/run/vaultwarden-oci/p3g8-*` paths. The engine generated a distinct operational Age identity and rotated/validated SOPS recipients; restored SQLite `PRAGMA integrity_check` returned `ok` and Caddy data/config were present. Docker version/inspect were intercepted only in this sandbox, with no Docker stop/remove call. Private scratch was cleaned; original archive and live config, SOPS, operational Age key and recovery record remained unchanged, containers healthy and CrowdSec Worker invocation preserved; `P3_G8_EXIT=0 PASS` | Proves real recovery-engine implementation on the real archive **with redirected temporary paths**, not complete live host restore or production boot. Docker lifecycle was intentionally simulated for sandbox isolation; actual stopped-container promotion/start, offsite retrieval and public origin cutover are NOT RUN |
-
+| P3-G9A same-host full-restore readiness — **PASS, READ-ONLY** | On disposable `vaultwarden-oci-8` with pinned installed rc.13 source `fd56313255c97992dc55c1475d94477597b88602`, exact immutable release content (52 files), Ubuntu 26.04 ARM64/Python 3.14, dedicated ext4 disk UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, unchanged encrypted P3-G3 archive (348,440 bytes, SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`), prior independent Age verification record, local-only/retention-zero policy, free space, global lock, inactive timers/jobs, healthy Vaultwarden/Caddy, and unchanged CrowdSec Worker invocation `a80be9e43af84a24b505b9e4b127abeb` all passed. Doctor had zero FAIL and required runtime/origin/CrowdSec/recovery.local checks passed. Four operator attestations were entered as `YES` for disposable host, off-host Age identity, independent rollback, and a pre-backup known test state; final output `P3_G9A_EXIT=0 READINESS_PASS_ONLY`. | Earlier G9A attempts safely HOLD on a script-only notification SKIP classification error and a sudo-heredoc `/dev/tty` placement error; corrected script is pinned at `da08ca24141c8400b149c727ec3faedf64f1c866`. Attestations are operator assertions, **not** independent proof of off-host custody/recoverability. Optional operational notifications remain unconfigured and notification.last_delivery is SKIP; offsite/rclone remains unaccepted. **No real restore, service stop/promotion, offsite upload, public DNS change, or production approval occurred**. P3-G9B is separately authorized only. |
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
-P3-G1 through P3-G8 have operator-reported PASS evidence for supported
+P3-G1 through P3-G9A have operator-reported PASS evidence for supported
 first start and health, verified local TLS, Caddy outer and Vaultwarden
 inner Admin authentication, accepted Admin SMTP HTTP response, safe
 untrusted-IP handling, the exact 60/1m Admin threshold, consistent local
 encrypted backup, independent offline-key decryption and corruption
 rejection, fail-closed restore consent, and **real recovery promotion/
-operational SOPS rekey into isolated temporary paths**. Latest checks
+operational SOPS rekey into isolated temporary paths**, plus independent
+read-only same-host restore readiness with four operator attestations.
+Latest checks
 report doctor WARN with no FAIL, healthy/unpaused app containers,
 `recovery.local=PASS`, and unchanged invocation-bound CrowdSec Worker.
 This does **not** constitute a released production GO.
@@ -267,8 +269,9 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next acceptance boundary:** The isolated software recovery promotion/rekey
-gate P3-G8 has passed. Complete **one separately approved destructive**
+**Next acceptance boundary:** The isolated recovery promotion/rekey gate
+P3-G8 and read-only full-restore readiness gate P3-G9A have passed.
+Complete **one separately approved destructive**
 same-host restore using the disposable dedicated ARM64 data device and
 verify restored service behavior, preserving the verified encrypted
 archive and independently held test Age identity first. The current
