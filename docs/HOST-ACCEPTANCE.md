@@ -206,6 +206,7 @@ against this exact P2 candidate.
 | P3-G4 independent offline-key verification — **PASS on exact P3-G3 artifact** | Using the supported interactive `vwctl recovery verify --file` with the matching test offline Age private identity provided by hidden paste, the application returned `PASS verified recovery` for the exact file created at `2026-11-18T20:25:43Z`, size 348,440 bytes and SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`. Cryptographic Age decryption, manifest/member checksums and offline SOPS custody completed. Wrapper confirmed a **new** artifact-bound `verified_objects` record; doctor remained WARN with zero FAIL and Worker/containers remained healthy and unchanged | Validated decryptability with this **disposable test identity**, not secure production custody; earlier operator test transcript exposed this private identity. No restore, offsite publication, external-cloud readback, browser SMTP/mailbox receipt or public ingress verification was performed |
 | P3-G5 and G5R restore refusal/preflight/cancellation — **PASS after external-wrapper TTY correction** | First wrapper stopped safely before tests due to incorrect `stdin` TTY assumption in a heredoc. Corrected `P3-G5R` preflight verified original rc.13 source, dedicated storage, unchanged 348,440-byte P3-G3 artifact SHA-256, healthy runtime and Worker invocation. Non-TTY `restore --file` without `--identity` refused; non-TTY restore with dummy identity but no `--confirm RESTORE` refused. Matching Age test identity provided by hidden interactive input passed exact `verify_local(..., record=False)` cryptographic preflight; real `_restore_approved` helper with forced `CANCEL` refused authorization. Recovery metadata, config, encrypted SOPS bytes remained unchanged; Caddy/Vaultwarden healthy and Worker preserved. Final `P3_G5R_EXIT=0 PASS` | This is a real preflight of the backup plus exercised consent logic in-process, **not** a destructive restore or the CLI's complete interactive restore transaction. No service stop/promotion, offsite transfer, DNS mutation, or reboot. Same test-only offline identity custody limitation applies |
 | P3-G6 real Admin rate-limit threshold — **PASS for internal loopback client** | The installed Caddy module had the validated Admin limit `60 events / 1m` keyed on `{client_ip}`. Sixty consecutive authenticated Admin `GET /admin/` requests returned HTTP 200; the bounded burst observed HTTP 429 on the next request. The unrelated unauthenticated `/api/config` endpoint continued to return HTTP 200. Live post-test doctor, both healthy/unpaused application containers and unchanged CrowdSec Worker invocation all passed; `P3_G6_EXIT=0 PASS` | Demonstrates the active Caddy Admin outer rate-limit boundary and separation from a non-Admin endpoint for the internal loopback client, **not** a real Cloudflare client. Brief internal client throttling was expected; no DNS/Worker/config/service changes. Browser-rendered UI/SMTP receipt and external origin validation are NOT RUN |
+| P3-G7 negative Age recovery paths — **PASS for wrong key and tamper** | The actual installed P3-G3 backup was proven unchanged and the runtime healthy. A newly generated synthetic Age private key (not the configured recipient) was rejected by `verify_local(..., record=False)` with an Age decryption failure. Using the matching offline test identity from secure hidden paste, a separate temporary ciphertext copy with one trailing byte changed also failed at Age decryption. Original `.vwrec` checksum and persistent config, SOPS and recovery state were unchanged; both application containers and CrowdSec Worker remained healthy with doctor showing no FAIL. Final `P3_G7_EXIT=0 PASS` | Demonstrates authenticated ciphertext failure closed before live mutation. No restore, offsite transport, public DNS change or Worker restart; tmpfs negative-test files were cleaned up. This does not substitute for an actual successful restore or cloud roundtrip |
 
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
 P2 shell command placed an error handler immediately after a Python
@@ -233,15 +234,16 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next software gate:** P3-G7 focus on recovery failure paths
-that cannot endanger a running application: prove the existing local
-`.vwrec` rejects a different (synthetic) Age private identity and
-rejects corrupted ciphertext in temporary disposable copies, with no
-persistent record/config changes or service disruption. Independently
-test actual browser UI/SMTP delivery and external origin denial where
-a separate access context exists. Destructive restore, offsite copies,
-automatic timers/reboot and production GO require separate authorization;
-the existing proxied A record must remain unchanged.
+**Next acceptance boundary:** P3-G8 should exercise a
+sandboxed recovery **promotion and validation** against isolated temporary
+paths on the same disposable host, without replacing production application
+state or stopping the active containers. Then require a separately approved
+complete restore onto dedicated disposable host data to close the
+production restore gate. Also outstanding: real browser/Admin SMTP plus
+independent mailbox receipt, offsite transport/readback, external origin
+packet denial, and systemd persistence/reboot (which requires rearming
+CrowdSec Fail Open). No existing proxied DNS A-record cutover is authorized.
+Avoid further large provider/network acceptance inventories.
 
 ## Acceptance record
 
