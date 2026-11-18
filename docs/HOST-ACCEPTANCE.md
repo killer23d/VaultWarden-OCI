@@ -389,6 +389,33 @@ archive their immutable source evidence and remove them from active
 the permanent one-VM script collection.
 
 
+### rc.13 P4-B local lifecycle/security inventory — November 18, 2026 UTC
+
+**PASS: grouped read-only installed-host inventory only; lifecycle execution
+and external packet enforcement remain NOT RUN.** On the same host and
+immutable installed software as P4-A, the operator ran the P4-B one-shot
+with `set -Eeuo pipefail` and reported `P4_B_EXIT=0
+READ_ONLY_INVENTORY_PASS`, `P4_B_WRAPPER_EXIT=0`.
+
+| Read-only P4-B finding | Scoped result |
+| --- | --- |
+| Release and disk **PASS** | Selected installed `0.1.0-rc.13` remained selected, with dedicated ext4 UUID `f4e0bd62-48e7-4745-8987-44b14013216d` and no root fallback. The prior P4-A hash check tied the installed 52 release files to tested source `fd56313255c97992dc55c1475d94477597b88602`; this command verified the release link, not a second independent full-tree hash. |
+| Application/doctor **PASS** | `runtime=running`, doctor overall `PASS`, `vwctl status` exit `1` consistent with `automation=FAIL`. Eight requested local origin/Caddy/Admin/CrowdSec doctor IDs were `PASS`. |
+| systemd installation **PASS for presence/state** | The VaultWarden-OCI target, appliance service, all four timers and their five associated services were loaded; target/service/timers were **inactive and disabled** as expected. Static health/DNS/backup/maintenance services stayed inactive. `vwctl timers --json` exit `1`, `overall=FAIL`: no scheduled lifecycle execution was accepted. |
+| CrowdSec **PASS for present state** | CrowdSec engine and nftables firewall bouncer active/enabled; Cloudflare Worker active/**disabled** with unchanged `InvocationID=a80be9e43af84a24b505b9e4b127abeb`. There was no Worker restart or new Fail Open confirmation. |
+| Docker origin chain **presence-only PASS** | `iptables -S DOCKER-USER` contained one append entry. This **does not** establish the full jump target's semantics, a forwarded/published-port external packet drop, or an independent non-Cloudflare denial. Doctor's local policy PASS remains distinct. |
+| **NOT RUN** | Actual service/timer operation, restart/reboot persistence, Worker invocation re-arm and fresh Cloudflare Route Fail Open confirmation, external origin-denial packets, IPv6 external tests (no deployment IPv6 use case), supported-predecessor live upgrade and immutable release tagging. |
+
+P4-B was observation only; it did not enable timers, start/stop systemd
+units, change `DOCKER-USER`, modify provider networking or DNS, send SMTP,
+upload/prune/recover remote data, or reboot. A systemd `Result=success`
+on an inactive unit is **not** evidence of an executed successful job.
+The intentionally idle automation configuration is not promoted to
+lifecycle PASS. Keep release GO at **HOLD** while client/browser evidence
+and remaining mandatory software gates are reconciled.
+
+
+
 
 ## Acceptance record
 
