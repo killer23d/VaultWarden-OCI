@@ -209,7 +209,9 @@ against this exact P2 candidate.
 | P3-G7 negative Age recovery paths — **PASS for wrong key and tamper** | The actual installed P3-G3 backup was proven unchanged and the runtime healthy. A newly generated synthetic Age private key (not the configured recipient) was rejected by `verify_local(..., record=False)` with an Age decryption failure. Using the matching offline test identity from secure hidden paste, a separate temporary ciphertext copy with one trailing byte changed also failed at Age decryption. Original `.vwrec` checksum and persistent config, SOPS and recovery state were unchanged; both application containers and CrowdSec Worker remained healthy with doctor showing no FAIL. Final `P3_G7_EXIT=0 PASS` | Demonstrates authenticated ciphertext failure closed before live mutation. No restore, offsite transport, public DNS change or Worker restart; tmpfs negative-test files were cleaned up. This does not substitute for an actual successful restore or cloud roundtrip |
 | P3-G8 actual restore engine into private scratch — **PASS for isolated promotion and new operational custody** | On pinned `0.1.0-rc.13` ARM64 host, the exact P3-G3 archive SHA-256 and dedicated storage were checked before `recovery.restore_recovery(artifact, identity, paths=isolated_paths, runner=isolated_runner, start=False)`. Matching offline test identity was supplied by hidden prompt; real Age/SOPS cryptography, staged application/Caddy state, and promoted to isolated `/run/vaultwarden-oci/p3g8-*` paths. The engine generated a distinct operational Age identity and rotated/validated SOPS recipients; restored SQLite `PRAGMA integrity_check` returned `ok` and Caddy data/config were present. Docker version/inspect were intercepted only in this sandbox, with no Docker stop/remove call. Private scratch was cleaned; original archive and live config, SOPS, operational Age key and recovery record remained unchanged, containers healthy and CrowdSec Worker invocation preserved; `P3_G8_EXIT=0 PASS` | Proves real recovery-engine implementation on the real archive **with redirected temporary paths**, not complete live host restore or production boot. Docker lifecycle was intentionally simulated for sandbox isolation; actual stopped-container promotion/start, offsite retrieval and public origin cutover are NOT RUN |
 | P3-G9A same-host full-restore readiness — **PASS, READ-ONLY** | On disposable `vaultwarden-oci-8` with pinned installed rc.13 source `fd56313255c97992dc55c1475d94477597b88602`, exact immutable release content (52 files), Ubuntu 26.04 ARM64/Python 3.14, dedicated ext4 disk UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, unchanged encrypted P3-G3 archive (348,440 bytes, SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`), prior independent Age verification record, local-only/retention-zero policy, free space, global lock, inactive timers/jobs, healthy Vaultwarden/Caddy, and unchanged CrowdSec Worker invocation `a80be9e43af84a24b505b9e4b127abeb` all passed. Doctor had zero FAIL and required runtime/origin/CrowdSec/recovery.local checks passed. Four operator attestations were entered as `YES` for disposable host, off-host Age identity, independent rollback, and a pre-backup known test state; final output `P3_G9A_EXIT=0 READINESS_PASS_ONLY`. | Earlier G9A attempts safely HOLD on a script-only notification SKIP classification error and a sudo-heredoc `/dev/tty` placement error; corrected script is pinned at `da08ca24141c8400b149c727ec3faedf64f1c866`. Attestations are operator assertions, **not** independent proof of off-host custody/recoverability. Optional operational notifications remain unconfigured and notification.last_delivery is SKIP; offsite/rclone remains unaccepted. **No real restore, service stop/promotion, offsite upload, public DNS change, or production approval occurred**. P3-G9B required its own authorization. |
-| P3-G9B authorized real same-host restore — **PASS at supported CLI; G9C HOLD** | The exact P3-G9A preflight re-passed with four repeated operator attestations. The operator independently entered `AUTHORIZE P3-G9B` and again checked the original P3-G3 archive SHA-256. The installed supported `sudo vwctl restore --file <exact local .vwrec> --start` interactive workflow received the matching offline test Age private identity through hidden input, cryptographically authenticated the local `2026-11-18T20:25:43Z` recovery point and SOPS custody, displayed replacement impact, and independently received literal `RESTORE`. The product reported `PASS restored recovery point created 2026-11-18T20:25:43Z`, warned that the restored policy remains local-only, and returned CLI exit 0. | **Independent P3-G9C live-state verification remains NOT RUN**: successful CLI output is not a separate check of the recovered SQLite content, operational Age/SOPS after promotion, healthy rebuilt containers, verified TLS/Admin routes, or unchanged Worker invocation. This was an authorized destructive restore on this disposable host only; no remote retrieval, DNS/public ingress change, timer enablement, or release GO. |
+| P3-G9B authorized real same-host restore — **PASS at supported CLI; independent G9C checks observed** | The exact P3-G9A preflight re-passed with four repeated operator attestations. The operator independently entered `AUTHORIZE P3-G9B` and again checked the original P3-G3 archive SHA-256. The installed supported `sudo vwctl restore --file <exact local .vwrec> --start` interactive workflow received the matching offline test Age private identity through hidden input, cryptographically authenticated the local `2026-11-18T20:25:43Z` recovery point and SOPS custody, displayed replacement impact, and independently received literal `RESTORE`. The product reported `PASS restored recovery point created 2026-11-18T20:25:43Z`, warned that the restored policy remains local-only, and returned CLI exit 0. | P3-G9C has separately checked the restored SQLite integrity, operational SOPS/secret custody, healthy containers, verified local TLS/Admin and unchanged Worker invocation. However, **actual user/item recovery remains unproven** because the recovered SQLite database contains zero users and zero ciphers. This was an authorized destructive restore on this disposable host only; no remote retrieval, DNS/public ingress change, timer enablement, or release GO. |
+| P3-G9C independent real post-restore health — **AUTOMATED PASS; item recovery HOLD** | Operator ran the exact pinned `P3-G9C` read-only script on `vaultwarden-oci-8` after the authorized real restore. Pinned rc.13 and dedicated ext4 UUID remained unchanged; restored config/SOPS/operational Age key had protected ownership; original encrypted P3-G3 artifact SHA-256 remained intact. All background timers/jobs remained inactive and CrowdSec Worker still active/boot-disabled at invocation `a80be9e43af84a24b505b9e4b127abeb`. Both actual post-restore Caddy/Vaultwarden containers were healthy/unpaused; SQLite online snapshot `PRAGMA integrity_check=ok`; doctor had zero FAIL and required SOPS, runtime, recovery, Cloudflare-origin/CrowdSec gates were PASS; runtime status was `running`; verified local HTTPS Web Vault / API returned 200/200 and unauthenticated Admin returned 401. Printed `P3_G9C_AUTOMATED=PASS; LIVE_STATE=HEALTHY` and `P3_G9C_EXIT=0 POSTRESTORE_PASS; RELEASE_GO=HOLD`. | **User/item recovery NOT PROVEN**: independent SQLite counts were `users=0 ciphers=0`. The operator entered `YES` to the script's known-test-user/item attestation, but there is no database record to substantiate that item-level assertion; it must not be reported as an independently restored saved vault item. The original script incorrectly permitted this contradictory attestation; updated at `77e4a37569cbcfcefb02b10f2d3ca8e472a14cda` to fail closed when both counts are zero. This updated script has not been rerun against the host. A later **populated disposable test vault** and independently verified backup/restore remains mandatory for nonempty-record acceptance. No public DNS change, remote backup or timer enablement. |
+
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
@@ -224,9 +226,10 @@ read-only same-host restore readiness with four operator attestations.
 Latest checks
 report doctor WARN with no FAIL, healthy/unpaused app containers,
 `recovery.local=PASS`, and unchanged invocation-bound CrowdSec Worker.
-P3-G9B additionally has an operator-approved positive same-host restore
-CLI result, but **no independent post-promotion G9C checks yet**. This does
-**not** constitute a released production GO.
+P3-G9B has the explicitly authorized positive same-host CLI result. The
+post-promotion P3-G9C automated health, data integrity, security/custody
+and local TLS checks pass, but **no nonempty vault record recovery has
+been proven**. This does **not** constitute a released production GO.
 
 Nine additional permanent, fixture-only regression tests in
 `tests/test_runtime_prestart_paths.py` were introduced by PR #434 and
@@ -236,10 +239,9 @@ runs. They record the CrowdSec log-only prestart cause and preserve
 fail-closed behavior without a product implementation change. **Do not
 silently attribute live-host results to this later merge commit**.
 
-The remaining independently evidenced requirements are **P3-G9C independent
-post-restore health, secrets, SQLite and known test-vault state proof** after
-the authorized P3-G9B live restore, controlled offsite ciphertext roundtrip
-and decryption,
+The remaining independently evidenced requirements include **nonempty
+user/item data restoration** (the tested archive had zero users and ciphers),
+controlled offsite ciphertext roundtrip and actual remote recovery,
 service/timer/reboot persistence with Worker re-arm, a genuine browser
 Admin/client and mailbox delivery test, and external non-Cloudflare
 origin denial. Existing production-facing DNS remains unchanged;
@@ -266,24 +268,28 @@ rejection, failed bootstrap, root-only rejection), authenticated browser
 Admin session/navigation and Admin-originated SMTP, independent mailbox
 receipt, actual real-client Cloudflare identity/rate-limit behavior and
 public origin packet denial, DNS cutover, full systemd/timer/reboot
-persistence, offsite test-only ciphertext/readback and independently verified
-post-restore G9C state (G9B full CLI restore now reported PASS), and
+persistence, offsite test-only ciphertext/readback, **nonempty vault user/item recovery**
+and controlled remote restore (G9B CLI restore and G9C health now PASS), and
 supported-predecessor upgrade/rollback. The historical
 recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next acceptance boundary:** P3-G9B has the operator's explicit
-live-restore authorization and a successful installed product CLI result.
-P3-G9C must independently verify restored SQLite/data, operational SOPS
-custody, healthy running containers, local verified TLS/Admin, and the
-unchanged invocation-bound CrowdSec Worker. The current Worker Fail Open
-confirmation is invocation-bound: avoid reboot or invocation change
-without re-confirmation. Keep the existing proxied Cloudflare A record
-unchanged. Then separately complete browser-rendered Admin/SMTP,
-independent mailbox receipt, offsite ciphertext roundtrip, actual
-external origin denial and service/timer persistence. No production GO
-is implied, and redundant infrastructure inventories remain unnecessary.
+**Next acceptance boundary:** P3-G9C automated post-restore health and
+security checks have passed, but the restored fixture contains zero
+users and zero ciphers. Do not treat the operator's YES to the
+item-level attestation as independent proof that a populated vault item
+was restored. For a single efficient subsequent gate, seed one disposable
+test user and test item, create an encrypted recovery point, verify it,
+perform a narrowly scoped offsite ciphertext upload/readback, and require
+separate approval before an actual remote restore. Confirm the known
+user/item afterward. Never use historical Box objects as mutable test
+targets. Keep backup.remote empty and both retention periods zero until
+separately approved; leave the existing Cloudflare A record unchanged.
+The CrowdSec Worker Fail Open confirmation remains invocation-bound:
+avoid reboot/invocation change without re-confirmation. Browser Admin,
+mailbox receipt, external origin denial and service/timer persistence
+remain release HOLD; no production GO is implied.
 
 ## Acceptance record
 
