@@ -224,6 +224,8 @@ against this exact P2 candidate.
 
 | P3-G11F remotely sourced populated-vault restore + P3-G11G independent recovery verification — **PASS; production GO HOLD** | On disposable `vaultwarden-oci-8`, exact pinned G11F script `79ca7c231c8ab976c8892bbd8c6b23de4c472ba0` re-ran G11E read-only preflight before and after separate literal `AUTHORIZE P3-G11F REMOTE RESTORE`. It proved the same 1-user/2-cipher pre-restore delta and unchanged exact remote ciphertext, obtained the separately held offline test Age identity by hidden secure paste, authenticated the remote recovery point and SOPS/manifest `2026-11-18T21:56:28Z`, and the operator independently typed uppercase `RESTORE`. The product reported `PASS restored recovery point created 2026-11-18T21:56:28Z` with `--start`. Afterward the pinned independent G11G verifier `4a877a5f5f43658a485f480076329c3c2b178b5a` proved SQLite integrity `ok`, exactly **1 user, 1 original cipher, post-backup second cipher absent**, and exact recovered item fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`; operational SOPS custody/decryption; doctor zero FAIL; restored healthy/unpaused Caddy and Vaultwarden containers; private TLS Web Vault/API/Admin statuses 200/200/401; dedicated ext4 volume UUID; inactive background automation; saved LOCAL-ONLY/retention-zero policy; and unchanged invocation-bound CrowdSec Worker. Final `P3_G11G_EXIT=0 INDEPENDENT_POSTRESTORE_PASS; PRODUCTION_GO=HOLD` and `P3_G11F_EXIT=0 REMOTE_RESTORE_AND_INDEPENDENT_POSTCHECK_PASS; RELEASE_GO=HOLD`. Exact remote test object: `bw-backup:bw-backup/acceptance-rc13-vm8-20261118T215615Z-208eae43675f/recovery-20261118T215628Z-a478ee3e.vwrec` SHA-256 `48c46b90e4a2b0004d920b286df2c2649c6a80bcf34bd6be038ffe3eefb7e749`. | This **closes automated nonempty remote-backup restore** on this disposable host, not all user-facing or site-release acceptance. A real browser/client still must confirm the original item is accessible and the second item is absent. Browser Admin navigation and independently delivered SMTP mail, public non-Cloudflare origin packet denial, full systemd/reboot persistence with explicit Worker re-arm, optional fresh-install custody variants, supported-predecessor upgrade claims, and final immutable software release decision remain NOT RUN/HOLD as described in this document. The historical Box objects/public DNS were not intentionally altered; no blanket permission for timer enablement, reboot, production cutover or remote deletion was given. |
 
+| P3-G12 preliminary user-facing smoke — **operator-observed, scoped** | After G11F/G11G remote restore, operator reported: "so far everything works, admin, caddy and restore works." A separate previously logged-in Admin/Caddy session has not been supplied as structured browser trace or step-by-step acceptance log. The G11F/G11G automated HTTP TLS/Admin negative gate, health, SOPS, and populated-data rollback remain independently proven and are not dependent on this report. | Treat the user's functional observation as a valuable **manual smoke report**, **not a documented full P3-G12 PASS**. The actual restored item still needs real-client field/usability verification and independent confirmation that the post-backup second item is absent; multi-page browser Admin navigation without unexpected 429, Admin SMTP send and **mailbox receipt** are not proven by the user's statement. Real external origin packets and reboot/Worker re-arm remain separate release gates. |
+
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
@@ -303,14 +305,16 @@ disposable live vault is now back at **one user / one cipher**. Do not
 re-run G11E (which expects two ciphers), upload another backup, or run
 another destructive restore merely to repeat the already accepted gate.
 
-**Next focus: software-facing behavior.** In a real test client/browser,
-log into the restored test Vaultwarden user, verify the original
-synthetic saved item exists and its expected fields are usable, and
-verify the post-backup second synthetic item is absent; no production
-passwords or secret values belong in acceptance evidence. Then close
-the currently NOT RUN authenticated browser Admin navigation/SMTP-test
-and independent mailbox receipt on test-only credentials, preserving
-outer Caddy auth and inner Vaultwarden Admin verification. Automation,
+**Next focus: software-facing behavior.** The operator reports that
+Admin, Caddy and restore work after G11F; this is a *manual smoke*
+observation, not yet an independently documented browser/mailbox test.
+In a real test client/browser, check that the original synthetic saved
+item remains usable and the post-backup item is absent; do not capture
+production credentials in evidence. Reconcile the manual Caddy Basic
+Auth and inner Vaultwarden Admin login/navigation result, and explicitly
+check for false 429 behavior. Perform an Admin SMTP test and verify
+independent mailbox receipt only if a disposable test provider/recipient
+is configured. Otherwise record the SMTP/mailbox gate NOT RUN. Automation,
 reboot and the invocation-bound CrowdSec Worker re-arm must be treated
 as a separately authorized lifecycle gate; never reboot or restart
 the Worker and silently reuse its prior Fail Open confirmation.
@@ -322,6 +326,29 @@ is historical context, not a substitute for any still-required live
 external origin packet-denial proof. Upgrade/clean-install variants
 that cannot be safely exercised must be explicitly marked NOT RUN,
 and no stable software release GO is implied.
+
+**P3 one-shot audit provenance (historical, not active replay tools).**
+The exact one-host scripted evidence is recoverable via the immutable Git
+commit URLs below. These scripts pin VM identity, release bytes, a specific
+SOPS/Box recovery object and an invocation-bound CrowdSec Worker. Some
+also format or replace live data. Preserve the above operator transcript
+and PASS/HOLD record, but **do not install or execute these archived tools
+as normal site acceptance**. Reusable tests remain in supported CI and
+the two read-only host inventory tools; no product implementation change
+was made by this acceptance-only branch.
+
+| Historical executed tool | Immutable source evidence |
+| --- | --- |
+| P3-G9A guarded read-only full-restore readiness | [rc13-p3g9a-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/da08ca24141c8400b149c727ec3faedf64f1c866/tests/host-acceptance/rc13-p3g9a-readonly.sh) |
+| P3-G9C independent same-host restore checks (later corrected for empty fixture) | [rc13-p3g9c-postrestore-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/77e4a37569cbcfcefb02b10f2d3ca8e472a14cda/tests/host-acceptance/rc13-p3g9c-postrestore-readonly.sh) |
+| P3-G11B Box parent metadata check | [rc13-p3g11b-remote-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/d8d9bc24ffa23a219430d63529401f0d0f216e89/tests/host-acceptance/rc13-p3g11b-remote-readonly.sh) |
+| P3-G11C populated fixture baseline | [rc13-p3g11c-populated-vault-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/8c9715b92f0e47530e9b51263473e3b8ac800cce/tests/host-acceptance/rc13-p3g11c-populated-vault-readonly.sh) |
+| P3-G11D one-time encrypted Box publication/readback | [rc13-p3g11d-offsite-test-backup.sh](https://github.com/killer23d/VaultWarden-OCI/blob/7e7a1e8512def01c1f3ddd66f8416631ad3cec51/tests/host-acceptance/rc13-p3g11d-offsite-test-backup.sh) |
+| P3-G11E post-backup cipher delta and ciphertext checksum | [rc13-p3g11e-postbackup-delta-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/5649ff7f91cbda7099deb43d07f93bd3831e19c8/tests/host-acceptance/rc13-p3g11e-postbackup-delta-readonly.sh) |
+| P3-G11F separately authorized live remote restore | [rc13-p3g11f-remote-restore.sh](https://github.com/killer23d/VaultWarden-OCI/blob/79ca7c231c8ab976c8892bbd8c6b23de4c472ba0/tests/host-acceptance/rc13-p3g11f-remote-restore.sh) |
+| P3-G11G independent populated post-remote-restore checks | [rc13-p3g11g-remote-postrestore-readonly.sh](https://github.com/killer23d/VaultWarden-OCI/blob/4a877a5f5f43658a485f480076329c3c2b178b5a/tests/host-acceptance/rc13-p3g11g-remote-postrestore-readonly.sh) |
+
+
 
 ## Acceptance record
 
