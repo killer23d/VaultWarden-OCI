@@ -54,6 +54,23 @@ On an interactive terminal, verification offers secure paste of the matching off
 
 This verification decrypts the real `.vwrec`, checks the manifest/checksums and verifies the encrypted SOPS document, **without changing live application data**. A backup-created PASS and an rclone upload checksum are not substitutes for this key-based check.
 
+**Acceptance distinction:** Successful local encryption and SHA-256
+readback are not a restore. Check that the separately held offline Age
+identity can decrypt the exact recovery point; use only a distinct,
+synthetic incorrect identity or a **temporary copy** for wrong-key or
+tamper rejection tests. Do not corrupt the original `.vwrec`. A
+recovery preflight that reaches the typed confirmation and is cancelled
+safely proves the consent path, but still does not establish that the
+live service was restored. The actual restore engine can be rehearsed
+with isolated temporary paths and its Docker lifecycle deliberately
+intercepted; this proves data promotion, SQLite validation and
+operational SOPS rekeying in that sandbox, **not** a successful
+host-level start. Close the production restore gate separately on
+approved disposable storage using known recoverable vault state,
+actual container lifecycle, and post-restore status/doctor. Never
+confuse a test-only Age identity pasted into an operator transcript
+with adequate private-key custody for production.
+
 ## Configure automatic offsite backups (rclone)
 
 **One backup pipeline:** the timer and `sudo vwctl backup` both invoke the exact same backup command. When `[backup] remote` is nonempty, a successful local encrypted `.vwrec` is **immediately published to the selected rclone folder within that invocation**, independently downloaded for SHA-256 comparison, and recorded as offsite-verified. A failed cloud transfer fails the job, retains the verified local archive, and skips automatic pruning. No second timer, separate upload job, or repeat confirmation is needed. Enable the cloud destination **once**; rclone credentials alone do not establish permission or an unambiguous target.
