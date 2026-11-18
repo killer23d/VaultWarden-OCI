@@ -8,6 +8,106 @@ Record unavailable architecture/provider/destructive coverage as **NOT RUN**; CI
 
 The gate is intentionally appliance-sized for a small team: prove the supported operator paths and security ownership boundaries directly rather than inventing a second orchestration or migration layer just for acceptance.
 
+## Current code-release candidate: grouped blank-host source preflight
+
+The approved objective is to ship a validated **software codebase for future
+production sites**, not to turn the existing OCI/Cloudflare laboratory into
+production. The stopped Ubuntu 26.04 ARM64 reference host contains **recovered
+Vaultwarden data** and must not be wiped, reused for first-install tests,
+started with rc.13, or pointed at test-only remote writes. Its P8V-B source
+tests and recovered-state continuity are already recorded; do not repeat them
+to create a false fresh-install PASS.
+
+The existing read-only `tests/host-acceptance/production-new-host-preflight.py`
+now supports **two** mutually clear purposes:
+
+- Historical default (no arguments): the original fixed rc.12 replacement-host
+  recovery inventory, retained for old evidence.
+- `--purpose fresh-install --expected-version 0.1.0-rc.13
+  --expected-sha <40-hex-reviewed-commit>`: a clean-slate **software-release
+  preflight**, requiring clean exact-source proof and a blank unmounted
+  non-boot volume; an ext4/xfs volume with any existing data does **not**
+  count as blank.
+
+**One grouped read-only command on a genuinely NEW disposable Ubuntu 26.04
+ARM64 host** with a separately attached, blank dedicated data disk. This is
+**not** a Cloud Shell command and **must not run** on an existing rc.12
+restored-state test VM. Clone the **reviewed candidate ref**, pin the exact
+40-character SHA from the approved source/PR/CI, run its focused offline
+tests and only then the read-only P0. The command creates an isolated
+source checkout and root/operator-private evidence, but performs **no**
+disk formatting, apt, Docker start, systemd edit, SOPS/backup, firewall,
+DNS, Worker/API, email, remote read/write or reboot:
+
+```bash
+(
+set -Eeuo pipefail
+umask 077
+export PYTHONDONTWRITEBYTECODE=1 GIT_OPTIONAL_LOCKS=0
+REPO="killer23d/VaultWarden-OCI"
+REF="REPLACE_WITH_REVIEWED_CANDIDATE_REF"
+PIN="REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT_SHA"
+VERSION="0.1.0-rc.13"
+WORK="$HOME/VaultWarden-OCI-release-p0-${PIN:0:12}"
+fail() { printf 'RELEASE_P0_EXIT=2 BLOCKED: %s\n' "$1"; exit 2; }
+case "$PIN" in (*[!0-9a-f]*|"") fail "source pin invalid";; esac
+[ "${#PIN}" -eq 40 ] || fail "source pin length invalid"
+[ "$(id -un)" = ubuntu ] && [ "$(uname -m)" = aarch64 ] ||
+    fail "run as ubuntu on a new ARM64 acceptance host"
+sudo -n true || fail "passwordless sudo unavailable"
+for state in /opt/vaultwarden-oci /etc/vaultwarden-oci /var/lib/vaultwarden-oci; do
+    [ ! -e "$state" ] && [ ! -L "$state" ] ||
+        fail "already-installed or recovered state exists"
+done
+[ ! -e "$WORK" ] && [ ! -L "$WORK" ] ||
+    fail "source checkout already exists"
+git clone --quiet --depth 1 --branch "$REF" \
+    "https://github.com/$REPO.git" "$WORK" ||
+    fail "reviewed source clone unavailable"
+cd "$WORK"
+[ "$(git rev-parse HEAD)" = "$PIN" ] || fail "source changed"
+[ -z "$(git status --porcelain --untracked-files=all)" ] ||
+    fail "source checkout not clean"
+echo "=== OFFLINE SOURCE PREFLIGHT UNIT TESTS ==="
+python3 -B -m unittest discover -s tests \
+    -p 'test_production_new_host_preflight.py' -v ||
+    fail "focused source negative-path tests failed"
+echo "=== READ-ONLY BLANK-HOST PRE-FLIGHT ==="
+set +e
+sudo -n /usr/bin/python3 -B \
+    tests/host-acceptance/production-new-host-preflight.py \
+    --purpose fresh-install --expected-version "$VERSION" \
+    --expected-sha "$PIN"
+rc=$?
+set -e
+printf 'RELEASE_P0_EXIT=%s\n' "$rc"
+exit "$rc"
+)
+```
+
+**Gate semantics:** exit **2/BLOCKED** means an unsafe/wrong host, wrong
+source version, dirty/nonmatching SHA, recovered appliance files,
+missing separate *blank* non-boot data candidate or a failed read. Exit
+**0/PENDING** reports an accurate read-only inventory only, **not**
+approval to install or evidence that a real application works. An
+empty or unsigned disk is only a candidate until independently reviewed
+against the actual block-volume identity. Private JSON stays
+mode 0600 under the invoking operator's `vwoci-acceptance`; share
+only sanitized summary/output and the exit label.
+
+**Next software checks after a clean P0, with separate explicit approval:**
+use the existing [Install](INSTALL.md) workflow with a distinct
+test-only hostname, a new offline Age identity, approved blank data disk
+and test-only credentials. First the supported `setup.sh install
+--dry-run` path, then actual installation/custody; then real TLS/admin/
+SMTP/CrowdSec, Cloudflare-only external origin denial through Docker
+NAT/FORWARD/userland proxy, systemd/reboot/fail-closed transitions,
+and a **test-only** encrypted backup plus guided restore. No original
+Box/recovered data. Record each mandatory gate PASS/FAIL/NOT RUN in the
+accepted record below before considering a stable release tag.
+This is a **software release** gate; OCI site setup belongs separately
+to [new-site OCI administration](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md).
+
 ## Acceptance record
 
 ```text
