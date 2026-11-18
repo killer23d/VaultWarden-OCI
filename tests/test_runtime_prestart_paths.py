@@ -85,6 +85,33 @@ class PrestartRuntimePathsTests(unittest.TestCase):
         self.assertEqual(after.status, "PASS")
         self.assertEqual(worker_config.read_text(encoding="utf-8"), "# test fixture only\n")
 
+    def test_real_crowdsec_log_precedes_application_directory_materialization(self) -> None:
+        """CrowdSec legitimately owns its log before the supported first start."""
+        from vaultwarden_oci import edge
+
+        self.base()
+        edge._prepare_vaultwarden_log(self.paths.vaultwarden_log_file)
+        self.assertTrue(self.paths.vaultwarden_log_path.is_dir())
+        self.assertTrue(self.paths.vaultwarden_log_file.is_file())
+        self.assertFalse(self.paths.data.exists())
+        self.assertFalse(self.paths.caddy_data.exists())
+        self.assertFalse(self.paths.secret_paths().vaultwarden.exists())
+
+        before = self.check()
+        self.assertEqual(before.status, "FAIL")
+        self.assertEqual(
+            before.message,
+            "runtime paths are only partially materialized",
+        )
+
+        self.materialize()
+        after = self.check()
+        self.assertEqual(after.status, "PASS")
+        self.assertEqual(
+            self.paths.vaultwarden_log_file.stat().st_mode & 0o777,
+            0o600,
+        )
+
     def test_worker_partial_base_is_not_hidden_by_stopped_state(self) -> None:
         self.paths.run.mkdir(mode=0o700)
         self.paths.transient.mkdir(mode=0o700)
