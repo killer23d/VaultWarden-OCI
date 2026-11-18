@@ -222,6 +222,8 @@ against this exact P2 candidate.
 
 | P3-G11E post-backup delta + exact remote ciphertext — **PASS, READ-ONLY; G11F restore HOLD** | Operator ran SHA-256-pinned `tests/host-acceptance/rc13-p3g11e-postbackup-delta-readonly.sh` from commit `5649ff7f91cbda7099deb43d07f93bd3831e19c8` on disposable `vaultwarden-oci-8`. Installed rc.13 release, dedicated ext4 storage and LOCAL-ONLY zero-retention policy passed. A read-only live SQLite snapshot demonstrated **1 user and 2 ciphers**: the original cipher still matched the G11C/G11D fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`, plus one new post-backup cipher. Original local and independently Age-verified offsite metadata still pointed to the exact isolated test object `bw-backup:bw-backup/acceptance-rc13-vm8-20261118T215615Z-208eae43675f/recovery-20261118T215628Z-a478ee3e.vwrec`. A new read-only `rclone cat` confirmed ciphertext SHA-256 `48c46b90e4a2b0004d920b286df2c2649c6a80bcf34bd6be038ffe3eefb7e749` and exact 348440-byte size. Final `P3_G11E_EXIT=0 POSTBACKUP_DELTA_AND_REMOTE_BYTES_PASS; REMOTE_RESTORE=HOLD`. | Demonstrates a distinct post-backup saved item and unchanged recovery source, not that the live restore works. Explicit G11D upload consent does **not** authorize G11F. Subsequent real remote restore must use a fresh privileged preflight, independent literal authorization and product-owned uppercase `RESTORE`, then separately demonstrate restored 1 user/1 original cipher, absent newer cipher, operational SOPS, Caddy/Vaultwarden and CrowdSec integrity. The historical Box backups, public DNS and schedules must remain untouched. |
 
+| P3-G11F remotely sourced populated-vault restore + P3-G11G independent recovery verification — **PASS; production GO HOLD** | On disposable `vaultwarden-oci-8`, exact pinned G11F script `79ca7c231c8ab976c8892bbd8c6b23de4c472ba0` re-ran G11E read-only preflight before and after separate literal `AUTHORIZE P3-G11F REMOTE RESTORE`. It proved the same 1-user/2-cipher pre-restore delta and unchanged exact remote ciphertext, obtained the separately held offline test Age identity by hidden secure paste, authenticated the remote recovery point and SOPS/manifest `2026-11-18T21:56:28Z`, and the operator independently typed uppercase `RESTORE`. The product reported `PASS restored recovery point created 2026-11-18T21:56:28Z` with `--start`. Afterward the pinned independent G11G verifier `4a877a5f5f43658a485f480076329c3c2b178b5a` proved SQLite integrity `ok`, exactly **1 user, 1 original cipher, post-backup second cipher absent**, and exact recovered item fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`; operational SOPS custody/decryption; doctor zero FAIL; restored healthy/unpaused Caddy and Vaultwarden containers; private TLS Web Vault/API/Admin statuses 200/200/401; dedicated ext4 volume UUID; inactive background automation; saved LOCAL-ONLY/retention-zero policy; and unchanged invocation-bound CrowdSec Worker. Final `P3_G11G_EXIT=0 INDEPENDENT_POSTRESTORE_PASS; PRODUCTION_GO=HOLD` and `P3_G11F_EXIT=0 REMOTE_RESTORE_AND_INDEPENDENT_POSTCHECK_PASS; RELEASE_GO=HOLD`. Exact remote test object: `bw-backup:bw-backup/acceptance-rc13-vm8-20261118T215615Z-208eae43675f/recovery-20261118T215628Z-a478ee3e.vwrec` SHA-256 `48c46b90e4a2b0004d920b286df2c2649c6a80bcf34bd6be038ffe3eefb7e749`. | This **closes automated nonempty remote-backup restore** on this disposable host, not all user-facing or site-release acceptance. A real browser/client still must confirm the original item is accessible and the second item is absent. Browser Admin navigation and independently delivered SMTP mail, public non-Cloudflare origin packet denial, full systemd/reboot persistence with explicit Worker re-arm, optional fresh-install custody variants, supported-predecessor upgrade claims, and final immutable software release decision remain NOT RUN/HOLD as described in this document. The historical Box objects/public DNS were not intentionally altered; no blanket permission for timer enablement, reboot, production cutover or remote deletion was given. |
+
 
 **P3 phase closeout / production software acceptance boundary:** Against the
 *installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
@@ -236,10 +238,15 @@ read-only same-host restore readiness with four operator attestations.
 Latest checks
 report doctor WARN with no FAIL, healthy/unpaused app containers,
 `recovery.local=PASS`, and unchanged invocation-bound CrowdSec Worker.
-P3-G9B has the explicitly authorized positive same-host CLI result. The
-post-promotion P3-G9C automated health, data integrity, security/custody
-and local TLS checks pass, but **no nonempty vault record recovery has
-been proven**. This does **not** constitute a released production GO.
+P3-G9B established explicit authorized local same-host restoration and
+P3-G9C verified its operational health; its original *empty* vault could
+not prove recovered saved items. P3-G11C through P3-G11G subsequently
+proved a populated test vault, one-time isolated Box upload/readback,
+independent offline Age/SOPS verification, an exact post-backup new-item
+delta, and independently verified live **remote restore** to precisely
+the original one-user/one-item fingerprint. This closes automated
+populated-data remote recovery **on the disposable host only**. It does
+**not** constitute production release GO.
 
 Nine additional permanent, fixture-only regression tests in
 `tests/test_runtime_prestart_paths.py` were introduced by PR #434 and
@@ -249,14 +256,16 @@ runs. They record the CrowdSec log-only prestart cause and preserve
 fail-closed behavior without a product implementation change. **Do not
 silently attribute live-host results to this later merge commit**.
 
-The remaining independently evidenced requirements include **nonempty
-user/item data restoration** (the tested archive had zero users and ciphers),
-controlled offsite ciphertext roundtrip and actual remote recovery,
-service/timer/reboot persistence with Worker re-arm, a genuine browser
-Admin/client and mailbox delivery test, and external non-Cloudflare
-origin denial. Existing production-facing DNS remains unchanged;
-remote offsite publishing and automation were intentionally disabled.
-No new historical provider/VM inventory files were added.
+The remaining operator and release requirements include genuine
+browser/client confirmation of the restored original item and absent
+post-backup item; browser Admin navigation and authenticated SMTP with
+independent mailbox receipt; service/timer/reboot persistence with
+explicit Worker re-arm; real external non-Cloudflare origin denial;
+and applicable clean-install/upgrade variants or explicitly scoped
+NOT RUN limitations. Existing production-facing DNS is unchanged;
+**saved** offsite publishing and automation remain intentionally disabled
+(one G11D upload used only a per-invocation remote override). No new
+historical provider/VM inventory files were added.
 
 
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
@@ -278,40 +287,41 @@ rejection, failed bootstrap, root-only rejection), authenticated browser
 Admin session/navigation and Admin-originated SMTP, independent mailbox
 receipt, actual real-client Cloudflare identity/rate-limit behavior and
 public origin packet denial, DNS cutover, full systemd/timer/reboot
-persistence, offsite test-only ciphertext/readback, **nonempty vault user/item recovery**
-and controlled remote restore (G9B CLI restore and G9C health now PASS), and
-supported-predecessor upgrade/rollback. The historical
+persistence, browser/client verification of the restored vault item,
+and supported-predecessor upgrade/rollback. **Test-only populated offsite
+backup/readback, offline Age/SOPS verification and authorized remote restore
+are PASS through P3-G11G**, not NOT RUN. The historical
 recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next acceptance boundary:** P3-G11D has passed the explicitly
-authorized *one-time* upload, product download/SHA-256 readback and
-separate offline Age/SOPS verification of the populated one-user/one-item
-recovery point. Preserve the exact isolated Box object and the original
-cipher fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`.
-P3-G11E has now independently proven the deliberate post-backup delta:
-exactly one unchanged original cipher plus one extra synthetic cipher;
-the exact isolated Box ciphertext remains SHA-256 verified. The second
-item must disappear when the earlier point is restored. The next independently authorized destructive gate must
-verify the exact remote ciphertext and the pre-restore delta, then run
-the supported interactive `vwctl restore --from-remote ... --start`
-with separate operator consent and an explicit final `RESTORE`.
-The guarded P3-G11F handoff and independent read-only P3-G11G postrestore
-script are staged on this acceptance branch; **neither has been run**.
-G11F retries the exact pinned G11E preflight immediately before any
-live restore and fails closed if the product restore is cancelled.
-Post-restore verify SQLite integrity, the original one-user/one-cipher
-fingerprint, absence of the second cipher, operational SOPS, healthy
-Caddy/Vaultwarden, local verified TLS/Admin and unchanged CrowdSec Worker.
-Do not automatically retry a failed restore. Existing historical Box
-objects, saved local-only backup policy and retention zero, public
-Cloudflare A record, timers and origin rules remain unchanged; Worker
-Fail Open confirmation is invocation-bound, so no restart/reboot before
-separate re-arm proof. Browser Admin/mailbox receipt, real external
-origin denial, service/timer persistence and production release GO remain
-HOLD.
+**Next acceptance boundary:** P3-G11F and independent P3-G11G have
+PASS results from an expressly authorized live restore of the exact
+isolated Box .vwrec, with the post-backup synthetic second item removed
+and the first item's one-cipher fingerprint exactly restored. The
+disposable live vault is now back at **one user / one cipher**. Do not
+re-run G11E (which expects two ciphers), upload another backup, or run
+another destructive restore merely to repeat the already accepted gate.
 
+**Next focus: software-facing behavior.** In a real test client/browser,
+log into the restored test Vaultwarden user, verify the original
+synthetic saved item exists and its expected fields are usable, and
+verify the post-backup second synthetic item is absent; no production
+passwords or secret values belong in acceptance evidence. Then close
+the currently NOT RUN authenticated browser Admin navigation/SMTP-test
+and independent mailbox receipt on test-only credentials, preserving
+outer Caddy auth and inner Vaultwarden Admin verification. Automation,
+reboot and the invocation-bound CrowdSec Worker re-arm must be treated
+as a separately authorized lifecycle gate; never reboot or restart
+the Worker and silently reuse its prior Fail Open confirmation.
+
+Keep the public proxied Cloudflare A record, origin route, historical
+Box backups, isolated test archive, saved LOCAL-ONLY backup policy and
+both retention periods zero unchanged. Existing OCI/provider inventory
+is historical context, not a substitute for any still-required live
+external origin packet-denial proof. Upgrade/clean-install variants
+that cannot be safely exercised must be explicitly marked NOT RUN,
+and no stable software release GO is implied.
 
 ## Acceptance record
 
