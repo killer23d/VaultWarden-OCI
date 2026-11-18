@@ -5,7 +5,7 @@ umask 077
 export PYTHONDONTWRITEBYTECODE=1 GIT_OPTIONAL_LOCKS=0
 
 PIN='fd56313255c97992dc55c1475d94477597b88602'
-V2='08595bdfe2a08a4946a95a43e83046c82b4d4126'
+DOCS_MERGE='08595bdfe2a08a4946a95a43e83046c82b4d4126'
 WORK="$HOME/VaultWarden-OCI-p2b-${PIN:0:12}"
 REL='/opt/vaultwarden-oci/releases/0.1.0-rc.13'
 ART='/var/lib/vaultwarden-oci/backups/recovery-20261118T202543Z-e3ef03c7.vwrec'
@@ -23,7 +23,7 @@ sudo -n true >/dev/null 2>&1 || hold 'passwordless sudo unavailable'
 HEAD="$(git --no-optional-locks -C "$WORK" rev-parse HEAD 2>/dev/null)" || hold 'cannot read pinned source commit'
 [ "$HEAD" = "$PIN" ] || hold 'P2 checkout HEAD differs from installed source pin'
 
-sudo -n python3 -B - "$WORK" "$PIN" "$V2" "$REL" "$ART" "$SHA" "$INV" <<'PY'
+sudo -n python3 -B - "$WORK" "$PIN" "$DOCS_MERGE" "$REL" "$ART" "$SHA" "$INV" <<'PY'
 import fcntl
 import hashlib
 import json
@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tomllib
 
-work, pin, v2, release_arg, archive_arg, expected_sha, invocation = sys.argv[1:]
+work, pin, docs_merge, release_arg, archive_arg, expected_sha, invocation = sys.argv[1:]
 release = pathlib.Path(release_arg)
 archive = pathlib.Path(archive_arg)
 state_root = pathlib.Path('/var/lib/vaultwarden-oci')
@@ -154,7 +154,7 @@ with (release / 'versions.toml').open('rb') as f:
 if version != '0.1.0-rc.13':
     hold('installed release version mismatch')
 passed(f'exact immutable rc.13 source bytes match {pin}; {len(expected_files)} files')
-print(f'INFO: repo v2={v2} (GitHub verified; installed source intentionally predates it)')
+print(f'INFO: reviewed docs merge={docs_merge}; installed source intentionally predates that commit')
 
 # Read-only invocation of the installed storage gate.
 sys.path.insert(0, str(release))
