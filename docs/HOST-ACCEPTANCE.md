@@ -2,11 +2,27 @@
 
 Supported hosts are Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute on `amd64` and `arm64`.
 
-The established disposable Ubuntu 24.04 release baseline remains applicable where available. Ubuntu 26.04 is covered by source review, automated checks, native Python 3.14, explicit x64/Arm64 CI, package/repository and systemd checks, **and actual OCI ARM64 acceptance performed on October 30–31, 2026**. The frozen rc.11 A0–C1/B2 and corrected rc.12 D1R/D2 gates are recorded in the [sanitized agent handoff](ACCEPTANCE-HANDOFF.md) and [chronological runbook](PRODUCTION-ACCEPTANCE-UBUNTU2604.md). **Ubuntu 26.04 AMD64 real-host acceptance, uninterrupted initial rc.12 first-pass install, full live rc.12 application/security/batch operation, and production cutover remain NOT RUN.** Do not extend one gate's PASS to another.
+The established disposable Ubuntu 24.04 release baseline remains applicable where available. Ubuntu 26.04 is covered by source review, automated checks, native Python 3.14, explicit x64/Arm64 CI, package/repository and systemd checks, **and actual OCI ARM64 acceptance performed on October 30–31, 2026**. The frozen rc.11 A0–C1/B2 and corrected rc.12 D1R/D2 gates are recorded in the [historical infrastructure and host acceptance archive](HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md). **Ubuntu 26.04 AMD64 real-host acceptance, uninterrupted initial rc.12 first-pass install, full live rc.12 application/security/batch operation, and production cutover remain NOT RUN.** Do not extend one gate's PASS to another.
 
 Record unavailable architecture/provider/destructive coverage as **NOT RUN**; CI mocks or container integrations do not turn missing real-host evidence into `PASS`.
 
 The gate is intentionally appliance-sized for a small team: prove the supported operator paths and security ownership boundaries directly rather than inventing a second orchestration or migration layer just for acceptance.
+
+**Software-release acceptance is the active contract.** The old
+VM-specific rc.11/rc.12 stage one-shots, OCI provider/Cloudflare
+inventories and their duplicate reports are preserved only in
+[Historical infrastructure acceptance](HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md)
+at an immutable Git commit. They are not release criteria to replay on a
+new VM. Keep product-level fail-closed origin security, install,
+recoverability, and rollback validation below; do not infer live
+security from source or a stopped reference host.
+
+The two retained reusable host instruments are
+`tests/host-acceptance/production-new-host-preflight.py` for a
+clean blank host and `tests/host-acceptance/production-readiness-inventory.py`
+for a deliberately selected already-installed appliance.
+Both are read-only inventories; neither grants consent to install,
+format, activate, alter provider policy or restore.
 
 ## Current code-release candidate: grouped blank-host source preflight
 
