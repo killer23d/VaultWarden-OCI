@@ -242,8 +242,11 @@ for addr in dict.fromkeys(ips):
 if not tls_ok:
     hold('local verified TLS Web/API/Admin did not return 200/200/401')
 ok('trusted local Caddy TLS Web Vault=200 API=200 unauth Admin=401; no public DNS or remote change')
-print('P3_G9C_AUTOMATED=PASS; LIVE_STATE=HEALTHY',flush=True)
-print('INFO: SQLite counts alone do not prove a specific known pre-backup vault item.',flush=True)
+if counts['users']==0 and counts['ciphers']==0:
+    print('P3_G9C_AUTOMATED=PASS; LIVE_STATE=HEALTHY; RECORD_RECOVERY=NOT_PROVEN',flush=True)
+    hold('restored vault contains no users or ciphers; cannot attest to a restored test user/item')
+print('P3_G9C_AUTOMATED=PASS; LIVE_STATE=HEALTHY; RECORD_RECOVERY=ELIGIBLE_FOR_ATTESTATION',flush=True)
+print('INFO: independently compare a specific pre-backup test user or item, not SQLite counts alone.',flush=True)
 PY
 
 if ! exec 3<>/dev/tty; then
