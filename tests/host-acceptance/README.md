@@ -5,18 +5,18 @@ appliance commands, and they are not a replacement for the supported
 `setup.sh`, `vwctl`, or the complete
 [Host acceptance](../../docs/HOST-ACCEPTANCE.md) checklist.
 
-**rc.13 disposable-host audit note:** The numbered `rc13-p3g9*` and
-`rc13-p3g11*` files are pinned, one-off acceptance scripts for a
-specific disposable VM and fixed test artifacts. They are not reusable
-site-install or production runbooks. In particular, the G9B/G11F restore
-handoffs are destructive even when guarded by interactive consent;
-**do not replay them on another host or against historical Box objects**.
-Their actual PASS/HOLD outcomes, immutable object identifiers and
-unexecuted follow-up limits are recorded in
-[Host acceptance](../../docs/HOST-ACCEPTANCE.md). Source-level reusable
-regression coverage remains in ordinary `tests/test_*.py` and the
-regular CI suites. After phase reconciliation, preserve the audit
-history without retaining duplicate active acceptance infrastructure.
+**rc.13 disposable-host P2/P3 audit:** The guarded G9A/G9C and
+G11B-G11G one-shot scripts were tied to a single disposable VM,
+immutable installed source and exact private-data/remote object pins.
+Their operator-reported outcomes and immutable source-commit links are
+archived **in one place** under
+[Host acceptance, P3 provenance](../../docs/HOST-ACCEPTANCE.md#p3-one-shot-audit-provenance-historical-not-active-replay-tools).
+The eight executed source scripts are intentionally **not retained as
+active runnable tests** after this PR. G9B/G11F perform destructive
+restores; never reuse an archived command on a live appliance or against
+historical Box objects. Preserve acceptance evidence, not duplicated
+infrastructure automation. Permanent, reusable regression coverage
+remains in `tests/test_*.py`, targeted integration tests and CI.
 
 | Tool | Appropriate target | Effect |
 | --- | --- | --- |
@@ -38,8 +38,17 @@ The exact original files remain retrievable via the pre-consolidation
 commit linked there. **Do not replay them:** some mutate disks,
 cloud provider policies, mail, backup remotes or reboot.
 
-For the present rc.13 release, the earlier recovered-data VM is
-a protected reference fixture. A separate blank-data test VM has
-completed P0 and the supported P1 installer dry run only;
-installation, external packet security and test-only restore remain
-unrun until scoped authorization.
+For rc.13, the historical recovered-data VM remains a protected
+reference fixture. A **separate blank-data disposable Ubuntu 26.04
+ARM64 VM** completed P0/P1 and subsequently the supported P2 install,
+real local/Caddy/Admin and isolated local/offsite encrypted recovery
+gates through P3-G11G; the populated Box restore returned precisely
+the original saved item and eliminated the post-backup test item.
+Source was pinned to `fd56313255c97992dc55c1475d94477597b88602`;
+later docs-only commits do not retroactively establish live-host results
+against a different release source. The operator additionally reported
+Admin/Caddy/restore working, a scoped manual smoke rather than a full
+browser/SMTP mailbox acceptance. External origin-denial packet testing,
+reboot/timer/Worker re-arm, and applicable upgrade/initial-custody
+variants are still separate gates or explicit NOT RUN limitations.
+This acceptance is **not production release GO**.
