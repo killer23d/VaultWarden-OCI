@@ -327,7 +327,7 @@ external origin packet-denial proof. Upgrade/clean-install variants
 that cannot be safely exercised must be explicitly marked NOT RUN,
 and no stable software release GO is implied.
 
-**P3 one-shot audit provenance (historical, not active replay tools).**
+### P3 one-shot audit provenance (historical, not active replay tools)
 The exact one-host scripted evidence is recoverable via the immutable Git
 commit URLs below. These scripts pin VM identity, release bytes, a specific
 SOPS/Box recovery object and an invocation-bound CrowdSec Worker. Some
