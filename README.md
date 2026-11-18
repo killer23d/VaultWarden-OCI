@@ -88,7 +88,7 @@ The [Recovery guide](docs/RECOVERY.md) covers root rclone setup, verification, g
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Diagnose a failed step safely |
 | [Security](docs/SECURITY.md) | Security boundaries and practices to avoid |
 
-Maintainers: [Project boundary](docs/PROJECT-BOUNDARY.md), [Decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), [Host acceptance](docs/HOST-ACCEPTANCE.md), [current ARM64 acceptance handoff](docs/ACCEPTANCE-HANDOFF.md), [chronological gate evidence](docs/PRODUCTION-ACCEPTANCE-UBUNTU2604.md), and [Test strategy](reports/TEST-STRATEGY.md).
+Maintainers: [Project boundary](docs/PROJECT-BOUNDARY.md), [Decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), [Host acceptance](docs/HOST-ACCEPTANCE.md), [historical infrastructure and host evidence](docs/HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md), and [Test strategy](reports/TEST-STRATEGY.md).
 
 ## What is managed?
 

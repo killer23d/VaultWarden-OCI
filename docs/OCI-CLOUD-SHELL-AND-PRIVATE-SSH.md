@@ -1,6 +1,6 @@
 # OCI Cloud Shell access and private-only SSH
 
-This is an **administrator setup and day-2 access guide for OCI deployments** of VaultWarden-OCI, not a script for reapplying past security changes. The appliance is also supported outside OCI. Follow [Install](INSTALL.md), [Security](SECURITY.md), and [Operations](OPERATIONS.md) for the product. For the original accepted disposable-subnet remediation, see [P8T SSH closeout](P8T-PRIVATE-SSH-REMEDIATION-CLOSEOUT.md).
+This is an **administrator setup and day-2 access guide for OCI deployments** of VaultWarden-OCI, not a script for reapplying past security changes. The appliance is also supported outside OCI. Follow [Install](INSTALL.md), [Security](SECURITY.md), and [Operations](OPERATIONS.md) for the product. For the original accepted disposable-subnet remediation, see [historical network/SSH acceptance](HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md).
 
 **Default intent:** make SSH (TCP22) reachable **only through the approved private management path**; do not expose TCP22 to `0.0.0.0/0`, `::/0`, or public administrator addresses. The application uses Cloudflare-proxied HTTPS; public OCI TCP443 is **transport only** and never proves Cloudflare-only access until the separate fail-closed host `DOCKER-USER` policy and external packet-path tests pass. No public HTTP TCP80. Preserve legitimate path-MTU ICMP and the approved egress policy. Do **not** maintain Cloudflare CIDR allowlists manually in OCI.
 
@@ -169,10 +169,17 @@ Oracle documentation: [creating security lists](https://docs.oracle.com/en-us/ia
 
 **Never** disable guest SSH to imitate an OCI rule, weaken the application firewall, run `iptables -F`, change other VCN users' default list, re-enable public SSH as a troubleshooting shortcut, repeat destructive recovery gates, expose private keys, or apply network changes without scoped approval.
 
-## 6. Historical acceptance boundary (for new administrators)
+## 6. Historical evidence versus new-site setup
 
-The **disposable** Ubuntu 26.04 ARM64 test VM completed its narrowly authorized P8T network correction on 2026-11-13: dedicated subnet list as the sole attachment; public TCP22/80 absent from effective attached rules; private-subnet TCP22 and expected public TCP443 retained; original shared default list unchanged; no NSGs; private Cloud Shell SSH PASS and independent provider GET readback PASS. The original strict P8T OCI-only Cloudflare-source TCP443 result remains **BLOCKED/2**, not retroactively PASS.
+The disposable OCI network/SSH and Cloudflare read-only acceptance
+outcomes are consolidated in [Historical infrastructure acceptance](HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md)
+with their original pre-consolidation Git sources. The historical
+strict OCI-only public HTTPS443 restriction and the later layered-origin
+transport policy were different contracts; neither automatically proves
+live product-origin packet denial.
 
-On 2026-11-17, independently pinned **P8V read-only** provider acceptance reported **16 PASS / 12 PENDING / 0 BLOCKED** for the reviewed current network. Both independently signed VNIC/subnet IPv6 object listings were explicitly empty, while null/missing IPv6 prefix fields remained PENDING; the inspected route table had no IPv6 destination routes. The stopped-host checks preserved immutable rc.12/recovery/storage continuity and passed 52 bounded source tests; its Cloudflare last-known-good policy was **stale** and its stopped Docker bridge was not instantiated. See the historical [P8V grouped evidence PR #421](https://github.com/killer23d/VaultWarden-OCI/pull/421) for the current handoff. No rc.13 installation, live canary, external packet-path proof, DNS/Worker/backup changes, or production GO resulted.
-
-**Operational outcome:** the private SSH/network procedure is accepted **for the disposable test target**. New administrators must independently repeat appropriate setup/readback for any **new** target, not replay the old one-shot on this VM. Software release acceptance for future production sites remains **HOLD** until the separately authorized clean-data and packet-path gates complete.
+New administrators must follow sections 1–5 for their **own** site:
+verify VCN/subnet attachment, effective security lists/NSGs, private
+SSH and console fallback, and then the **product-owned** fail-closed
+Docker/Caddy origin policy. Do not replay old pinned OCI-host scripts
+or treat the old recovered-data lab as a blank acceptance host.
