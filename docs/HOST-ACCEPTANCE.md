@@ -416,6 +416,40 @@ and remaining mandatory software gates are reconciled.
 
 
 
+### rc.13 P4-A authenticated browser/client/mailbox follow-up — November 18, 2026 UTC
+
+**PASS, operator-observed and explicitly scoped.** After the P4-A server
+preflight and P4-B read-only lifecycle inventory, the operator ran a
+guarded local-shell/browser witness on the same disposable
+`ubuntu@vaultwarden-oci-8` and supplied the complete terminal result
+`P4_A_CLIENT_EXIT=0 OPERATOR_OBSERVATIONS_RECORDED; RELEASE_GO=HOLD`.
+The wrapper reconfirmed the exact **52-file** installed release source
+`fd56313255c97992dc55c1475d94477597b88602` and dedicated ext4
+UUID `f4e0bd62-48e7-4745-8987-44b14013216d` before asking the
+operator to inspect a browser request with a fresh unique marker.
+
+| P4-A browser/client acceptance | Result and evidentiary boundary |
+| --- | --- |
+| Browser-to-VM8 origin witness — **PASS** | The operator requested `/api/config` with a unique one-time marker and the VM8 host's own Caddy JSON access log independently contained a matching `GET`/HTTP 200. This ties that individual request to **VM8**, beyond merely trusting the configured public hostname. No OCI/Cloudflare/DNS change was made. |
+| Restored saved item in a real client — **PASS, operator observation** | Operator attested a fresh client login/sync and that the **original** synthetic item's fields were correct; the post-backup second item was absent. Earlier independent P3-G11G SQLite integrity, count `1 user / 1 cipher`, and original cipher-record fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa` are complementary, **not** evidence that this script itself independently inspected client data. No vault plaintext, passwords, item contents, tokens or mailbox identifiers were captured. |
+| Outer + inner Admin — **PASS, operator observation** | Operator attested the Caddy Basic Auth `admin` credential, separate Vaultwarden original admin token and normal Admin navigation worked. P3-G2C independently exercised inner server-session routes earlier; this follow-up is human browser confirmation. |
+| False-429 regression — **PASS, operator observation** | Operator attested multiple normal Admin page actions within a minute with no premature HTTP 429 under configured Caddy `60/1m`; P3-G6 already exercised the bounded local-only threshold separately. Not a proof of all real Cloudflare-client/IP scenarios. |
+| Native Admin SMTP — **PASS, operator observation** | Operator reported initiating **one** Admin-interface SMTP test with disposable/test credentials, followed by successful request handling. This is not permission to send another message automatically. |
+| Independent mailbox receipt — **PASS, operator observation** | Operator separately reported that the test email **arrived in the recipient mailbox**. This is stronger than P3-G2C's HTTP 200 alone, but the host wrapper did not inspect the mailbox/provider or preserve an independent provider delivery trace. Classify as human-verified mailbox delivery, not automated transport instrumentation. |
+| Supplied `/api/config` payload — **consistent, not build-version proof** | `server.name=Vaultwarden`, advertised API compatibility `version=2026.6.0`, and service URLs aligned with the configured browser hostname. Vaultwarden 1.37.4 intentionally advertises a Bitwarden-compatible API version distinct from its pinned binary build version. The Git-blobs/source check and pinned `versions.toml` remain the release-version authority. `settings.disableUserRegistration=false` was present in the payload; independently reconcile that flag with the operator's intended `[vaultwarden].signups_allowed` policy before making an account-registration security claim. |
+
+**Limitations and change control:** The host matched the single marker
+from the browser, but the wrapper relied on human `PASS` responses for
+client fields, item absence, Admin navigation, 429 absence, SMTP action
+and inbox receipt; no browser automation, screenshots, client protocol
+trace or provider mail logs were supplied. There was no reboot, Worker
+restart, backup/restore replay, remote operation, firewall mutation,
+package update, or production DNS cutover. The original immutable rc.13
+production code remains unchanged. Release **GO stays HOLD** for
+remaining release-scope lifecycle/origin/upgrade gates.
+
+
+
 
 ## Acceptance record
 
