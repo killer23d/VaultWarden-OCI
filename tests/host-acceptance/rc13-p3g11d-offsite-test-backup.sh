@@ -173,10 +173,22 @@ try:
     w=subprocess.run(['systemctl','show','crowdsec-cloudflare-worker-bouncer.service',
                      '--property=InvocationID'],capture_output=True,text=True,check=True)
     assert w.stdout.strip()=='InvocationID='+inv
-except (OSError,KeyError,TypeError,ValueError,AssertionError,sqlite3.Error,subprocess.CalledProcessError):
+    for name in ('vaultwarden-oci-vaultwarden','vaultwarden-oci-caddy'):
+        x=subprocess.run(['docker','container','inspect',name],capture_output=True,text=True,check=True,timeout=30)
+        st=json.loads(x.stdout)[0]['State']
+        assert st['Status']=='running' and st['Paused'] is False and st['Health']['Status']=='healthy'
+    proc=subprocess.run(['/usr/local/bin/vwctl','doctor','--json'],capture_output=True,text=True,check=True,timeout=120)
+    d=json.loads(proc.stdout)
+    checks={x['id']:x['status'] for x in d['checks']}
+    assert d['overall']!='FAIL' and 'FAIL' not in checks.values()
+    for check in ('runtime.paths','recovery.local','edge.cloudflare.iptables',
+                  'crowdsec.cloudflare','crowdsec.firewall','secrets.decrypt'):
+        assert checks.get(check)=='PASS'
+except (OSError,KeyError,IndexError,TypeError,ValueError,AssertionError,sqlite3.Error,
+        subprocess.CalledProcessError,subprocess.TimeoutExpired):
     raise SystemExit('P3_G11D_EXIT=2 HOLD: post-upload read-only reconciliation failed')
 print('PASS: independent remote Age/SOPS verification recorded')
-print('PASS: populated vault fingerprint unchanged; Worker invocation and local-only policy preserved')
+print('PASS: populated fingerprint unchanged; containers/doctor/Worker healthy; local-only policy preserved')
 PY
 printf 'P3_G11D_OBJECT=%s\n' "$OBJ"
 printf '%s\n' 'P3_G11D_EXIT=0 UPLOAD_READBACK_AGE_PASS; REMOTE_RESTORE=HOLD'
