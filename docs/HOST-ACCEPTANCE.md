@@ -281,26 +281,27 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next acceptance boundary:** P3-G9C automated post-restore health and
-security checks have passed, but the restored fixture contains zero
-users and zero ciphers. Do not treat the operator's YES to the
-item-level attestation as independent proof that a populated vault item
-was restored. For a single efficient subsequent gate, seed one disposable
-test user and test item, create an encrypted recovery point, verify it,
-perform a narrowly scoped offsite ciphertext upload/readback, and require
-separate approval before an actual remote restore. Confirm the known
-user/item afterward. Never use historical Box objects as mutable test
-targets. P3-G11A now confirms root remote configuration and P3-G11B confirms
-read-only reachability to `bw-backup:bw-backup` plus nine historical
-encrypted-object candidates. Do not interpret these as proof of the
-current test-host's backup decryptability or attempt to restore them.
-Use a new unique test-only remote directory and a populated disposable
-vault before any authorized upload or remote restore. Keep backup.remote empty and both retention periods zero until
-separately approved; leave the existing Cloudflare A record unchanged.
-The CrowdSec Worker Fail Open confirmation remains invocation-bound:
-avoid reboot/invocation change without re-confirmation. Browser Admin,
-mailbox receipt, external origin denial and service/timer persistence
-remain release HOLD; no production GO is implied.
+**Next acceptance boundary:** Read-only P3-G11C confirms one synthetic
+Vaultwarden user and one saved item with secret-free cipher fingerprint
+`10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa`.
+P3-G11B confirmed the parent `bw-backup:bw-backup` and nine existing
+historical .vwrec candidates, which must remain untouched. The separate
+guarded P3-G11D script at
+`tests/host-acceptance/rc13-p3g11d-offsite-test-backup.sh`
+is staged on the acceptance branch, **not yet executed**. Only after fresh
+fixture/dedicated-disk/Worker/remote preflight and explicit operator
+`AUTHORIZE P3-G11D UPLOAD` may it create a uniquely named test-only
+Box subfolder and invoke one supported `vwctl backup --remote` override.
+The product checks readback; a separate interactive remote Age/SOPS
+verification must complete with the correct disposable offline identity.
+Actual remotely sourced destructive restore is **not authorized**; later
+compare restored user, item, and cipher fingerprint. Keep saved
+backup.remote empty, retention both zero, historical Box objects, public
+Cloudflare DNS and production-facing routes unchanged. The Worker Fail
+Open confirmation remains invocation-bound: do not reboot or restart it
+without re-confirmation. Browser Admin/mailbox receipt, real external
+origin denial, service/timer persistence and stable production GO remain
+HOLD.
 
 ## Acceptance record
 
