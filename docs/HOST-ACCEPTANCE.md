@@ -436,7 +436,7 @@ operator to inspect a browser request with a fresh unique marker.
 | False-429 regression — **PASS, operator observation** | Operator attested multiple normal Admin page actions within a minute with no premature HTTP 429 under configured Caddy `60/1m`; P3-G6 already exercised the bounded local-only threshold separately. Not a proof of all real Cloudflare-client/IP scenarios. |
 | Native Admin SMTP — **PASS, operator observation** | Operator reported initiating **one** Admin-interface SMTP test with disposable/test credentials, followed by successful request handling. This is not permission to send another message automatically. |
 | Independent mailbox receipt — **PASS, operator observation** | Operator separately reported that the test email **arrived in the recipient mailbox**. This is stronger than P3-G2C's HTTP 200 alone, but the host wrapper did not inspect the mailbox/provider or preserve an independent provider delivery trace. Classify as human-verified mailbox delivery, not automated transport instrumentation. |
-| Supplied `/api/config` payload — **consistent, not build-version proof** | `server.name=Vaultwarden`, advertised API compatibility `version=2026.6.0`, and service URLs aligned with the configured browser hostname. Vaultwarden 1.37.4 intentionally advertises a Bitwarden-compatible API version distinct from its pinned binary build version. The Git-blobs/source check and pinned `versions.toml` remain the release-version authority. `settings.disableUserRegistration=false` was present in the payload; independently reconcile that flag with the operator's intended `[vaultwarden].signups_allowed` policy before making an account-registration security claim. |
+| Supplied `/api/config` payload — **consistent, not build-version proof** | `server.name=Vaultwarden`, advertised API compatibility `version=2026.6.0`, and service URLs aligned with the configured browser hostname. Vaultwarden 1.37.4 intentionally advertises a Bitwarden-compatible API version distinct from its pinned binary build version. The Git-blobs/source check and pinned `versions.toml` remain the release-version authority. `settings.disableUserRegistration=false` was present in the payload. The subsequently verified P4-C running signup policy was **true**, with the exact read-only findings and operator-review requirement recorded below; the API's UI flag is not proof of an actual registration request. |
 
 **Limitations and change control:** The host matched the single marker
 from the browser, but the wrapper relied on human `PASS` responses for
@@ -447,6 +447,37 @@ restart, backup/restore replay, remote operation, firewall mutation,
 package update, or production DNS cutover. The original immutable rc.13
 production code remains unchanged. Release **GO stays HOLD** for
 remaining release-scope lifecycle/origin/upgrade gates.
+
+
+
+### rc.13 P4-C configured-versus-running policy — November 18, 2026 UTC
+
+**PASS for read-only version/configuration reconciliation; OPERATOR REVIEW for
+open self-registration.** On the same `vaultwarden-oci-8` and real
+host-tested source `fd56313255c97992dc55c1475d94477597b88602`,
+the corrected operator one-shot reported
+`P4_C_EXIT=0 READ_ONLY_POLICY_PASS; RELEASE_GO=HOLD` and
+`P4_C_WRAPPER_EXIT=0`. Its pinned P4-A preflight again matched **all 52
+installed immutable release files**, dedicated ext4 data device and UUID
+`f4e0bd62-48e7-4745-8987-44b14013216d`.
+
+| P4-C field | Exact accepted result / limitation |
+| --- | --- |
+| Actual binary version — **PASS** | TLS-verified PRIVATE-Caddy `GET /api/version` returned **Vaultwarden 1.37.4**, matching immutable release `versions.toml`. |
+| Public compatibility report — **PASS for observed shape** | `GET /api/config` advertised **2026.6.0**, a separate API compatibility version, with `server.name=Vaultwarden` and the expected application API host. It is **not** the installed binary's version. |
+| Runtime configuration ownership — **PASS** | The installed `config.toml` parsed through the product runtime owner and the running Vaultwarden container's `CONFIG_FILE` and `SIGNUPS_ALLOWED` matched the rendered expected values; clean-install Admin config selected `/tmp/vaultwarden-admin-config.json`, not persistent `/data/config.json`. Containers were running, unpaused and healthy. |
+| Self-registration configuration — **OPERATOR REVIEW** | **`signups_allowed=true`** was confirmed in the operator's runtime configuration **and** actual Docker environment. This disposable test instance **is configured to allow open registration**. It is **not** evidence of a source regression: the product's curated conservative default is `false`. For a future invite-only production site, the operator must explicitly select `false`, validate through the supported config editor, and separately authorize the required application restart before claiming the policy is active. No such changes are authorized or performed here. |
+| API UI flag — observed | `settings.disableUserRegistration=false`. This is an advertised UI/client setting, **not an independently tested account-registration flow**. In this VM the running server policy was positively established as `true`, separately from this UI flag. No registration request or account creation was attempted. |
+| Work scope — **NOT RUN** | No actual anonymous signup negative test, production policy rollout, application restart, reboot/Worker re-arm, timer activation, external-origin packet denial, or supported-predecessor live upgrade. Software release **GO stays HOLD**. |
+
+**Wrapper correction:** The first attempted P4-C one-shot stopped at
+`P4_A_EXIT=2 HOLD: root sudo -n execution and zero arguments required`
+because its reuse of the preflight helper left an unexpected extra
+`sys.argv` member. The corrected read-only wrapper reset `sys.argv`
+before calling that helper; no product change or privileged mutation
+occurred in either run. Unlike the initially broken P4-A heredoc, this
+first P4-C attempt **failed closed**. There is no P4-C evidence of a
+Vaultwarden implementation defect.
 
 
 
