@@ -1,6 +1,6 @@
-"""P8S-B fail-closed startup contract: exercised product policy and source invariants.
+"""Fail-closed software-origin startup contract: exercised product policy and source invariants.
 
-Source is intentionally imported from this branch, not the installed mutable VM.
+Source is imported from the current reviewed product tree, not any installed VM.
 No Docker, iptables, Cloudflare account or service operations are issued.
 """
 from __future__ import annotations
