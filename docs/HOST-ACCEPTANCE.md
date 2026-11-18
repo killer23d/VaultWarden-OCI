@@ -297,6 +297,10 @@ item must disappear when the earlier point is restored. The next independently a
 verify the exact remote ciphertext and the pre-restore delta, then run
 the supported interactive `vwctl restore --from-remote ... --start`
 with separate operator consent and an explicit final `RESTORE`.
+The guarded P3-G11F handoff and independent read-only P3-G11G postrestore
+script are staged on this acceptance branch; **neither has been run**.
+G11F retries the exact pinned G11E preflight immediately before any
+live restore and fails closed if the product restore is cancelled.
 Post-restore verify SQLite integrity, the original one-user/one-cipher
 fingerprint, absence of the second cipher, operational SOPS, healthy
 Caddy/Vaultwarden, local verified TLS/Admin and unchanged CrowdSec Worker.
