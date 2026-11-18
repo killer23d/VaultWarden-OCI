@@ -305,14 +305,47 @@ except (ValueError, KeyError, TypeError):
 if doctor['overall'] == 'FAIL' or any(v == 'FAIL' for v in statuses.values()):
     hold('installed doctor reported FAIL')
 for name in ('recovery.local', 'runtime.paths',
-             'crowdsec.cloudflare', 'edge.cloudflare.iptables'):
+             'crowdsec.cloudflare', 'edge.cloudflare.iptables',
+             'notification.catalog'):
     if statuses.get(name) != 'PASS':
         hold('required doctor check not PASS: ' + name)
-other_warns = sorted(k for k,v in statuses.items() if v in ('WARN', 'SKIP') and k not in ('recovery.offsite', 'recovery.rclone'))
+
+# Operational notifications are optional and independent of restore safety.
+# Only the deliberately unconfigured state permits the three notification SKIPs.
+notification_allowed = {'notification.last_delivery'}
+if current.get('notifications') is None:
+    optional_checks = (
+        'notification.provider',
+        'notification.api_secret',
+        'notification.smtp_fallback',
+    )
+    for name in optional_checks:
+        if statuses.get(name) != 'SKIP':
+            hold('unconfigured optional notification check has unexpected state: ' + name)
+    notification_allowed.update(optional_checks)
+    print('INFO: optional operational notifications are NOT CONFIGURED; three notification SKIPs are not PASS')
+else:
+    for name in ('notification.provider', 'notification.api_secret',
+                 'notification.smtp_fallback'):
+        if statuses.get(name) != 'PASS':
+            hold('configured notification check is not PASS: ' + name)
+    print('INFO: configured operational notification checks are PASS')
+
+delivery = statuses.get('notification.last_delivery')
+if delivery not in ('PASS', 'WARN', 'SKIP'):
+    hold('notification delivery history check missing/invalid')
+if delivery != 'PASS':
+    print('INFO: notification.last_delivery=' + delivery +
+          '; delivery evidence remains outstanding, not a full-restore gate')
+other_warns = sorted(
+    k for k, v in statuses.items()
+    if v in ('WARN', 'SKIP')
+    and k not in ({'recovery.offsite', 'recovery.rclone'} | notification_allowed)
+)
 if other_warns:
     hold('unexpected doctor WARN/SKIP check(s): ' + ','.join(other_warns))
-passed('doctor has zero FAIL; required runtime/origin/CrowdSec/recovery.local PASS; storage independently verified')
-print('INFO: expected local-only offsite/rclone doctor warnings remain non-production evidence')
+passed('doctor zero FAIL; required runtime/origin/CrowdSec/recovery.local PASS; storage independently verified')
+print('INFO: offsite/rclone WARN/SKIP remain open as separate P3-G11 acceptance evidence')
 
 # Operator claims are required but are ATTESTATIONS, not independently observed PASS.
 print('INFO: answers below do NOT authorize P3-G9B or any restore')
