@@ -66,8 +66,10 @@ git clone --quiet --depth 1 --branch "$REF" \
     fail "reviewed source clone unavailable"
 cd "$WORK"
 [ "$(git rev-parse HEAD)" = "$PIN" ] || fail "source changed"
-[ -z "$(git status --porcelain --untracked-files=all)" ] ||
-    fail "source checkout not clean"
+if ! status="$(git --no-optional-locks status --porcelain --untracked-files=all 2>/dev/null)"; then
+    fail "source checkout Git status failed; verify index ownership before continuing"
+fi
+[ -z "$status" ] || fail "source checkout not clean"
 echo "=== OFFLINE SOURCE PREFLIGHT UNIT TESTS ==="
 python3 -B -m unittest discover -s tests \
     -p 'test_production_new_host_preflight.py' -v ||
@@ -107,6 +109,52 @@ Box/recovered data. Record each mandatory gate PASS/FAIL/NOT RUN in the
 accepted record below before considering a stable release tag.
 This is a **software release** gate; OCI site setup belongs separately
 to [new-site OCI administration](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md).
+
+### Real P1 dry-run evidence and Git-index safety — November 18, 2026
+
+The operator ran P0 successfully on a new, separate Ubuntu 26.04 ARM64
+test VM. Source and OS checks passed, with one 50 GiB blank non-boot disk
+candidate and eight source-level negative-path tests. The subsequent
+P1 dry run of the **supported installer** reported `P1_EXIT=0`
+and confirmed its no-format/no-install boundary. The operator supplied
+a new *public* offline Age recipient, but the offline private-key custody
+and the disk's actual provider attachment are **not yet approved**.
+rc.13 has not been installed, started or tested with real external traffic.
+
+During the P1 wrapper, the unprivileged checkout reported
+`fatal: .git/index: index file open failed: Permission denied`.
+The original root P0 script had executed `git status` as root in the
+operator checkout; Git may refresh/write the index, leaving it
+root-owned. The P1 shell's `[ -z "$(git status ...)" ]` pattern
+incorrectly accepted the resulting empty stdout despite Git's
+nonzero exit code. **Do not treat that one "clean checkout" PASS as
+independent proof of a successful Git status check.**
+
+The corrected P0 source now runs its exact source-pin and clean-tree
+proof as the named unprivileged `SUDO_USER`, using
+`git --no-optional-locks`. A failed Git status is BLOCKED instead of
+silently considered clean. For an existing checkout, inspect the
+`.git/index` owner before resuming; only a verified root-owned
+*regular* index inside the expected operator-owned repository should
+have its ownership repaired to the operator. Never use `chown -R`,
+delete the index, disable Git's safety checks, or replay P0 on the
+recovered-data reference VM.
+
+Any Git wrapper using command substitution must check its exit status
+separately before examining stdout, for example:
+
+```bash
+if ! clean_status="$(git --no-optional-locks status --porcelain --untracked-files=all 2>/dev/null)"; then
+    echo "BLOCKED: Git status could not read checkout" >&2
+    exit 2
+fi
+[ -z "$clean_status" ] || { echo "BLOCKED: checkout not clean" >&2; exit 2; }
+```
+
+**Boundary:** P1's successful dry run only proves installer input/host
+acceptance with no changes. It does **not** approve formatting the
+50 GiB candidate, validate independent offline-key custody, prove
+Cloudflare/SMTP/backup integration, or grant a future production GO.
 
 ## Acceptance record
 

@@ -62,13 +62,24 @@ class FreshHostP0Tests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root = Path(temp)
             (root / '.git').mkdir()
-            with mock.patch.object(module, 'SOURCE', root):
+            with mock.patch.object(module, 'SOURCE', root), \
+                    mock.patch.dict(module.os.environ, {'SUDO_USER': 'ubuntu'}):
                 with mock.patch.object(module, 'read_command', side_effect=[
                         (0, pinned + '\n'), (0, '')]) as run:
                     self.assertTrue(module.reviewed_source_pin(pinned))
                     self.assertEqual(run.call_count, 2)
+                    command_prefix = ['runuser', '-u', 'ubuntu', '--', 'git',
+                                      '--no-optional-locks', '-C', str(root)]
+                    self.assertEqual(run.call_args_list[0].args[0],
+                                     [*command_prefix, 'rev-parse', 'HEAD'])
+                    self.assertEqual(run.call_args_list[1].args[0],
+                                     [*command_prefix, 'status', '--porcelain',
+                                      '--untracked-files=all'])
                 with mock.patch.object(module, 'read_command', side_effect=[
                         (0, pinned + '\n'), (0, '?? other\n')]):
+                    self.assertFalse(module.reviewed_source_pin(pinned))
+                with mock.patch.object(module, 'read_command', side_effect=[
+                        (0, pinned + '\n'), (128, '')]):
                     self.assertFalse(module.reviewed_source_pin(pinned))
                 with mock.patch.object(module, 'read_command', return_value=(0, 'c' * 40 + '\n')):
                     self.assertFalse(module.reviewed_source_pin(pinned))
@@ -76,6 +87,15 @@ class FreshHostP0Tests(unittest.TestCase):
                 (root / '.git').rmdir()
                 (root / '.git').symlink_to(root)
                 self.assertFalse(module.reviewed_source_pin(pinned))
+
+    def test_root_invocation_without_real_operator_refuses_git_checkout(self):
+        pinned = 'c' * 40
+        with mock.patch.object(module, 'read_command') as run:
+            with mock.patch.dict(module.os.environ, {'SUDO_USER': 'root'}):
+                self.assertFalse(module.reviewed_source_pin(pinned))
+            with mock.patch.dict(module.os.environ, {'SUDO_USER': ''}):
+                self.assertFalse(module.reviewed_source_pin(pinned))
+            run.assert_not_called()
 
     def test_fresh_target_only_blank_signature_can_qualify(self):
         self.assertEqual(module.disk_classification('', False, set()), 'BLANK_REVIEW')
