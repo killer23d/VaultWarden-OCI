@@ -193,6 +193,29 @@ Use the failing stable check ID to choose the subsystem. Common groups are:
 
 A successful command in another subsystem does not cancel a doctor `FAIL`. Correct the named owner and rerun doctor.
 
+**Prestart `runtime.paths=FAIL` with CrowdSec running:** A newly
+installed, still-stopped appliance can have the CrowdSec-managed
+`vaultwarden/log/vaultwarden.log` acquisition file but no initialized
+application/Caddy data, rendered Compose/Caddy files, or volatile
+secrets yet. This is the observed cause of "runtime paths are only
+partially materialized" during rc.13 first-start acceptance. The
+diagnostic does **not** mean the running application is unhealthy
+before it has been started; however, the check is correctly
+fail-closed for that actual partial state. Verify the correct
+dedicated mount, config/secrets and CrowdSec/Cloudflare protections,
+then use the supported `sudo vwctl start` once. It should
+materialize the remaining paths; `runtime.paths` must report PASS
+afterward. Do not patch the doctor, `chmod` around failed paths,
+create substitute directories manually, or classify a continuing
+post-start FAIL as harmless.
+
+**Recovery/automation warnings:** After the first verified
+`vwctl backup`, `recovery.local` should be PASS. With
+no configured cloud destination, `recovery.offsite` and
+`recovery.rclone` warnings can remain, and scheduled timers may
+still be inactive by design. A doctor WARN alone is not production
+authorization; document the exact check IDs and remaining controls.
+
 ## A systemd unit or timer failed
 
 **Diagnose:**

@@ -113,7 +113,7 @@ against the actual block-volume identity. Private JSON stays
 mode 0600 under the invoking operator's `vwoci-acceptance`; share
 only sanitized summary/output and the exit label.
 
-**Next software checks after a clean P0, with separate explicit approval:**
+**P0 handoff plan recorded before P2 (subsequently performed in part):**
 use the existing [Install](INSTALL.md) workflow with a distinct
 test-only hostname, a new offline Age identity, approved blank data disk
 and test-only credentials. First the supported `setup.sh install
@@ -135,7 +135,7 @@ P1 dry run of the **supported installer** reported `P1_EXIT=0`
 and confirmed its no-format/no-install boundary. The operator supplied
 a new *public* offline Age recipient, but the offline private-key custody
 and the disk's actual provider attachment are **not yet approved**.
-rc.13 has not been installed, started or tested with real external traffic.
+At the P1 checkpoint, rc.13 had not yet been installed, started or tested with real external traffic. The later P2/P3 results below are separate evidence against a newer pinned release candidate.
 
 During the P1 wrapper, the unprivileged checkout reported
 `fatal: .git/index: index file open failed: Permission denied`.
@@ -168,9 +168,117 @@ fi
 ```
 
 **Boundary:** P1's successful dry run only proves installer input/host
-acceptance with no changes. It does **not** approve formatting the
+acceptance with no changes. Standing alone, it did **not** approve formatting the
 50 GiB candidate, validate independent offline-key custody, prove
 Cloudflare/SMTP/backup integration, or grant a future production GO.
+P2 was later separately approved and performed on this disposable host;
+that approval does not retroactively expand P1.
+
+### Current rc.13 P2/P3 software acceptance evidence — November 18, 2026 UTC
+
+**Interim source-release record, not a production GO.** This is the next
+operator-reported evidence checkpoint after the immutable P0/P1 and
+historical-infrastructure records above. The disposable new host is
+`vaultwarden-oci-8`, Ubuntu 26.04 ARM64 with native Python 3.14.
+The executed P2/P3 source was the reviewed candidate commit,
+tracked on `acceptance/p2-rc13-blank-install-20261118` and pinned at
+`fd56313255c97992dc55c1475d94477597b88602`
+(`0.1.0-rc.13`, after PR #432). Earlier P0/P1 evidence was pinned to a
+*different* source commit; it is not silently rebadged as a P0/P1 run
+against this exact P2 candidate.
+
+| Gate / status | Observed operator evidence | Limit or pending proof |
+| --- | --- | --- |
+| P2 first install — **PASS, with wrapper exception** | Supported `sudo ./setup.sh install --auto --confirm-format --data-device /dev/oracleoci/oraclevdb --offline-recipient <test public recipient>` succeeded; release, copied source bytes, config, root-only state, storage and SOPS recipients/decryption passed after installation | One external shell-wrapper preformat Python gate had an invalid heredoc/guard and did **not** run; do not claim that particular preformat check passed |
+| P2 independent post-install storage reconciliation — **PASS** | Disposable 50 GiB `/dev/oracleoci/oraclevdb` resolves to `/dev/sda`; real block disk, stable by-id alias, disjoint boot/root lineage, ext4, mounted at `/var/lib/vaultwarden-oci` on a different filesystem from `/`; UUID, fstab, identity/marker and Docker mount dependency match; immutable rc.13 release and 0600 root-only files passed | Proves the installed boundary and a separate data disk, not retroactive execution of the skipped preformat wrapper gate |
+| P2 explicit off-host recipient — **PASS for test-only configuration** | Preserved supplied Age *public* recipient alongside the separate on-host operational recipient; SOPS decrypts with operational identity | The disposable offline **private** identity appeared in an operator terminal transcript; it is **not** secure production custody evidence. Never commit or publish the identity, secret values or private logs |
+| P3 config and SMTP — **PASS for local configuration and server acceptance** | Supported `vwctl config edit` and `secrets edit` committed; `config validate` and `secrets validate` passed; initial `smtp.invalid` placeholder was corrected; IPv4 DNS resolved; direct authenticated TLS SMTP reported `category=accepted` | SMTP *mailbox receipt* and browser Admin SMTP test were not independently verified; no public application start |
+| P3 Cloudflare DNS dry run — **PASS, publication HOLD** | Existing Proxied A record and token/API access verified in read-only `vwctl dns update --dry-run` | Existing A-record origin did **not** match this disposable host. **No DNS write/cutover** was performed |
+| P3 local origin/CrowdSec — **PASS** | `vwctl edge refresh` and `vwctl crowdsec setup` completed; `edge.cloudflare.cidrs`, `edge.cloudflare.iptables`, `crowdsec.engine`, `crowdsec.hub` and `crowdsec.firewall` all reported `PASS` | Doctor checks verify configured local policy, not an independently witnessed non-Cloudflare packet denial via Docker NAT/FORWARD |
+| P3 Worker Route and Fail Open — **PASS for invocation-bound security** | Pre-start Cloudflare API inventory found zero matching routes/custom domains; `vwctl crowdsec remediation-start` succeeded with boot-disabled Worker; operator set newly created routes to Fail Open; `confirm-fail-open` succeeded; 0600 confirmation bound to the unchanged systemd invocation; all **six** origin/CrowdSec doctor checks reported `PASS` | Worker Routes now exist and can affect the pre-existing DNS origin. Fail Open is operator-attested; no synthetic request or current independent Cloudflare read-back of the route failure mode is claimed |
+| P3-F initial overall doctor — **FAIL before first start, subsequently diagnosed** | Final prestart `doctor --json` reported all six security gates `PASS`, but `overall=FAIL` with `runtime.paths`; the appliance remained stopped | P3-G0 proved this was a genuinely partial state created by CrowdSec's required log acquisition; the prestart FAIL is preserved, not relabelled as PASS |
+| P3-G0/G0R diagnosis — **PASS for investigation, runtime still HOLD before start** | Eight focused source regression tests passed on the host. Root-owned base/run/transient/lock 0700/0600 passed, CrowdSec-created `vaultwarden/log/vaultwarden.log` was the sole application subtree precreated (65532:65532); Caddy/data/volatile directories and rendered files absent. Worker active and boot-disabled, invocation `a80be9e43af84a24b505b9e4b127abeb` unchanged; source inspection confirmed CrowdSec setup creates that log and supported lifecycle owns the remaining materialization | Exact `runtime.paths=FAIL` reason: `runtime paths are only partially materialized`. First diagnostic wrapper misclassified `systemctl is-enabled` nonzero/disabled as unavailable; corrected `systemctl show UnitFileState=disabled` resolved that wrapper error. No hot-patch or early doctor PASS |
+| P3-G1 supported start — **PASS** | Installed `0.1.0-rc.13` `vwctl start` exit 0 with same dedicated ext4/UUID ownership. Vaultwarden and custom Caddy running/healthy on exact ARM64 image pins; required Caddy modules and derived Argon2id Admin PHC/Basic Auth hashes verified; `runtime.paths=PASS`, six origin/CrowdSec checks PASS, Worker invocation unchanged; `status.runtime=running`; doctor `overall=WARN`, **zero FAIL** | Warnings `recovery.local`, `recovery.offsite`, `recovery.rclone` remain; automation target/timers deliberately not activated and status reports automation FAIL. No DNS update, public cutover, backup, reboot, or external traffic test |
+| P3-G2A local TLS/application — **PASS for local-only checks** | Using real Caddy loopback with hostname/SNI and verified certificate, Web Vault `GET /` returned HTTP 200, API config HTTP 200, unauthenticated `/admin` HTTP 401; Caddy trusted-proxy/Admin outer Basic Auth and per-client rate-limit configuration recognized; doctor WARN with recovery-only warnings | No authenticated browser Admin login/SMTP test, true Cloudflare client-IP confirmation, actual threshold/429, independently measured direct-origin denial, or public HTTPS cutover; DNS still points to another origin |
+| P3-G2B live Admin outer gate and untrusted IP — **PASS for local-only checks** | Authenticated in-container Caddy HTTPS with SOPS-held Basic Auth supplied via curl stdin: `/admin/` missing and wrong credentials returned HTTP 401; correct and repeated correct credentials returned HTTP 200, all with verified TLS. Fake `CF-Connecting-IP` and `X-Forwarded-For` from untrusted loopback returned API HTTP 200 but Caddy JSON access log retained the real remote/client identity; previous Worker invocation `a80be9e43af84a24b505b9e4b127abeb` preserved, doctor `WARN` with no new FAIL | This proves the actual outer Caddy gate and local untrusted-header handling. Inner Vaultwarden Admin token login, browser navigation/SMTP delivery, actual 429 threshold, independently verified Cloudflare client identity or public-origin denial are NOT RUN. Do not treat a localhost request as a Cloudflare traffic test |
+| P3-G2C inner Admin and application SMTP route — **PASS for in-container HTTPS, mailbox receipt unverified** | Using the installed release and existing SOPS custody, POST `/admin/` with the original recoverable Vaultwarden Admin token returned HTTP 200 over verified TLS; the `VW_ADMIN` session cookie satisfied Secure/HttpOnly/SameSite Strict checks. Authenticated `/admin/users` returned HTTP 200 and a JSON list; `/admin/` and `/admin/users/overview` both returned HTTP 200; one POST `/admin/test/smtp` returned HTTP 200 over verified TLS. Subsequent doctor remained WARN/no FAIL and CrowdSec Worker kept its original invocation | Proves accepted inner application routes with a genuine session, but **HTTP 200 is not independent mailbox-delivery proof**; recipient receipt not confirmed. Browser/UI rendering and the native browser SMTP workflow NOT RUN; actual 429 threshold and independent Cloudflare/public origin traffic NOT RUN. One test message was submitted, do not repeat automatically |
+| P3-G3 first local encrypted recovery — **PASS, offline decryption still NOT RUN** | On the disposable ARM64 host, installed `vwctl backup` returned 0; LOCAL-ONLY and both retention paths disabled. Created `/var/lib/vaultwarden-oci/backups/recovery-20261118T202543Z-e3ef03c7.vwrec` (348,440 bytes), SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`, Age-encrypted envelope, owned root mode 0600; hash and size independently matched recovery state. `recovery.local=PASS`, overall doctor WARN with zero FAIL, both application containers resumed healthy/unpaused and CrowdSec Worker invocation preserved | Local encryption/envelope/hash and supported backup health are verified, **not** the ability of the separately held offline Age private identity to decrypt and verify SOPS/manifest; no offsite upload, restore, prune, or automated timer. No claim that this test key demonstrates secure production custody |
+| P3-G4 independent offline-key verification — **PASS on exact P3-G3 artifact** | Using the supported interactive `vwctl recovery verify --file` with the matching test offline Age private identity provided by hidden paste, the application returned `PASS verified recovery` for the exact file created at `2026-11-18T20:25:43Z`, size 348,440 bytes and SHA-256 `47f775b7e2f534e53cc4c6c5056df786fe0bbb0e316f5fa907b1b1c879546a44`. Cryptographic Age decryption, manifest/member checksums and offline SOPS custody completed. Wrapper confirmed a **new** artifact-bound `verified_objects` record; doctor remained WARN with zero FAIL and Worker/containers remained healthy and unchanged | Validated decryptability with this **disposable test identity**, not secure production custody; earlier operator test transcript exposed this private identity. No restore, offsite publication, external-cloud readback, browser SMTP/mailbox receipt or public ingress verification was performed |
+| P3-G5 and G5R restore refusal/preflight/cancellation — **PASS after external-wrapper TTY correction** | First wrapper stopped safely before tests due to incorrect `stdin` TTY assumption in a heredoc. Corrected `P3-G5R` preflight verified original rc.13 source, dedicated storage, unchanged 348,440-byte P3-G3 artifact SHA-256, healthy runtime and Worker invocation. Non-TTY `restore --file` without `--identity` refused; non-TTY restore with dummy identity but no `--confirm RESTORE` refused. Matching Age test identity provided by hidden interactive input passed exact `verify_local(..., record=False)` cryptographic preflight; real `_restore_approved` helper with forced `CANCEL` refused authorization. Recovery metadata, config, encrypted SOPS bytes remained unchanged; Caddy/Vaultwarden healthy and Worker preserved. Final `P3_G5R_EXIT=0 PASS` | This is a real preflight of the backup plus exercised consent logic in-process, **not** a destructive restore or the CLI's complete interactive restore transaction. No service stop/promotion, offsite transfer, DNS mutation, or reboot. Same test-only offline identity custody limitation applies |
+| P3-G6 real Admin rate-limit threshold — **PASS for internal loopback client** | The installed Caddy module had the validated Admin limit `60 events / 1m` keyed on `{client_ip}`. Sixty consecutive authenticated Admin `GET /admin/` requests returned HTTP 200; the bounded burst observed HTTP 429 on the next request. The unrelated unauthenticated `/api/config` endpoint continued to return HTTP 200. Live post-test doctor, both healthy/unpaused application containers and unchanged CrowdSec Worker invocation all passed; `P3_G6_EXIT=0 PASS` | Demonstrates the active Caddy Admin outer rate-limit boundary and separation from a non-Admin endpoint for the internal loopback client, **not** a real Cloudflare client. Brief internal client throttling was expected; no DNS/Worker/config/service changes. Browser-rendered UI/SMTP receipt and external origin validation are NOT RUN |
+| P3-G7 negative Age recovery paths — **PASS for wrong key and tamper** | The actual installed P3-G3 backup was proven unchanged and the runtime healthy. A newly generated synthetic Age private key (not the configured recipient) was rejected by `verify_local(..., record=False)` with an Age decryption failure. Using the matching offline test identity from secure hidden paste, a separate temporary ciphertext copy with one trailing byte changed also failed at Age decryption. Original `.vwrec` checksum and persistent config, SOPS and recovery state were unchanged; both application containers and CrowdSec Worker remained healthy with doctor showing no FAIL. Final `P3_G7_EXIT=0 PASS` | Demonstrates authenticated ciphertext failure closed before live mutation. No restore, offsite transport, public DNS change or Worker restart; tmpfs negative-test files were cleaned up. This does not substitute for an actual successful restore or cloud roundtrip |
+| P3-G8 actual restore engine into private scratch — **PASS for isolated promotion and new operational custody** | On pinned `0.1.0-rc.13` ARM64 host, the exact P3-G3 archive SHA-256 and dedicated storage were checked before `recovery.restore_recovery(artifact, identity, paths=isolated_paths, runner=isolated_runner, start=False)`. Matching offline test identity was supplied by hidden prompt; real Age/SOPS cryptography, staged application/Caddy state, and promoted to isolated `/run/vaultwarden-oci/p3g8-*` paths. The engine generated a distinct operational Age identity and rotated/validated SOPS recipients; restored SQLite `PRAGMA integrity_check` returned `ok` and Caddy data/config were present. Docker version/inspect were intercepted only in this sandbox, with no Docker stop/remove call. Private scratch was cleaned; original archive and live config, SOPS, operational Age key and recovery record remained unchanged, containers healthy and CrowdSec Worker invocation preserved; `P3_G8_EXIT=0 PASS` | Proves real recovery-engine implementation on the real archive **with redirected temporary paths**, not complete live host restore or production boot. Docker lifecycle was intentionally simulated for sandbox isolation; actual stopped-container promotion/start, offsite retrieval and public origin cutover are NOT RUN |
+
+
+**P3 phase closeout / production software acceptance boundary:** Against the
+*installed* immutable source `fd56313255c97992dc55c1475d94477597b88602`,
+P3-G1 through P3-G8 have operator-reported PASS evidence for supported
+first start and health, verified local TLS, Caddy outer and Vaultwarden
+inner Admin authentication, accepted Admin SMTP HTTP response, safe
+untrusted-IP handling, the exact 60/1m Admin threshold, consistent local
+encrypted backup, independent offline-key decryption and corruption
+rejection, fail-closed restore consent, and **real recovery promotion/
+operational SOPS rekey into isolated temporary paths**. Latest checks
+report doctor WARN with no FAIL, healthy/unpaused app containers,
+`recovery.local=PASS`, and unchanged invocation-bound CrowdSec Worker.
+This does **not** constitute a released production GO.
+
+Nine additional permanent, fixture-only regression tests in
+`tests/test_runtime_prestart_paths.py` were introduced by PR #434 and
+merged into the integration branch as commit
+`03c4cd6a375dc944acc36e2b11ee0aed064fa204` after these host
+runs. They record the CrowdSec log-only prestart cause and preserve
+fail-closed behavior without a product implementation change. **Do not
+silently attribute live-host results to this later merge commit**.
+
+The remaining independently evidenced requirements are a deliberately
+authorized **full** restore on disposable host data with real container
+stop/start, controlled offsite ciphertext roundtrip and decryption,
+service/timer/reboot persistence with Worker re-arm, a genuine browser
+Admin/client and mailbox delivery test, and external non-Cloudflare
+origin denial. Existing production-facing DNS remains unchanged;
+remote offsite publishing and automation were intentionally disabled.
+No new historical provider/VM inventory files were added.
+
+
+**Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
+P2 shell command placed an error handler immediately after a Python
+heredoc redirection, causing an `IndentationError` in the supposed
+preformat gate while the shell continued to the real installer. The
+installer itself reported success, and the independent read-only
+post-install disk/boot-identity reconciliation passed. This was a
+**test-wrapper defect**, not evidence of a product installer defect.
+Future acceptance wrappers must use a correctly closed heredoc with
+explicit checked status and an immediate stop before any destructive
+command; verify a script's actual gate outcome, not only its final exit
+code. No additional permanent VM/provider test infrastructure is
+introduced by this record.
+
+**Not run / release HOLD:** fresh-install variants requiring separately
+disposable blank state (interactive generated-custody, headless custody
+rejection, failed bootstrap, root-only rejection), authenticated browser
+Admin session/navigation and Admin-originated SMTP, independent mailbox
+receipt, actual real-client Cloudflare identity/rate-limit behavior and
+public origin packet denial, DNS cutover, full systemd/timer/reboot
+persistence, offsite test-only ciphertext/readback and complete guided
+restore (local backup creation and offline decryption now PASS), and
+supported-predecessor upgrade/rollback. The historical
+recovered-data reference host and its Box objects are **not** used for
+this rehearsal. Stable production software release approval is
+**NOT RUN**.
+
+**Next acceptance boundary:** The isolated software recovery promotion/rekey
+gate P3-G8 has passed. Complete **one separately approved destructive**
+same-host restore using the disposable dedicated ARM64 data device and
+verify restored service behavior, preserving the verified encrypted
+archive and independently held test Age identity first. The current
+Cloudflare Worker has an invocation-bound Fail Open confirmation; avoid
+reboot or changing Worker invocation without re-confirming Fail Open.
+Do not alter the existing proxied Cloudflare A record to test recovery.
+An actual destructive restore is **NOT RUN**, not implicitly authorized.
+Separately complete browser-rendered Admin/SMTP, independent mailbox
+receipt, offsite ciphertext roundtrip, real public origin denial, and
+service/timer persistence. Avoid redundant network/provider inventories.
 
 ## Acceptance record
 

@@ -167,6 +167,18 @@ sudo vwctl crowdsec confirm-fail-open
 
 Do not skip that confirmation, even if other security services show healthy status.
 
+**First-start diagnostic boundary:** CrowdSec setup can create the required
+Vaultwarden acquisition-log directory *before* the app has ever started.
+At that specific stopped/prestart checkpoint, `doctor --json` may report
+`runtime.paths=FAIL` with "runtime paths are only partially materialized".
+That is a genuine partial state; do not suppress or relabel the FAIL, and
+do not manually create application directories to make the check pass.
+After storage, secrets, origin filtering and the current Worker Route
+Fail Open confirmation are proven, use the **supported** `sudo vwctl start`
+to materialize the remaining paths, then re-run doctor. If
+`runtime.paths` still fails **after start**, stop and diagnose the
+specific owner rather than continuing to DNS publication.
+
 ## 7. Start, update DNS, and create the first backup
 
 After all checks above pass:
@@ -182,6 +194,18 @@ sudo vwctl status
 `start` brings up the app and its protected runtime. **Only after start**, `dns update` writes the server's public IPv4 to the **existing** proxied A record if different; Cloudflare is read back to verify it. The first `backup` creates and verifies an encrypted `.vwrec` application recovery point, which is **not** your credential recovery-kit ZIP.
 
 `doctor --json` is the post-start acceptance check. **Any `FAIL` must be fixed before continuing.** A `WARN` for unconfigured offsite/rclone recovery is expected until offsite backups are configured.
+
+**Acceptance host or existing live hostname:** The command sequence above
+describes an **authorized production cutover**; it is not permission to
+repoint an existing proxied A record while validating a second origin.
+On an isolated test host, run `sudo vwctl start`, `sudo vwctl backup`
+and `sudo vwctl doctor --json` *without* `sudo vwctl dns update`.
+Test TLS locally using the configured hostname/SNI and explicit
+loopback resolution, then publish DNS only in a separately approved
+cutover. A local verified backup typically moves `recovery.local`
+from WARN to PASS; optional `recovery.offsite` and `recovery.rclone`
+can remain WARN if remote publication is deliberately disabled.
+Keep automation disabled until its own acceptance gate is complete.
 
 **Only after** the first backup succeeds and doctor has no `FAIL`, enable persistent schedules:
 
