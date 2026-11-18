@@ -63,6 +63,29 @@ def run(argv: list[str], *, timeout: int = 35) -> str:
     return result.stdout
 
 
+def vwctl_json(command: str, *, timeout: int) -> tuple[int, dict]:
+    """Read structured product status without hiding its documented exit semantics."""
+    try:
+        result = subprocess.run(
+            ["/usr/local/bin/vwctl", command, "--json"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=timeout,
+            cwd="/", check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        hold("read-only vwctl " + command + " unavailable")
+    if result.returncode not in (0, 1):
+        hold("vwctl " + command + " unexpected exit status "
+             + str(result.returncode))
+    try:
+        data = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        hold("vwctl " + command + " returned invalid JSON")
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        hold("vwctl " + command + " returned unknown JSON schema")
+    return result.returncode, data
+
+
 def unit(name: str) -> dict[str, str]:
     fields = "LoadState,ActiveState,SubState,UnitFileState,InvocationID"
     output = run(["systemctl", "show", name, "--no-pager", "--property=" + fields])
@@ -256,22 +279,50 @@ def verify_runtime() -> str:
         if not healthy:
             hold("installed application container not healthy: " + name)
         containers[name] = info
+    doctor_rc, doctor = vwctl_json("doctor", timeout=90)
+    status_rc, status = vwctl_json("status", timeout=60)
     try:
-        doctor = json.loads(run(["/usr/local/bin/vwctl", "doctor", "--json"], timeout=90))
-        checks = {entry["id"]: entry["status"] for entry in doctor["checks"]}
-        status = json.loads(run(["/usr/local/bin/vwctl", "status", "--json"], timeout=60))
-        good = (doctor.get("overall") in ("PASS", "WARN")
-                and "FAIL" not in checks.values()
-                and status["runtime"]["overall"] == "running")
-    except (TypeError, ValueError, KeyError):
-        hold("doctor/status output invalid (details withheld)")
+        entries = doctor["checks"]
+        if not isinstance(entries, list) or not entries:
+            hold("doctor checks missing")
+        checks = {entry["id"]: entry["status"] for entry in entries}
+        doctor_overall = doctor["overall"]
+        status_doctor = status["doctor"]["overall"]
+        automation = status["automation"]["overall"]
+        runtime_state = status["runtime"]["overall"]
+        storage_state = status["storage"]["state"]
+        storage_uuid = status["storage"]["uuid"]
+    except (TypeError, KeyError, ValueError):
+        hold("doctor/status JSON fields invalid (details withheld)")
+    if (len(checks) != len(entries)
+            or any(v not in ("PASS", "WARN", "FAIL", "SKIP")
+                   for v in checks.values())):
+        hold("doctor check list malformed")
+    if (doctor_overall not in ("PASS", "WARN")
+            or "FAIL" in checks.values()
+            or doctor_rc != 0):
+        hold("doctor reports FAIL or invalid exit/result combination")
+    # The installed status CLI returns 1 when automation is disabled, even
+    # while its runtime remains healthy. Preserve that truth rather than
+    # interpreting an intentional idle automation configuration as an outage.
+    if status_doctor not in ("PASS", "WARN") or automation not in ("PASS", "FAIL"):
+        hold("status doctor/automation state invalid")
+    expected_status_rc = int(status_doctor == "FAIL" or automation == "FAIL")
+    if status_rc != expected_status_rc:
+        hold("vwctl status exit does not match structured status JSON")
+    if (runtime_state != "running" or storage_state not in ("ok", "warning")
+            or storage_uuid != EXPECTED_UUID or automation != "FAIL"):
+        hold("unexpected runtime, storage or intentional idle-automation state")
     mandatory = ("runtime.paths", "secrets.custody", "secrets.decrypt",
                  "edge.admin.protection", "edge.cloudflare.iptables",
                  "crowdsec.engine", "crowdsec.firewall", "crowdsec.cloudflare")
-    if not good or any(checks.get(k) != "PASS" for k in mandatory):
+    if any(checks.get(k) != "PASS" for k in mandatory):
         hold("runtime, secrets or security doctor evidence not PASS")
     passed("healthy/unpaused Caddy and Vaultwarden; doctor no FAIL; "
            "security checks PASS; prior Worker invocation unchanged")
+    passed(f"vwctl doctor rc={doctor_rc}, overall={doctor_overall}; "
+           f"vwctl status rc={status_rc}, runtime=running, "
+           f"automation={automation} (intentionally idle)")
     passed("all scheduled units idle; Worker active but boot-disabled")
     networks = (containers["vaultwarden-oci-caddy"].get("NetworkSettings") or {}).get("Networks") or {}
     ips = []
