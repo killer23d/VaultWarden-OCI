@@ -51,16 +51,25 @@ def valid_candidate_args(version: str, sha: str | None, purpose: str) -> bool:
 
 
 def reviewed_source_pin(sha: str) -> bool:
-    """Read-only exact HEAD/clean checkout proof, including sudo ownership."""
+    """Check the operator-owned checkout without allowing root Git index writes.
+
+    An ordinary root `git status` may refresh an index in the unprivileged
+    clone, leaving .git/index root-owned even in a nominally read-only P0.
+    Execute both Git reads as SUDO_USER, with optional locks disabled.
+    """
+    operator = os.environ.get('SUDO_USER', '')
     if (not COMMIT_RE.fullmatch(sha)
+            or not operator or operator == 'root'
             or (SOURCE / '.git').is_symlink()
             or not (SOURCE / '.git').is_dir()):
         return False
-    prefix = ['git', '-c', f'safe.directory={SOURCE}', '-C', str(SOURCE)]
+    prefix = ['runuser', '-u', operator, '--', 'git',
+              '--no-optional-locks', '-C', str(SOURCE)]
     rc, actual = read_command([*prefix, 'rev-parse', 'HEAD'])
     if rc != 0 or actual.strip() != sha:
         return False
-    rc, status = read_command([*prefix, 'status', '--porcelain', '--untracked-files=all'])
+    rc, status = read_command([*prefix, 'status', '--porcelain',
+                               '--untracked-files=all'])
     return rc == 0 and not status.strip()
 
 
