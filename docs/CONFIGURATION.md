@@ -23,6 +23,35 @@ Answering `y` performs the normal supported `vwctl restart` lifecycle immediatel
 
 An upgraded installation can have one additional bounded transition before that normal restart offer. If an existing Vaultwarden Admin `config.json` is present, see [Existing Vaultwarden Admin configuration](#existing-vaultwarden-admin-configuration) below; the appliance keeps that file effective until the operator explicitly reconciles it instead of silently changing existing policy.
 
+
+## Which password opens `/admin`?
+
+The Admin interface deliberately has **two separate authentications**. Do
+not confuse either with the master password for a normal vault account:
+
+| Browser step | Credential to enter | Encrypted SOPS field |
+| --- | --- | --- |
+| Caddy outer HTTP Basic Auth prompt | Username `admin`; its password | `admin_basic_auth_password` |
+| Inner Vaultwarden Admin login page | The original recoverable Admin token, **not** its Argon2id PHC hash | `vaultwarden_admin_token` |
+
+Both source credentials are in the **operationally encrypted**
+`/etc/vaultwarden-oci/secrets.sops.yaml`; the latter remains recoverable
+after a verified restore. Runtime materializes only derived password
+hashes as appropriate, not the source Caddy password. If an authorized
+administrator needs to inspect or replace the stored values, use
+`sudo vwctl secrets edit` from a trusted private terminal and inspect
+only the named fields. Exit without saving if no change is intended.
+Never paste decrypted credentials, editor contents, PHC hashes or
+recovery-kit secrets into chat, CI logs, shell arguments or acceptance
+evidence. A changed credential must pass normal secrets validation and
+the supported application restart before it can be used in a browser.
+
+A successful outer Basic Auth prompt does **not** prove the inner Admin
+credential works. Normal Admin navigation, Admin SMTP test completion
+and independently received mailbox delivery are separate acceptance
+checks; do not infer a delivered message from an HTTP `200` alone.
+
+
 ## Scheduled offsite backups
 
 The optional `[backup]` table controls the non-secret backup policy. `remote = ""` is local-only; `remote = "offsite:Vaultwarden-OCI"` publishes every verified backup. `local_retention_days = 0` and `remote_retention_days = 0` keep recovery points indefinitely. Set either retention value to a positive whole number to delete only `.vwrec` files older than that many days **after a fully successful backup**. A failed backup or failed remote publication performs no automatic pruning. Remote retention applies only to the saved destination, not a one-time `vwctl backup --remote` override. The current verified backup is always protected from the retention pass. The saved destination must be a named rclone remote plus a safe relative folder. Configure it with `sudo vwctl recovery offsite configure` rather than editing systemd units. The command checks root's rclone setup/reachability and commits a validated config change. `sudo vwctl recovery offsite status` checks readiness; `sudo vwctl recovery offsite disable` restores local-only behavior without deleting any backup.
