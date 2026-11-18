@@ -350,6 +350,46 @@ was made by this acceptance-only branch.
 
 
 
+### rc.13 P4-A server preflight — November 18, 2026 UTC
+
+**PASS: limited read-only installed-host/server preflight; client, browser and
+mailbox acceptance remain NOT RUN.** The operator executed the corrected
+one-host [P4-A read-only test](https://github.com/killer23d/VaultWarden-OCI/blob/b98a96fa92c3a3d91836a2f3425ef0c1e577a616/tests/host-acceptance/rc13-p4a-readonly.py)
+on the disposable `ubuntu@vaultwarden-oci-8` and reported
+`P4_A_EXIT=0 READ_ONLY_SERVER_PREFLIGHT_PASS` and
+`P4_A_WRAPPER_EXIT=0`. This did not start, restart, reboot, restore,
+publish, prune, send SMTP, or change Cloudflare/OCI settings.
+
+| P4-A scoped result | Evidence / limitation |
+| --- | --- |
+| Immutable source **PASS** | All **52** installed release files independently matched Git blobs from actual live-host source `fd56313255c97992dc55c1475d94477597b88602` (`0.1.0-rc.13`); later acceptance/documentation commits are **not** claimed as installed software. |
+| Host/storage **PASS** | Ubuntu 26.04 ARM64 with Python 3.14; `/dev/oracleoci/oraclevdb` dedicated ext4, independent `blkid` UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, product storage markers, no root-volume fallback. |
+| Credential/config boundaries **PASS** | Verified protected and nonempty **distinct** SOPS `admin_basic_auth_password` (Caddy outer gate, user `admin`) and `vaultwarden_admin_token` (inner Admin authentication), no credential values exposed. Configured Caddy outer Admin limit `60/1m`; saved backup mode local-only, retention zero. |
+| Runtime/security **PASS for selected checks** | Both Docker application containers running, healthy and unpaused; `vwctl doctor --json` exit `0`, overall `PASS`, required security/custody checks `PASS`. CrowdSec Cloudflare Worker still active and **boot-disabled** with previous invocation `a80be9e43af84a24b505b9e4b127abeb`. All specified background jobs/timers remained idle. |
+| Automation **intentionally disabled** | `vwctl status --json` returned code `1` with runtime `running`, but `automation.overall=FAIL`, matching the documented enabled-state contract; **do not** relabel this a PASS for lifecycle/timer acceptance. |
+| Local HTTPS **PASS for three safe requests** | Real private-Caddy TLS verified; Web Vault `/` 200, `/api/config` 200, **unauthenticated** `/admin/` 401. This small unauthenticated sample did not encounter 429 but **does not establish** authenticated browser navigation or absence of a premature 429 in normal Admin use. |
+| Client/Admin/SMTP **NOT RUN** | No fresh-sync actual Vaultwarden client field-by-field check, post-backup item absence in the UI, authenticated *browser* Admin navigation, Admin-origin SMTP test, or independent mailbox delivery observation was supplied. Prior P3-G2C server HTTP acceptance and operator manual Admin/Caddy/restore smoke remain separately scoped. |
+| Lifecycle/external ingress/upgrade **NOT RUN** | No reboot/restart/timer activation or Worker re-arm, real non-Cloudflare origin packet denial, public Cloudflare cutover, or live supported-predecessor upgrade in this batch. Software release **GO remains HOLD**. |
+
+**Acceptance-wrapper incident, not product failure:** The first P4-A wrapper
+used an invalid shell/Python heredoc terminator combined with `|| hold`;
+the apparent syntax-check failed with `IndentationError` but the shell
+continued. The initial script also treated `vwctl status --json` exit
+`1` as universally fatal, despite the product returning that code for
+intentionally disabled automation even when the runtime is healthy.
+The corrected wrapper checks Python AST syntax as a separate command and
+fails immediately on a nonzero result; the corrected test interprets
+`status` via its structured fields and still fails closed on unrelated
+errors. The passing revision at commit
+`b98a96fa92c3a3d91836a2f3425ef0c1e577a616` had its push CI
+[complete successfully](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44414235641).
+These scripts are provisional audit tools on the acceptance branch;
+archive their immutable source evidence and remove them from active
+`tests/host-acceptance/` before final PR review rather than expanding
+the permanent one-VM script collection.
+
+
+
 ## Acceptance record
 
 ```text
