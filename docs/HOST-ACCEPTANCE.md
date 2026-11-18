@@ -201,6 +201,7 @@ against this exact P2 candidate.
 | P3-G1 supported start — **PASS** | Installed `0.1.0-rc.13` `vwctl start` exit 0 with same dedicated ext4/UUID ownership. Vaultwarden and custom Caddy running/healthy on exact ARM64 image pins; required Caddy modules and derived Argon2id Admin PHC/Basic Auth hashes verified; `runtime.paths=PASS`, six origin/CrowdSec checks PASS, Worker invocation unchanged; `status.runtime=running`; doctor `overall=WARN`, **zero FAIL** | Warnings `recovery.local`, `recovery.offsite`, `recovery.rclone` remain; automation target/timers deliberately not activated and status reports automation FAIL. No DNS update, public cutover, backup, reboot, or external traffic test |
 | P3-G2A local TLS/application — **PASS for local-only checks** | Using real Caddy loopback with hostname/SNI and verified certificate, Web Vault `GET /` returned HTTP 200, API config HTTP 200, unauthenticated `/admin` HTTP 401; Caddy trusted-proxy/Admin outer Basic Auth and per-client rate-limit configuration recognized; doctor WARN with recovery-only warnings | No authenticated browser Admin login/SMTP test, true Cloudflare client-IP confirmation, actual threshold/429, independently measured direct-origin denial, or public HTTPS cutover; DNS still points to another origin |
 | P3-G2B live Admin outer gate and untrusted IP — **PASS for local-only checks** | Authenticated in-container Caddy HTTPS with SOPS-held Basic Auth supplied via curl stdin: `/admin/` missing and wrong credentials returned HTTP 401; correct and repeated correct credentials returned HTTP 200, all with verified TLS. Fake `CF-Connecting-IP` and `X-Forwarded-For` from untrusted loopback returned API HTTP 200 but Caddy JSON access log retained the real remote/client identity; previous Worker invocation `a80be9e43af84a24b505b9e4b127abeb` preserved, doctor `WARN` with no new FAIL | This proves the actual outer Caddy gate and local untrusted-header handling. Inner Vaultwarden Admin token login, browser navigation/SMTP delivery, actual 429 threshold, independently verified Cloudflare client identity or public-origin denial are NOT RUN. Do not treat a localhost request as a Cloudflare traffic test |
+| P3-G2C inner Admin and application SMTP route — **PASS for in-container HTTPS, mailbox receipt unverified** | Using the installed release and existing SOPS custody, POST `/admin/` with the original recoverable Vaultwarden Admin token returned HTTP 200 over verified TLS; the `VW_ADMIN` session cookie satisfied Secure/HttpOnly/SameSite Strict checks. Authenticated `/admin/users` returned HTTP 200 and a JSON list; `/admin/` and `/admin/users/overview` both returned HTTP 200; one POST `/admin/test/smtp` returned HTTP 200 over verified TLS. Subsequent doctor remained WARN/no FAIL and CrowdSec Worker kept its original invocation | Proves accepted inner application routes with a genuine session, but **HTTP 200 is not independent mailbox-delivery proof**; recipient receipt not confirmed. Browser/UI rendering and the native browser SMTP workflow NOT RUN; actual 429 threshold and independent Cloudflare/public origin traffic NOT RUN. One test message was submitted, do not repeat automatically |
 
 **Wrapper/automation incident:** A separate assistant-supplied, out-of-tree
 P2 shell command placed an error handler immediately after a Python
@@ -227,12 +228,15 @@ recovered-data reference host and its Box objects are **not** used for
 this rehearsal. Stable production software release approval is
 **NOT RUN**.
 
-**Next software gate:** Validate the inner Admin UI/session and
-browser SMTP separately, without changing the existing proxied DNS A record
-or misattributing a loopback test to a real Cloudflare client. Preserve
-outstanding rate-limit threshold and independent external origin-denial
-tests. Then move to test-only recovery and deliberate lifecycle/reboot
-acceptance.
+**Next software gate:** Confirm mailbox receipt independently when
+possible, then exercise the first **local-only** encrypted `.vwrec` backup
+on the disposable application host. Avoid any configured remote destination
+or retention-based deletion until explicitly reviewed. Verify a local artifact's
+cryptographic decryption with the matching off-host test identity in a later
+separate gate; do not treat an Age v1 header or local SHA-256 as independent
+decryption proof. Browser UI, actual rate-limit threshold and external
+Cloudflare-only packet denial remain separate, uncompleted gates. Do not
+change the existing proxied A record merely to obtain a PASS.
 
 ## Acceptance record
 
