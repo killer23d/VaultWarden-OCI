@@ -619,6 +619,36 @@ other remaining gates.
 
 
 
+### rc.13 P4-E3 Cloudflare Route readback and invocation confirmation — November 19, 2026
+
+**PASS for exact-current-invocation Fail Open and full CrowdSec doctor.** Following
+the separately recorded P4-E3 postboot application and Worker re-arm, the operator
+executed the bounded Cloudflare API **read-only GET** witness for the existing Worker
+Route matching the exact configured site hostname and script, confirmed a literal
+`request_limit_fail_open=true`, and ran the installed rc.13
+`vwctl crowdsec confirm-fail-open`. Output:
+`P4_E3_CF_ROUTE_EXIT=0 VERIFIED_READ_ONLY`,
+`P4_E3_CONFIRM_WRAPPER_EXIT=0 PASS`, and full
+`vwctl doctor --json` with **no FAIL checks**.
+
+- Current Worker invocation: `b27e8dd07f9340ad8e1567e16ab2e33d`.
+- Cloudflare independent Route readback: **PASS** for exact hostname route,
+  CrowdSec script ownership, current invocation unchanged, and literal Boolean
+  `request_limit_fail_open=true` after the operator's dashboard change.
+- Installed rc.13's invocation-bound confirmation: **PASS**, with four
+  CrowdSec gates `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`,
+  and `crowdsec.cloudflare` all **PASS**.
+- Unchanged immutable source: `fd56313255c97992dc55c1475d94477597b88602`,
+  all 52 files; selected installation remains **rc.13**.
+- This evidence does **not** test automatic Route Fail Open on a **new**
+  bouncer invocation. Candidate **rc.14** opt-in automation at
+  [draft PR #436](https://github.com/killer23d/VaultWarden-OCI/pull/436)
+  must be accepted separately, and release GO remains **HOLD** pending
+  production-style automatic target/timer acceptance and the other
+  explicitly outstanding gates.
+
+
+
 
 ## Acceptance record
 
