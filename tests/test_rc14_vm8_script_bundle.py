@@ -53,6 +53,13 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
                     with self.subTest(name=name, python=label):
                         ast.parse(body, filename=name + ":" + label)
 
+    def test_handoff_readme_lists_all_phases_and_temporary_scope(self) -> None:
+        readme = (BASE / "README.md").read_text()
+        self.assertIn("Temporary acceptance branch", readme)
+        self.assertIn("never merge", readme)
+        for name in HASHES:
+            self.assertIn(name, readme)
+
     def test_phase_ownership_and_mutation_scopes(self) -> None:
         scripts = {n: (BASE / n).read_text() for n in HASHES}
         self.assertIn("vwctl update apply", scripts["01-upgrade.sh"])
