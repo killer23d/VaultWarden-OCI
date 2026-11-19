@@ -16,7 +16,13 @@ DROP='/etc/systemd/system/vaultwarden-oci-dns.service.d/vwoci-rc15-acceptance.co
 PERMIT='/run/vwoci-rc15-acceptance-dns-permit'
 [ -d "$WORK/.git" ] && [ ! -L "$WORK" ] || hold 'Pinned release source checkout missing'
 [ "$(git -C "$WORK" rev-parse HEAD)" = "$PIN" ] || hold 'Exact candidate source changed'
-[ -z "$(git -C "$WORK" status --porcelain)" ] || hold 'Candidate source checkout dirty'
+# The rc15 preboot transcript recorded an unreadable ubuntu-owned Git index.
+# Do not interpret git status failure inside command substitution as clean.
+# Privileged read-only status uses the already-approved exact source checkout.
+if ! SOURCE_STATUS="$(sudo -n /usr/bin/env GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c safe.directory="$WORK" -C "$WORK" status --porcelain=v1 --untracked-files=all)"; then
+  hold 'Pinned candidate Git index/status unreadable; no source-clean claim'
+fi
+[ -z "$SOURCE_STATUS" ] || hold 'Candidate source checkout dirty'
 [ -d "$EVID" ] && [ ! -L "$EVID" ] || hold 'Protected original preboot checkpoint directory missing'
 [ "$(stat -c '%u:%a' "$EVID")" = "$(id -u):700" ] || hold 'Evidence custody unsafe'
 [ ! -e "$EVID/postboot.json" ] && [ ! -L "$EVID/postboot.json" ] || hold 'Postboot receipt already exists; do not replay'
