@@ -978,6 +978,50 @@ or delete temporary branch until those further live gates pass.
 
 
 
+### rc.14 RC14-D controlled shutdown accepted, re-arm HOLD — November 19, 2026
+
+**Partial PASS: installed rc.14's controlled CrowdSec Worker shutdown
+succeeded end to end.** On `ubuntu@vaultwarden-oci-8`, the original
+protected RC14-C receipt was accepted; immutable rc.14 application source
+remained `92b9300f96125d19105cc1d4865024cb49612b28`.
+The RC14-D pre-stop witness verified the exact active invocation,
+**two** Cloudflare provider Route reads, source-policy confinement and
+original **1 user / 1 cipher** on the approved dedicated ext4 disk
+(`RC14_D_PRE_EXIT=0; STOP_NOT_RUN`).
+
+The operator then invoked **one** supported installed
+`vwctl crowdsec remediation-stop`: the exit-1 normalization feature
+returned PASS **only after** the Worker stopped and its old Cloudflare
+Route was independently verified cleaned up. A separate systemd check
+then proved `ActiveState=inactive`, `Result=success`, no Worker PID,
+the Worker service still boot-disabled and `Restart=no`. This is
+the first real-host acceptance of the targeted upstream SIGTERM
+exit-code-1 workaround, which is deliberately **not** a global
+`SuccessExitStatus=1`.
+
+**HOLD: one fresh `vwctl crowdsec remediation-start --auto-fail-open`
+returned exit 1.** The output was
+`RC14_D_EXIT=2 HOLD: re-arm rc=1; DO NOT retry`. Because the
+CLI starts the Worker **before** attempting API mutation and
+readback, this exit code alone does not establish whether the Worker
+started, whether a new Cloudflare Route was created, or whether Fail
+Open was applied. The script did not reach its after-phase; no final
+RC14-D PASS receipt exists. Original private evidence is
+`/home/ubuntu/vwoci-acceptance/rc14-d-92b9300f9612`, including
+`before.json`, `stop.stdout`, `rearm.stdout` and
+`rearm.stderr`; keep their contents private.
+
+**Next:** do not replay RC14-D, restart the Worker, enable the new
+boot unit/target/timers, or reboot. A separate temporary-branch
+read-only diagnostic `02b-diagnose-rearm-readonly.sh` will compare
+the redacted rearm failure category against live systemd state,
+per-invocation receipts and two independent Cloudflare Route reads.
+Only then choose an explicit state-specific recovery or postflight.
+**RELEASE_GO=HOLD**; PR #436 remains draft and the new
+automatic post-reboot startup gate is NOT RUN.
+
+
+
 
 ## Acceptance record
 
