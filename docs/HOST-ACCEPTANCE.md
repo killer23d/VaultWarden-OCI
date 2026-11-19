@@ -745,6 +745,52 @@ turn the old Worker process exit code 1 into a clean shutdown**.
 
 
 
+### rc.14 RC14-B resumed new-Route auto-Fail-Open — November 19, 2026
+
+**PARTIAL PASS for one candidate API false-to-true update, HOLD for
+independent persistent Route verification.** Following the earlier
+`systemctl stop` resulting in systemd `ActiveState=failed` / process
+exit 1 and confirmed old-route removal, the operator executed the
+guarded RC14-B resume against exact candidate source
+`b2079822886f80538f4d9ded221bcb52a856b564`, preserving private
+folder `/home/ubuntu/vwoci-acceptance/rc14-b-fNE0f8`.
+Reconciliation of installed **rc.13** (all 52 immutable source files),
+Ubuntu 26.04 ARM64 data volume and previous accepted
+config/storage/cipher was **PASS**. The fresh stop/route checkpoint
+was accepted with **old Route absent**, but the old daemon exit 1 is
+**not** retroactively accepted as a clean shutdown.
+
+One supported candidate `vwctl crowdsec remediation-start
+--auto-fail-open` was executed exactly once and returned **exit 0**.
+Its private stdout contained `updated=yes`, establishing that the
+candidate discovered a new CrowdSec Worker Route, issued one Cloudflare
+Route Fail Open update, read back the same Route as Fail Open, and
+persisted an invocation-bound local confirmation *at that instant*.
+The postflight checker then confirmed the new Worker was reported
+active with a new invocation ID, local-only source-policy attestation,
+and protected API-readback receipt **before** it attempted a second,
+independent Cloudflare inventory.
+
+That second inventory returned a number of matching
+`bw.lazymocha.com/*` Routes **other than exactly one**.
+The operator's output was
+`RC14_B_EXIT=2 HOLD: New CrowdSec Worker Route missing or ambiguous`
+and `RC14_B_RESUME_WRAPPER_EXIT=2 HOLD`. No precise match count,
+new Route ID, current systemd/Cloudflare state, or subsequent doctor
+result was printed. Therefore the acceptance result is **HOLD**:
+the API's immediate successful PUT/GET and local receipt **do not
+prove a persistent usable Route**. Do not replay either the stop or
+new-invocation start. A fresh **read-only** inventory must compare
+the current systemd invocation, receipt route ID, provider list/detail
+consistency at bounded separate observations, and doctor (which may
+reflect the cached local receipt rather than live Route availability).
+Only after this diagnosis should the candidate source or acceptance
+checker be changed. Full-source rc.14 installation, negative API-field
+test, automatic boot/timer lifecycle and release GO remain **NOT RUN /
+HOLD**.
+
+
+
 
 ## Acceptance record
 
