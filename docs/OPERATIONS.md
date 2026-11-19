@@ -176,7 +176,26 @@ sudo vwctl crowdsec confirm-fail-open
 sudo vwctl crowdsec status
 ```
 
-Without `--auto-fail-open`, the existing `remediation-start` workflow stays manual. Worker **boot-disabled** remains intentional: these options do not add unattended Worker startup or silently enable timers/DNS updates. The API-readback confirmation proves Route state **at the time of that GET**, not continuous future Cloudflare configuration. Recheck after each new Worker invocation, route replacement or provider policy change. No public LAPI, unsupported browser-session automation, token in argv/environment, or paid Cloudflare plan is required.
+Without `--auto-fail-open`, the existing `remediation-start` workflow stays manual. The package Worker itself **remains boot-disabled**; this command does not enable any systemd timers or mutate Cloudflare DNS. The API-readback confirmation proves Route state **at the time of that GET**, not continuous future Cloudflare configuration. Recheck after each new Worker invocation, route replacement or provider policy change. No public LAPI, unsupported browser-session automation, token in argv/environment, or paid Cloudflare plan is required.
+
+**Explicit opt-in boot re-arm (rc.14+):** After installing and health-gating the full rc.14 immutable release through the supported update owner, first check that the current Worker is healthy and its Route is Cloudflare-verified Fail Open. To enable unattended re-arm after the next real VM reboot, enable only the separate, installed `vaultwarden-oci-crowdsec-boot.service`:
+
+```bash
+sudo systemctl enable vaultwarden-oci-crowdsec-boot.service  # intentionally NOT --now
+systemctl is-enabled vaultwarden-oci-crowdsec-boot.service
+```
+
+On a later boot, systemd waits for the CrowdSec engine, network-online and mounted dedicated data volume before running one `/opt/vaultwarden-oci/current/vwctl crowdsec boot-reconcile` attempt. If the Worker is cleanly inactive, it uses the existing token-gated `remediation-start` and exact local-only attestation, then applies and independently verifies Fail Open for the **new** Cloudflare Route. If already active and properly attested, it verifies the existing Route without another start. The boot unit is **oneshot, without auto retries** and has OnFailure notifications. An unexpectedly `failed` or active-but-unattested Worker, absent data device, missing CrowdSec engine/firewall bouncer, unsupported provider API field, missing/ambiguous Route, or changed invocation **fails the unit**; operators must inspect it. The upstream Worker remains `UnitFileState=disabled` and `Restart=no`: the opt-in boot one-shot, not the bouncer's own Restart policy, is the single start owner.
+
+```bash
+systemctl show vaultwarden-oci-crowdsec-boot.service --property=ActiveState,Result,UnitFileState,ExecMainStatus
+sudo vwctl crowdsec status
+sudo vwctl doctor --json
+```
+
+For an **intentional stop**, prefer the supported `sudo vwctl crowdsec remediation-stop`. Upstream CrowdSec's `HandleSignals` treats SIGTERM as an error and can terminate with exit status `1` even after successful Cloudflare Route cleanup. This owner first verifies the exact current confirmed Route and invocation, then issues **one** systemd stop, proves no running process / no automatic restart, independently verifies that the prior Cloudflare Route was removed, and **only then** runs `systemctl reset-failed` for the specific Worker unit if it ended with the recognized `exit-code 1`. Unknown exit statuses, unexpected restart or incomplete provider cleanup remain visible as FAIL: there is deliberately **no** global `SuccessExitStatus=1` workaround, and crashes are not normalized.
+
+Disable unattended re-arm if desired with `sudo systemctl disable vaultwarden-oci-crowdsec-boot.service`; the bouncer remains disabled. **Before rolling back to rc.13**, disable this rc.14-only unit, because rc.13 does not implement `boot-reconcile`. This boot service is independent of `vaultwarden-oci.target` and does not prove production automatic Caddy/Vaultwarden startup or the four scheduled operations; those must be separately accepted with DNS-writing isolation on a disposable host.
 
 A healthy final state has four CrowdSec doctor checks: `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, and `crowdsec.cloudflare`, all `PASS`. The firewall bouncer should be active/enabled; the Cloudflare Worker should be active for the current explicit invocation but remain disabled at boot.
 
