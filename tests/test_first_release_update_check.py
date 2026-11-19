@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import io
 import json
 import tempfile
@@ -49,6 +50,10 @@ class ReleaseCatalogClassificationTests(unittest.TestCase):
 
 class FirstReleaseCliTests(unittest.TestCase):
     def run_update(self, argv: list[str], *, current: str = "0.1.0-dev.23") -> tuple[int, str, str]:
+        # Flush finalizers from preceding tests BEFORE redirecting stderr.
+        # Python 3.14's TemporaryDirectory may emit ResourceWarning on GC;
+        # that unrelated cleanup must not contaminate this CLI output test.
+        gc.collect()
         stdout = io.StringIO()
         stderr = io.StringIO()
         with (
