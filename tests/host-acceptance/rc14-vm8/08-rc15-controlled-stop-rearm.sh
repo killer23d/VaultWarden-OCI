@@ -143,6 +143,24 @@ if not crowdsec_worker_policy.runtime_policy_healthy(edge.EdgePaths(),edge.run_c
 new_id=route.read_owned_route_id(require_fail_open=True)
 route.wait_owned_route_stable(new_id)
 if new_id==before['old_route_id']:hold('Expected recreated Route ID')
+from vaultwarden_oci import runtime
+proof_file=edge.FAIL_OPEN_CONFIRMATION
+try:
+    info=proof_file.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o600):
+        hold('New Worker confirmation proof custody unsafe')
+    proof=json.loads(proof_file.read_text(encoding='utf-8'))
+except (OSError,ValueError,TypeError):
+    hold('New Worker confirmation proof missing')
+if (proof.get('schema_version')!=1
+    or proof.get('invocation_id')!=inv
+    or proof.get('verification')!='cloudflare-api-readback'
+    or not isinstance(proof.get('route'),dict)
+    or proof['route'].get('id')!=new_id
+    or proof['route'].get('script')!=route.BOUNCER_SCRIPT
+    or proof['route'].get('pattern')!=runtime.load_config().domain+'/*'):
+    hold('Local API proof does not match new provider Route and Worker invocation')
 if storage.verify().uuid!='f4e0bd62-48e7-4745-8987-44b14013216d':hold('Disk changed')
 try:
     src=sqlite3.connect('file:/var/lib/vaultwarden-oci/data/db.sqlite3?mode=ro',uri=True,timeout=15)
