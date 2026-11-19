@@ -271,5 +271,64 @@ class TestBoundedHttp(unittest.TestCase):
         self.assertNotIn(TOKEN, str(out.exception))
 
 
+
+class TestLifecycleRouteConsistency(unittest.TestCase):
+    def setUp(self):
+        self.row = {
+            "id": ROUTE, "pattern": PATTERN, "script": SCRIPT,
+            "request_limit_fail_open": True,
+        }
+        self.context = mock.patch.object(
+            routes, "_owned_route_context",
+            return_value=("vault.example.net", TOKEN, ZONE),
+        )
+        self.sleep = mock.patch.object(routes.time, "sleep")
+        self.context.start()
+        self.sleep_mock = self.sleep.start()
+        self.addCleanup(self.context.stop)
+        self.addCleanup(self.sleep.stop)
+
+    def test_two_consistent_provider_samples_required_for_boot(self):
+        with (
+            mock.patch.object(routes, "_owned_list",
+                              side_effect=[[], [self.row], [self.row]]) as listed,
+            mock.patch.object(routes, "_api_json",
+                              return_value={"result": self.row}) as detail,
+        ):
+            routes.wait_owned_route_stable(ROUTE)
+        self.assertEqual(listed.call_count, 3)
+        self.assertEqual(detail.call_count, 2)
+        self.assertEqual(self.sleep_mock.call_count, 2)
+
+    def test_route_disappearance_refuses_boot_pass(self):
+        with (
+            mock.patch.object(routes, "_owned_list", return_value=[]),
+            mock.patch.object(routes, "_api_json") as detail,
+        ):
+            with self.assertRaisesRegex(edge.EdgeError, "two independent"):
+                routes.wait_owned_route_stable(ROUTE)
+        detail.assert_not_called()
+
+    def test_new_unexpected_route_id_is_not_accepted(self):
+        other = dict(self.row, id="f" * 32)
+        with mock.patch.object(routes, "_owned_list", return_value=[other]):
+            with self.assertRaisesRegex(edge.EdgeError, "Route ID changed"):
+                routes.wait_owned_route_stable(ROUTE)
+
+    def test_shutdown_needs_two_independent_absence_samples(self):
+        with mock.patch.object(routes, "_owned_list", side_effect=[[self.row], [], []]) as listed:
+            routes.wait_owned_route_absent(ROUTE)
+        self.assertEqual(listed.call_count, 3)
+
+    def test_shutdown_refuses_inconsistent_cleanup(self):
+        with mock.patch.object(routes, "_owned_list", side_effect=[
+            [] if i % 2 else [self.row] for i in range(12)
+        ]) as listed:
+            with self.assertRaisesRegex(edge.EdgeError, "not consistently absent"):
+                routes.wait_owned_route_absent(ROUTE)
+        self.assertEqual(listed.call_count, 12)
+
+
+
 if __name__ == "__main__":
     unittest.main()
