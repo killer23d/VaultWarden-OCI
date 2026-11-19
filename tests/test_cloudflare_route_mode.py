@@ -13,6 +13,8 @@ from unittest import mock
 
 from vaultwarden_oci import cli, cloudflare_route_mode as routes, crowdsec_worker_policy, edge, runtime, secrets
 
+_ORIGINAL_CONFIRM = edge.confirm_fail_open
+
 ZONE = "a" * 32
 ROUTE = "b" * 32
 INVOCATION = "c" * 32
@@ -174,7 +176,7 @@ class AutoFailOpenTests(unittest.TestCase):
             path = Path(folder) / "fail-open.json"
             p = edge.EdgePaths(fail_open_confirmation=path)
             with mock.patch.object(edge, "_service_invocation_id", return_value=INVOCATION):
-                edge.confirm_fail_open(
+                _ORIGINAL_CONFIRM(
                     paths=p,
                     verified_route={"id": ROUTE, "pattern": PATTERN, "script": SCRIPT},
                     now=20,
@@ -193,7 +195,7 @@ class AutoFailOpenTests(unittest.TestCase):
             path = Path(folder) / "fail-open.json"
             p = edge.EdgePaths(fail_open_confirmation=path)
             with mock.patch.object(edge, "_service_invocation_id", return_value=INVOCATION):
-                edge.confirm_fail_open(paths=p, now=20)
+                _ORIGINAL_CONFIRM(paths=p, now=20)
             data = json.loads(path.read_text())
             self.assertNotIn("route", data)
             self.assertTrue(edge._fail_open_confirmed(path, INVOCATION))
