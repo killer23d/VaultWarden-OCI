@@ -93,6 +93,28 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertNotIn('method="PUT"', content)
         self.assertNotIn("systemctl reboot", content)
 
+    def test_active_route_reconciliation_is_one_shot_and_preserves_failed_rearm(self) -> None:
+        path = BASE / "02c-reconcile-active-route.sh"
+        content = path.read_text()
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True, text=True,
+            check=False, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blocks = HEREDOC.findall(content)
+        self.assertEqual(len(blocks), 2)
+        for name, body in blocks:
+            ast.parse(body, filename=path.name + ":" + name)
+        self.assertIn("RC14_D_02C_EXIT=0 CURRENT_WORKER_ROUTE_RECONCILED", content)
+        self.assertIn("ORIGINAL_SINGLE_COMMAND_REARM=FAILED", content)
+        self.assertIn("updated=no", content)
+        self.assertIn("vwctl crowdsec ensure-fail-open", content)
+        self.assertNotIn("systemctl stop", content)
+        self.assertNotIn("systemctl start", content)
+        self.assertNotIn("systemctl reboot", content)
+        self.assertNotIn("method=\"PUT\"", content)
+        self.assertNotIn("evid/'after.json'", content)
+
     def test_phase_ownership_and_mutation_scopes(self) -> None:
         scripts = {n: (BASE / n).read_text() for n in HASHES}
         self.assertIn("vwctl update apply", scripts["01-upgrade.sh"])
