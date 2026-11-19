@@ -57,6 +57,56 @@ release tooling. The manifest below links to each original file.
 | Nov 18 UTC, fresh rc.13 P0/P1 | New `vaultwarden-oci-8` Ubuntu 26.04 ARM64, clean pinned source `86288578def00b116e519e41108b7bdf6a2b84ed`, 8 focused tests, one 50 GiB blank unmounted nonboot disk with stable alias: **P0 exit 0**. Supported installer no-mutation **P1 dry-run exit 0** | OCI volume attachment/format approval, off-host Age private-key custody, live install, Cloudflare, SMTP, recovery and packet proof not established |
 | Nov 18 UTC, Git index correction | Prior root Git status refreshed a root-owned `.git/index`; a shell status substitution wrongly assumed empty stdout meant clean. Operator repaired **only index ownership**, SHA unchanged; `GIT_INDEX_EXIT=0`; regression fixed in PR #429 | The earlier shell clean-status claim was invalid, but P1 installer dry-run itself passed. P2 has not run |
 
+## November 19, 2026: rc.14 to rc.15 disposable VM8 lifecycle (archive only)
+
+**Scope and provenance.** Operator-provided terminal PASS/HOLD markers from
+`vaultwarden-oci-8`, Ubuntu 26.04.1 ARM64, with a dedicated ext4 data
+device. This is **historical evidence**, not an instruction to operate the
+host or a claim that a validated rc.15 production software release exists.
+Installed immutable candidate:
+[`32beec5bc905cdecdfdc4a359147c3f1d45d8444`](https://github.com/killer23d/VaultWarden-OCI/commit/32beec5bc905cdecdfdc4a359147c3f1d45d8444),
+`0.1.0-rc.15`, [full exact-candidate CI PASS](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618010233).
+The distinct temporary harness commit
+[`f4c83309e186fb7700cbc15d965aa2f1d2d85955`](https://github.com/killer23d/VaultWarden-OCI/commit/f4c83309e186fb7700cbc15d965aa2f1d2d85955)
+had [nine green CI jobs](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44628483849).
+Its 15 version/host-specific scripts and their tests belong to temporary
+acceptance Git history, **not** the permanent software/runtime tree.
+
+| Phase | Observed operator outcome | What this does **not** prove |
+| --- | --- | --- |
+| Prior rc.14 immediate API readback | Original live re-arm **FAILED** on stale immediate `false` after the single PUT; later independent provider GETs returned `true`. Reconciled already-running invocation with `updated=no`; preserved the earlier failure | No new-invocation rc.14 PASS |
+| RC15-A supported rc.14 to rc.15 upgrade | **PASS**: supported verified-recovery updater, exact installed ARM64 frozen manifest/56 files, unchanged dedicated device, original 1 user/1 cipher, unchanged Worker and Cloudflare Route, doctor PASS | No clean install of rc.15; no reboot at A |
+| RC15-B controlled stop and new re-arm | **PASS**: verified cleanup and only expected upstream exit-1 normalization; one fresh Worker start, new invocation/Route, automatically applied Fail Open, independent provider readbacks and doctor PASS, vault unchanged | Not automatic boot recovery |
+| RC15-C consented reboot staging | **PREBOOT PASS, with exception**: operator authorized genuine reboot; reversible DNS-writer condition and explicitly opt-in app target/Worker boot one-shot staged; protected checkpoint recorded; SSH closed and the operator reconnected | Unprivileged `git status` emitted `.git/index: Permission denied` but a shell substitution misclassified empty stdout as clean. Preserve this failure; do not replay the one-shot |
+| RC15-D independent postboot | **PASS**: checked privileged clean Git checkout corrected the C exception without changing permissions; new kernel boot ID; 56 immutable release files, original intact SQLite 1 user/1 cipher; app target, four timers and Worker boot one-shot active/successful; fresh Worker invocation and Route with two Fail Open GET/list samples; local TLS Web/API/Admin HTTP 200/200/401; installed doctor PASS | Four jobs were only active timers, not yet independently run |
+| RC15-E four scheduled jobs | **PASS**: actual health, local-only encrypted recovery backup, edge-CIDR maintenance/doctor, and check-only update service completed; new nonempty local `.vwrec` present; DNS writer remained condition-blocked; no offsite/retention mutation; original vault, Worker Route and doctor remained healthy | No remote encrypted backup/readback or restoration, no DNS publication or unattended update apply |
+| RC15-F separately authorized safe cleanup | **PASS**: operator approved; app target and all four timers disabled/inactive before removing only test-owned DNS condition; optional Worker auto-rearm disabled; original app and CrowdSec Worker still healthy, Route Fail Open. `RC15_F_POST_EXIT=0`, `RC15_F_WRAPPER_EXIT=0` | VM8 is deliberately **not** configured to auto-start the appliance on another reboot; cleanup is not production launch approval |
+
+RC15-B/C/D/E/F preserved protected, root-only receipts under
+`/home/ubuntu/vwoci-acceptance/` on the operator's host. The exact private
+files and tokens **must not** be copied into Git or disclosed. Source pins,
+operator outputs and terminal evidence are scoped to that boot and host.
+The repaired preboot Git-index claim is a separate RC15-D observation,
+not retroactive erasure of the RC15-C shell-guard exception.
+
+**Release evidence classification (as of this checkpoint):** supported
+rc.14 → rc.15 upgrade, automatic Fail Open and selected reboot/lifecycle
+operations **PASS on VM8**. Exact rc.15 clean blank-data first install,
+test-only encrypted offsite publication/readback and disposable restore,
+direct external non-Cloudflare origin denial across forwarding/NAT/userland
+proxy, SMTP/notification delivery on the exact candidate, destructive
+failure/quarantine/rollback simulation, and fresh real-host AMD64 acceptance
+are **NOT RUN / not established here**. Earlier rc.11–rc.13 results are
+separately labeled above and are not transferred to rc.15. Historical
+network/infrastructure provider inventories may remain informational, but
+security-critical real origin packet enforcement is still an explicit
+product release requirement; do not replace it with cloud-provider listings.
+**Software release GO = HOLD** pending required evidence and a separate
+approved immutable tag/release decision. Merging candidate source into
+development `v2`, if independently approved, is not a production release.
+No public IPv6 rollout, DNS mutation, production cutover, historical Box
+remote write/prune, or VM8 further reboot is authorized by this record.
+
 ## Durable lessons for software acceptance
 
 1. Keep exact source/version pins, dedicated nonboot storage, independent
