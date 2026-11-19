@@ -715,6 +715,36 @@ Keep PR #436 draft pending corrected RC14-B acceptance. **RELEASE_GO=HOLD**.
 
 
 
+### rc.14 RC14-B shutdown reconciliation — November 19, 2026
+
+**READ-ONLY diagnostic PASS; original RC14-B automatic re-arm gate remains HOLD.**
+The operator ran a fresh systemd/Cloudflare diagnostic against the exact
+candidate checkout `b2079822886f80538f4d9ded221bcb52a856b564`,
+original protected prestop witness at
+`/home/ubuntu/vwoci-acceptance/rc14-b-fNE0f8`, and selected
+immutable installed **rc.13**.
+
+| Observation | Exact witnessed value |
+| --- | --- |
+| systemd unit | `LoadState=loaded`, `ActiveState=failed`, `SubState=failed`, `Result=exit-code`, `ExecMainStatus=1`. The earlier command `systemctl stop` itself returned exit 0; the Worker process exited with status 1. This is **not** an accepted clean-service-stop result. |
+| Process/restart | `MainPID=0`, `NRestarts=0`, `Restart=no`, `UnitFileState=disabled`. No running Worker main process was reported. The old `InvocationID=b27e8dd07f9340ad8e1567e16ab2e33d` remained in systemd metadata; this **does not** mean that invocation is still active. |
+| Cloudflare Route | `CLOUDFLARE_ROUTE_MATCH_COUNT=0`, `CLOUDFLARE_ROUTE=ABSENT` for the configured `bw.lazymocha.com/*` Route. Independent provider inventory confirms cleanup occurred, despite systemd's failed unit result. Worker-based route remediation is currently absent. |
+| Safety | `RECOVERY_GATE=FAILED_NEEDS_SYSTEMD_DIAGNOSIS`, `RC14_B_DIAG_EXIT=0 READ_ONLY_STATE_CAPTURED`, `RELEASE_GO=HOLD`. No new Worker invocation, `request_limit_fail_open` PUT, or candidate re-arm has yet run. |
+
+**Next control:** Preserve the original stop-failure evidence and resume
+from this exact `failed`/no-process/no-Route checkpoint, **without
+repeating the stop**. After fresh read-only verification and an explicit
+owner-private cleanup receipt, use one supported candidate
+`remediation-start --auto-fail-open`. Require the new systemd
+invocation, a genuinely recreated Route ID, `updated=yes`, exact
+new-Route API Fail Open readback, independent local-only policy and
+installed doctor PASS. Any unexpected state or provider/API result
+must HOLD without an automatic restart or PUT retry. A successful
+re-arm validates the availability feature but **does not retroactively
+turn the old Worker process exit code 1 into a clean shutdown**.
+
+
+
 
 ## Acceptance record
 
