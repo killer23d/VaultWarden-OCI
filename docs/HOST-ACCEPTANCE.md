@@ -1082,6 +1082,54 @@ PR #436 remains draft; no merge into `v2`.
 
 
 
+### rc.14 RC14-D active-Route reconciliation completed — November 19, 2026
+
+**PASS: safe reconciliation of the already-running rc.14 Worker,
+without replaying the original failed re-arm.** After the exact
+single-command `remediation-start --auto-fail-open` returned rc 1 on
+an immediate Cloudflare GET, a previous separate read-only diagnostic
+had proved a healthy new Worker invocation and one current Cloudflare
+Route reporting literal Fail Open true twice, but no invocation-bound
+local confirmation receipt. The operator then ran the single-use,
+checksum-verified `02c-reconcile-active-route.sh` from
+`d43f0561b46000f385f062bc11b7ec026903cffc`, gated on [successful
+full CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618134502).
+
+The protected original exit-1 error, old Route and invocation were
+rechecked. Preflight proved the same **new** Worker, exact
+local-only decision-source policy, approved dedicated disk and
+two stable Cloudflare Fail Open readbacks:
+`RC14_D_02C_PRE_EXIT=0 ONE_IDEMPOTENT_CONFIRMATION_ALLOWED`.
+The installed `vwctl crowdsec ensure-fail-open` ran **once** against
+that active invocation and printed `updated=no`, proving **no
+additional Cloudflare PUT**. Independent postflight then verified
+the current exact Route/invocation API-bound proof, two provider
+samples, original **1 user / 1 cipher** SHA and full doctor PASS:
+`RC14_D_02C_EXIT=0 CURRENT_WORKER_ROUTE_RECONCILED`,
+`RC14_D_02C_WRAPPER_EXIT=0`.
+
+Evidence: `/home/ubuntu/vwoci-acceptance/rc14-d-92b9300f9612/reconciled.json`
+(root-only). The script deliberately did not overwrite the original
+failed command's private records or manufacture the original
+`after.json`. It printed
+`ORIGINAL_SINGLE_COMMAND_REARM=FAILED; RELEASE_GO=HOLD` and
+`REBOOT=NOT_AUTHORIZED_UNTIL_READBACK_FIX_ACCEPTED`.
+
+The rc.15 source candidate, branch
+`fix/rc15-cloudflare-failopen-readback-20261119` commit
+`32beec5bc905cdecdfdc4a359147c3f1d45d8444`, now has **full
+CI PASS** (run `44618010233`). Its update permits bounded
+read-only post-PUT GET polling, requires two consecutive exact
+Fail Open true readbacks and never repeats PUT. **rc.15 is NOT
+installed on VM8 and has no real reboot acceptance yet.** Next
+required gates: supported rc.14→rc.15 verified-recovery update,
+independent immutable-source/volume/data/doctor proof; one fresh
+rc.15 auto-Fail-Open invocation if applicable, then reversible
+DNS-isolated true VM reboot and scheduled-operations gates.
+Keep PR #436 draft and `v2` unchanged; `RELEASE_GO=HOLD`.
+
+
+
 
 ## Acceptance record
 
