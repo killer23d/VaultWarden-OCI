@@ -791,6 +791,57 @@ HOLD**.
 
 
 
+### rc.14 RC14-B independent Route diagnosis — November 19, 2026
+
+**PASS for repeated read-only live Route visibility / identity / mode;
+original single-pass RC14-B postflight remains HOLD until completed.**
+After the guarded fresh bouncer start returned `updated=yes` but the
+original immediate postflight unexpectedly found no unique matching
+Route, the operator ran a completely read-only diagnostic on VM8.
+The current Worker was `ActiveState=active`, `SubState=running`,
+`Result=success`, `MainPID=7732`, `NRestarts=0`,
+`Restart=no` and `UnitFileState=disabled`; its new invocation was
+`c406e3ebfe0a498bb77b99c5531a55e4`. The original pre-stop
+invocation was different; local source-policy attestation was `true`
+and the root-private `cloudflare-api-readback` receipt belonged to
+the **new** invocation.
+
+The diagnostic queried Cloudflare Route inventory and the independent
+direct Route-ID endpoint **twice**, five seconds apart. In **both**
+samples: exactly **one** configured `bw.lazymocha.com/*` Route was
+returned; exactly **one** Route was attached to the CrowdSec Worker
+script; it was the same Route ID as the protected API-readback receipt;
+the script ownership was correct; the Route had literal
+`request_limit_fail_open=true`; and an independent direct GET by
+that exact Route ID also returned a present, correct, Fail Open Route.
+The installed **rc.13** doctor reported `DOCTOR_OVERALL=PASS`,
+`DOCTOR_CROWDSEC_CLOUDFLARE=PASS`, exit 0.
+
+This independently establishes **live rc.14 automatic false-to-true
+Route remediation** following one fresh invocation, without a human
+dashboard change. It does **not** establish why the original immediate
+postflight saw a missing/ambiguous listing; transient eventual
+visibility is plausible but **unproven**. The read-only journal
+classifier reported `route_bind:3`, `fatal:2`,
+`startup:3`, `route_delete:0`, `cleanup:0`, `error:0`
+across its bounded last-120-entry sample; the `fatal` markers were
+not scoped to the new invocation, and their cause is **unverified**.
+The previous intentional stop ending in systemd `exit-code 1`
+remains a distinct lifecycle warning.
+
+**Next evidence step:** rerun **only** the original
+`rc14b-check.py after` read-only postflight (no stop, no rearm,
+no Cloudflare PUT) against the original protected
+`before.json`/`stopped.json` and prior RC14-A receipt.
+If that independently passes and writes `after.json`, record
+`RC14_B_PASS` for the **isolated candidate's** automatic Route
+behavior, while keeping a separate warning for daemon shutdown and
+**NOT RUN** for full installed rc.14 upgrade, provider-error fallback,
+enabled-target/timer boot, and other production release gates.
+Do not mark production GO based on two snapshots alone.
+
+
+
 
 ## Acceptance record
 
