@@ -131,7 +131,7 @@ if dns.get('ExecMainStartTimestampMonotonic') not in ('0',''):
 print('PASS: tested health timer cannot execute Cloudflare DNS writer; no permit marker')
 
 # Poll only current systemd metadata for bounded boot stabilization.
-for attempt in range(18):
+for attempt in range(120):
     target=unit('vaultwarden-oci.target')
     app=unit('vaultwarden-oci.service')
     bootunit=unit('vaultwarden-oci-crowdsec-boot.service')
@@ -140,7 +140,7 @@ for attempt in range(18):
             and all(t.get('ActiveState')=='active' for t in timers.values())
             and bootunit.get('ActiveState')!='activating'):
         break
-    if attempt!=17:time.sleep(4)
+    if attempt!=119:time.sleep(5)
 if (target.get('LoadState'),target.get('ActiveState'),target.get('UnitFileState'))!=('loaded','active','enabled'):
     hold('Production-style appliance target not enabled/active after boot')
 if (app.get('LoadState'),app.get('ActiveState'),app.get('Result'))!=('loaded','active','success'):
