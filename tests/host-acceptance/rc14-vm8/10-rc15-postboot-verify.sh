@@ -19,7 +19,7 @@ PERMIT='/run/vwoci-rc15-acceptance-dns-permit'
 # The rc15 preboot transcript recorded an unreadable ubuntu-owned Git index.
 # Do not interpret git status failure inside command substitution as clean.
 # Privileged read-only status uses the already-approved exact source checkout.
-if ! SOURCE_STATUS="$(sudo -n /usr/bin/env GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c safe.directory="$WORK" -C "$WORK" status --porcelain=v1 --untracked-files=all)"; then
+if ! SOURCE_STATUS="$(sudo -n /usr/bin/env GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c safe.directory="$WORK" -C "$WORK" status --porcelain --untracked-files=all)"; then
   hold 'Pinned candidate Git index/status unreadable; no source-clean claim'
 fi
 [ -z "$SOURCE_STATUS" ] || hold 'Candidate source checkout dirty'
