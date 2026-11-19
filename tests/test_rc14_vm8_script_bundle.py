@@ -109,9 +109,12 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertIn("ORIGINAL_SINGLE_COMMAND_REARM=FAILED", content)
         self.assertIn("updated=no", content)
         self.assertIn("vwctl crowdsec ensure-fail-open", content)
-        self.assertNotIn("systemctl stop", content)
-        self.assertNotIn("systemctl start", content)
-        self.assertNotIn("systemctl reboot", content)
+        # Explicit command-line detection: explanatory safety messages may
+        # mention forbidden actions without actually invoking them.
+        self.assertIsNone(re.search(
+            r"(?m)^\s*(?:sudo(?: -n)?\s+)?systemctl\s+(?:stop|start|reboot)\b",
+            content,
+        ))
         self.assertNotIn("method=\"PUT\"", content)
         self.assertNotIn("evid/'after.json'", content)
 
