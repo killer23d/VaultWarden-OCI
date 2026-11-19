@@ -22,6 +22,18 @@ ZONE_OR_ROUTE_ID = re.compile(r"[0-9a-f]{32}\Z")
 DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\Z")
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+# Do not send the remediation bearer token through ambient HTTP(S) proxies
+# or along provider redirects. The only approved destination is CF's API.
+_ROUTE_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirects()
+)
+
+
 @dataclass(frozen=True)
 class RouteProof:
     route_id: str
@@ -58,7 +70,7 @@ def _api_json(
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with _ROUTE_OPENER.open(request, timeout=10) as response:
             data = response.read(MAX_RESPONSE_BYTES + 1)
             status = response.status
     except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
