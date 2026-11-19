@@ -231,7 +231,7 @@ class TestBoundedHttp(unittest.TestCase):
             return Response({"success": True, "result": {"ok": 1}})
 
         url = routes.CLOUDFLARE_API + "/zones/" + ZONE + "/workers/routes/" + ROUTE
-        with mock.patch.object(routes.urllib.request, "urlopen", side_effect=fake):
+        with mock.patch.object(routes._ROUTE_OPENER, "open", side_effect=fake):
             doc = routes._api_json(
                 url, TOKEN, method="PUT",
                 body={"pattern": PATTERN, "script": SCRIPT, "request_limit_fail_open": True},
@@ -243,7 +243,7 @@ class TestBoundedHttp(unittest.TestCase):
     def test_http_error_hides_sensitive_exception_body(self):
         url = routes.CLOUDFLARE_API + "/zones/" + ZONE + "/workers/routes"
         error = urllib.error.URLError("sensitive:" + TOKEN)
-        with mock.patch.object(routes.urllib.request, "urlopen", side_effect=error):
+        with mock.patch.object(routes._ROUTE_OPENER, "open", side_effect=error):
             with self.assertRaises(edge.EdgeError) as out:
                 routes._api_json(url, TOKEN)
         self.assertNotIn(TOKEN, str(out.exception))
