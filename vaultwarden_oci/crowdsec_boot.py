@@ -63,6 +63,7 @@ def reconcile(*, paths: edge.EdgePaths = edge.EdgePaths(), runner=edge.run_comma
         raise edge.EdgeError("Worker is neither cleanly inactive nor validly active; manual diagnosis required")
 
     proof = cloudflare_route_mode.ensure_fail_open(paths=paths, runner=runner)
+    cloudflare_route_mode.wait_owned_route_stable(proof.route_id)
     if (proof.invocation_id != edge._service_invocation_id(runner)
             or not crowdsec_worker_policy.runtime_policy_healthy(paths, runner)):
         raise edge.EdgeError("Cloudflare Worker invocation changed during boot reconciliation")
