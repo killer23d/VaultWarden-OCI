@@ -217,7 +217,7 @@ then
   echo 'RC14_D_DIAG_WRAPPER_EXIT=0'
 else
   rc=$?
-  printf 'RC14_D_DIAG_WRAPPER_EXIT=2 HOLD: rc=%s; do not retry phase2\n' "$rc" >&2
+  printf 'RC14_D_DIAG_WRAPPER_EXIT=2 HOLD: rc=%s; do not retry this gate\n' "$rc" >&2
   exit 2
 fi
 RC14_D_DIAG
