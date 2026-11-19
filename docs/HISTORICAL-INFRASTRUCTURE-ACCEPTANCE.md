@@ -102,8 +102,8 @@ network/infrastructure provider inventories may remain informational, but
 security-critical real origin packet enforcement is still an explicit
 product release requirement; do not replace it with cloud-provider listings.
 **Software release GO = HOLD** pending required evidence and a separate
-approved immutable tag/release decision. Merging candidate source into
-development `v2`, if independently approved, is not a production release.
+approved immutable tag/release decision. Merging candidate source into the development branch, if independently
+approved, is not a production release.
 No public IPv6 rollout, DNS mutation, production cutover, historical Box
 remote write/prune, or VM8 further reboot is authorized by this record.
 
