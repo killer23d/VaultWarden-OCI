@@ -24,6 +24,55 @@ for a deliberately selected already-installed appliance.
 Both are read-only inventories; neither grants consent to install,
 format, activate, alter provider policy or restore.
 
+## Release-readiness reconciliation: rc.15 (RC15-G, 2026-11-19)
+
+**Decision: HOLD; no production GO.** Baseline source is immutable
+[`v2` commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`](https://github.com/killer23d/VaultWarden-OCI/commit/91162bc3e0188f3a75a565b90aff1ea62c6324d0).
+The RC15-G review branch starts at this commit; its eventual distinct HEAD needs
+its own full CI and a new G0 run. The authoritative rc.15 installed live
+candidate, VM8 receipts and the RC15-C Git-index exception remain recorded
+**only** in [the consolidated historical acceptance archive](HISTORICAL-INFRASTRUCTURE-ACCEPTANCE.md).
+The [rc.13 P3-G11C–G11G populated-vault remote recovery results](#current-rc13-p2p3-software-acceptance-evidence--november-18-2026-utc)
+are valid *earlier-release* evidence, not an exact rc.15 live regression.
+
+| Release gate | Status as of reconciliation | Evidence / bounded next step |
+| --- | --- | --- |
+| Exact rc.15 source, component pins and release review | PASS for pinned `v2` source | Commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`; `versions.toml` identifies `0.1.0-rc.15`. Final RC15-G HEAD and its checks must be pinned separately. |
+| Exact rc.15 candidate CI | PASS for archived executed candidate; NOT RUN for new RC15-G HEAD until checks complete | [rc.15 candidate CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618010233), [archived harness CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44628483849); do not transfer results to different SHAs. |
+| Supported rc.14 → rc.15 upgrade / Worker re-arm and Fail Open | PASS | VM8 RC15-A/B, supported upgrade with recovery and new invocation/Route readback; see historical archive. Do not replay. |
+| Real reboot, selected application/Worker activation and four scheduled jobs | PASS for expressly staged VM8 scope | VM8 RC15-C/D/E; RC15-C Git-index wrapper exception retained, independent RC15-D corrected-source check PASS. RC15-F cleanup deliberately disabled future auto-start; no further VM8 work. |
+| Exact rc.15 fresh blank-disk installation and first-run offline recovery-kit custody | NOT RUN | Independent new Ubuntu 26.04 ARM64 host. G0 read-only first; separately authorize formatting/install/custody and verify root-only refusal, setup-generated versus explicit-recipient and headless boundaries with focused regression coverage rather than multiple permanent VM harnesses. |
+| Real non-Cloudflare origin denial across Docker DNAT/FORWARD and userland proxy; fail-closed policy | NOT RUN | A disposable test host with independent external non-Cloudflare probe and safe Cloudflare probe; distinguish Docker published-port path from host INPUT. Preserve both families in software policy/CI; no live IPv6 rollout required. No public SSH/80. |
+| Exact rc.15 Caddy/Admin/local TLS, CrowdSec and core health | PASS within tested VM8 scope | RC15-A/D/E; local TLS 200/200/401 and doctor PASS. Real external-client origin behavior is the distinct NOT RUN gate above. |
+| Populated-vault remote publication, remote ciphertext readback, offline cryptographic verification and actual remote restore | PASS for rc.13, NOT RUN for exact rc.15 | P3-G11C–G11G proved 1 user + 1 original cipher restored and post-backup cipher absent. On separately approved new test-only isolated path, run only one targeted rc.15 recovery regression if the release decision requires exact-version proof; do not touch historical Box objects. |
+| SMTP and operational notifications | NOT RUN for independently confirmed exact rc.15 delivery | rc.13 SMTP accepted/HTTP 200 did **not** prove inbox receipt. Verify unique test recipient mailbox receipt, direct authenticated SMTP and one representative operational route/fallback; inspect redaction. No real mail without authorization. |
+| Controlled failure, quarantine and rollback/recovery safety | NOT RUN for targeted rc.15 failure injection | Previous supported-upgrade success does not prove injected failure rollback. Separately consent on disposable test state, prove safe pre-mutation rollback and post-mutation refusal/recovery boundary, security ownership, and truthful health. |
+| Final release notes/tag/publication and production decision | HOLD | Await all required evidence, reviewed PR and independently authorized tag/publish/GO. Ubuntu 26.04 AMD64 real-host remains NOT RUN/best effort, not a substitute for ARM64 production gate. |
+
+**G0 read-only handoff:** Run the existing
+`tests/host-acceptance/production-new-host-preflight.py` on the **new host,
+not Cloud Shell and never VM8** with `--purpose fresh-install
+--expected-version 0.1.0-rc.15 --expected-sha <exact reviewed RC15-G HEAD>`.
+Pin the branch HEAD before cloning, verify clean unprivileged Git status
+*and its exit code*, run `tests/test_production_new_host_preflight.py`,
+then invoke the instrument with `sudo -n python3 -B`. Its **exit 0 means
+PENDING inventory, not authorization**. Exit 2 means BLOCKED. G0 never
+mounts/formats storage, installs packages, starts services, changes firewall,
+contacts SMTP/Box/Cloudflare or restarts the host. Protected evidence is
+operator-private in `~/vwoci-acceptance`; share only its sanitized summary.
+Storage identity/blankness still require independent operator verification.
+
+**Next grouped phases (each separately authorized):** G1 fresh-install and
+first-run custody; G2 live origin denial + Caddy/Admin and SMTP/notification
+receipt; G3 a targeted uniquely isolated remote recovery regression (only
+if required for exact-version proof); G4 controlled failure/quarantine,
+rollback and safe recovery. Each phase must recheck installed source and
+evidence pins, obtain its own literal approval immediately before any
+format, firewall mutation, email, backup upload, restore or failure injection,
+and preserve failures as FAIL/HOLD rather than promoting skipped steps.
+Retain only reviewed reusable tests and this matrix; do not check in VM
+one-shots, private receipts or redundant site inventory.
+
 ## Current code-release candidate: grouped blank-host source preflight
 
 The approved objective is to ship a validated **software codebase for future
