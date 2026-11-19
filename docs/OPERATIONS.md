@@ -149,12 +149,34 @@ sudo vwctl crowdsec status
 sudo vwctl crowdsec remediation-start
 ```
 
-`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. `remediation-start` starts the Worker only through the supported one-shot token path and records the current invocation/config policy attestation before returning success. After `remediation-start`, set every Worker Route created by the bouncer to **Fail Open** in Cloudflare, then attest that exact invocation:
+`crowdsec setup` leaves the Cloudflare Worker boot-disabled and clears any prior Fail Open confirmation because a new remediation invocation must be explicitly authorized. `remediation-start` starts the Worker only through the supported one-shot token path and records the current invocation/config policy attestation before returning success. The upstream **daemon** deletes and recreates its Worker/Routes after a stop; Cloudflare defaults new Routes to **Fail Closed**. This is particularly disruptive on the Workers Free plan if a request quota is reached.
+
+**Cloudflare Free opt-in (experimental API field):** For an explicitly authorized new invocation, use:
 
 ```bash
+sudo vwctl crowdsec remediation-start --auto-fail-open
+sudo vwctl crowdsec status
+```
+
+For an **already running** invocation (including after manually starting the bouncer), do **not restart it** just to set the mode:
+
+```bash
+sudo vwctl crowdsec ensure-fail-open
+sudo vwctl crowdsec status
+```
+
+These commands use the existing root-only SOPS `cloudflare_remediation_token`, discover the configured Cloudflare zone, require exactly one `<configured-domain>/*` Route attached to the exact CrowdSec Worker script, and reject unrelated/ambiguous Routes. If the Route is already Fail Open, they only read it. Otherwise they issue one bounded Cloudflare Route `PUT` carrying `request_limit_fail_open: true`. They then independently `GET` the **same Route ID** and require a literal Boolean `true` before recording a root-only confirmation bound to the **current** systemd invocation and local-only CrowdSec policy.
+
+**Compatibility warning:** Cloudflare returns this flag in its API today but it is absent from the public Workers Routes OpenAPI request schema; upstream CrowdSec's proposed implementation is not yet merged. No assumption that the field will remain supported is permitted. If Cloudflare stops returning/accepting it, the command exits nonzero, keeps the Worker running **unconfirmed**, and must not falsely mark `crowdsec.cloudflare` PASS. Do not retry `remediation-start` after that failure while the Worker is active. Use the dashboard manual fallback and confirm the same current invocation:
+
+```bash
+# In Cloudflare's Worker Routes settings: set the newly created
+# CrowdSec Route(s) to Fail Open, and visually verify the result.
 sudo vwctl crowdsec confirm-fail-open
 sudo vwctl crowdsec status
 ```
+
+Without `--auto-fail-open`, the existing `remediation-start` workflow stays manual. Worker **boot-disabled** remains intentional: these options do not add unattended Worker startup or silently enable timers/DNS updates. The API-readback confirmation proves Route state **at the time of that GET**, not continuous future Cloudflare configuration. Recheck after each new Worker invocation, route replacement or provider policy change. No public LAPI, unsupported browser-session automation, token in argv/environment, or paid Cloudflare plan is required.
 
 A healthy final state has four CrowdSec doctor checks: `crowdsec.engine`, `crowdsec.hub`, `crowdsec.firewall`, and `crowdsec.cloudflare`, all `PASS`. The firewall bouncer should be active/enabled; the Cloudflare Worker should be active for the current explicit invocation but remain disabled at boot.
 
