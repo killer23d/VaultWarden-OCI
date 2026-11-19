@@ -513,6 +513,40 @@ removed from the active tree before final PR. **RELEASE_GO=HOLD**.
 
 
 
+### rc.13 P4-E1 reboot safety preflight — November 19, 2026 (operator report)
+
+**PASS for read-only preboot inventory only; reboot remains NOT RUN in
+this checkpoint.** The operator executed the grouped P4-E1 check on
+`ubuntu@vaultwarden-oci-8` and reported `P4_E1_EXIT=0
+READ_ONLY_PREFLIGHT_PASS`, `P4_E1_WRAPPER_EXIT=0` with a root-private
+checkpoint at `/home/ubuntu/vwoci-acceptance/p4e-kXzQYJ/preboot.json`.
+The exact original host source `fd56313255c97992dc55c1475d94477597b88602`
+(52 Git-identical immutable files), dedicated volume UUID
+`f4e0bd62-48e7-4745-8987-44b14013216d`, protected Caddy/Vaultwarden
+credentials, healthy runtime, and prior P4-D two-container restart
+evidence were independently rechecked.
+
+| Preboot gate | Observation |
+| --- | --- |
+| Read-only identity/storage/restart provenance — **PASS** | Existing P4-D before/after private files agreed on source, disk, restored-cipher fingerprint, Worker invocation, and different pre/post Docker container IDs. Current host/source/storage/doctor checks remained PASS. |
+| Boot intent — **observed disabled** | Appliance `vaultwarden-oci.target` and health timer are loaded but inactive/**disabled**. This configuration does **not** establish automatic application startup or scheduled timers after a reboot. |
+| CrowdSec Worker — **PASS for current invocation** | Active but boot-disabled; previous confirmed invocation `a80be9e43af84a24b505b9e4b127abeb` unchanged. It must not be silently reused after the actual reboot. |
+| Cloudflare DNS readback — **PASS, observed** | `vwctl dns status` reported `in_sync=true` and `proxied=true` at the preboot instant. This does **not** authorize DNS changes or guarantee sync remains true after reboot. |
+| DNS write path — **verified risk** | Installed target wants the health timer, health service wants the DNS service, and installed DNS service executes `vwctl dns update --timer`. Enabling ordinary automation could mutate public Cloudflare DNS if IP/state later drifts. |
+| Genuine reboot/boot timer persistence — **NOT RUN** | The checkpoint explicitly recorded `reboot_performed=false`, `dns_isolation_required=true`; P4-E1 did not start, enable, mask or reboot anything. |
+
+**Next controlled scope:** a separately checkpointed reboot with
+`vaultwarden-oci.target` and all four timers remaining disabled
+through boot, so no DNS-writing automation is activated. This can
+establish intentional fail-closed restart behavior and data persistence
+across a real kernel boot, but **cannot** be presented as evidence of
+production-style enabled-target/timer automatic persistence. A later
+supported `vwctl start`, invocation-bound CrowdSec remediation
+start, and fresh Cloudflare Worker Route Fail Open acknowledgment must
+be reconciled independently. Release GO remains **HOLD**.
+
+
+
 
 ## Acceptance record
 
