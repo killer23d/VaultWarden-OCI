@@ -2,7 +2,7 @@
 
 **Isolated VM8 test harness — these files are not part of the production release.**
 
-This directory holds the exact six one-shot scripts prepared for the disposable
+This directory archives the original six rc.14 one-shot scripts plus newer rc.15 phase scripts for the disposable
 `ubuntu@vaultwarden-oci-8` Ubuntu 26.04 ARM64 host. They are uploaded here
 **only to avoid manual script uploads**. Once accepted, archive the concise
 results in `docs/HOST-ACCEPTANCE.md` and delete this temporary branch.
@@ -140,12 +140,10 @@ bounded read-only provider checks. Keep tokens, private journals and the encrypt
 recovery evidence off GitHub and out of chat; report only printed PASS/HOLD
 markers and private evidence directory paths.
 
-**Download procedure:** take a GitHub *commit SHA* for this temporary branch
-and fetch all six files and `SHA256SUMS.txt` from
+**Download procedure:** choose only the appropriate versioned phase and take a GitHub *commit SHA* for this temporary branch.
+The legacy rc.14 six-file manifest covers only the original six scripts; it does **not** attest rc.15 scripts. Fetch each rc.15 script individually, verify its exact expected Git blob (or SHA-256), run `bash -n` and parse embedded Python before execution. Fetch from
 `https://raw.githubusercontent.com/killer23d/VaultWarden-OCI/<commit>/tests/host-acceptance/rc14-vm8/<name>`,
-verify `sha256sum --check SHA256SUMS.txt` and `bash -n`, then execute the first
-phase with `bash 01-upgrade.sh`. Always fetch by immutable SHA, never a moving
-branch URL. Run later phases one at a time. Reconnect over approved private
+Do not run `01-upgrade.sh` on the already upgraded rc.15 host. Always fetch by immutable SHA, never a moving branch URL, and check full CI on that exact commit. Run later phases one at a time with separately authorized state-changing actions. Reconnect over approved private
 OCI access after the genuine reboot triggered by `03-preboot-reboot.sh`; no public SSH is necessary.
 
 **Important scope limit:** the suite contains a reversible test-only
