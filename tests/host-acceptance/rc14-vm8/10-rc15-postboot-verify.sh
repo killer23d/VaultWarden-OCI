@@ -75,16 +75,22 @@ if (pre.get('result')!='PREBOOT_ARMED' or pre.get('source_commit')!=PIN or pre.g
     hold('Genuine reboot and protected identity comparison did not pass')
 print('PASS: genuine new kernel boot ID differs from protected preboot checkpoint')
 
-# Verbatim exact release source comparison with the pinned accepted tree,
-# apart from versions.toml where the frozen updater is allowed to reorder keys.
-_,tracked=command(['git','-C',str(WORK),'ls-files','--','vwctl','versions.toml','email-providers.toml','vaultwarden_oci','systemd'])
+# The supported updater freezes dual-architecture source to exact ARM64-only versions.
+sys.path.insert(0,str(WORK))
+from vaultwarden_oci import update_versions
+if not pathlib.Path(update_versions.__file__).resolve().is_relative_to(WORK):
+    hold('Pinned candidate manifest helper source mismatch')
+expected_manifest=update_versions.frozen_versions_toml(
+    update_versions.resolve_pinned(WORK,machine='arm64')
+).encode('utf-8')
+_,tracked=command(['git','-c','safe.directory='+str(WORK),'-C',str(WORK),'ls-files','--','vwctl','versions.toml','email-providers.toml','vaultwarden_oci','systemd'])
 files=[pathlib.Path(s) for s in tracked.splitlines() if s]
-if len(files)<50:hold('Incomplete immutable source inventory')
+if len(files)!=56:hold('Unexpected immutable rc15 source inventory size')
 for relative in files:
     source,installed=WORK/relative,RELEASE/relative
     if not source.is_file() or not installed.is_file() or installed.is_symlink():hold('Installed candidate blob missing')
     if str(relative)=='versions.toml':
-        if installed.read_bytes()!=__import__('vaultwarden_oci.update_versions',fromlist=['frozen_versions_toml']).frozen_versions_toml(__import__('vaultwarden_oci.update_versions',fromlist=['resolve_pinned']).resolve_pinned(WORK,machine='arm64')).encode('utf-8'):hold('Frozen ARM64 version manifest differs')
+        if installed.read_bytes()!=expected_manifest:hold('Frozen ARM64 version manifest differs')
     elif hashlib.sha256(source.read_bytes()).digest()!=hashlib.sha256(installed.read_bytes()).digest():
         hold('Installed immutable release blob differs from acceptance source')
 print('PASS: selected rc15 immutable release matches '+str(len(files))+' candidate blobs')
