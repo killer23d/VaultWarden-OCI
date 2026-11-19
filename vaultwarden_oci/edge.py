@@ -1333,17 +1333,34 @@ def confirm_fail_open(
     paths: EdgePaths = EdgePaths(),
     runner: Runner = run_command,
     now: int | None = None,
+    verified_route: Mapping[str, str] | None = None,
 ) -> None:
     if os.geteuid() != 0 and paths == EdgePaths():
         raise EdgeError("vwctl crowdsec confirm-fail-open must run as root")
     invocation = _service_invocation_id(runner)
     if invocation is None:
         raise EdgeError("CrowdSec Cloudflare remediation is not active with a valid systemd invocation")
-    payload = {
+    payload: dict[str, object] = {
         "schema_version": 1,
         "invocation_id": invocation,
         "confirmed_at": int(time.time()) if now is None else int(now),
     }
+    if verified_route is not None:
+        # Only the exact Cloudflare GET-after-PUT owner may submit this
+        # extension; manual confirmations retain the original schema.
+        from .cloudflare_route_mode import BOUNCER_SCRIPT, ZONE_OR_ROUTE_ID
+
+        if (
+            not isinstance(verified_route, Mapping)
+            or not isinstance(verified_route.get("id"), str)
+            or not ZONE_OR_ROUTE_ID.fullmatch(verified_route["id"])
+            or verified_route.get("script") != BOUNCER_SCRIPT
+            or not isinstance(verified_route.get("pattern"), str)
+            or not verified_route["pattern"].endswith("/*")
+        ):
+            raise EdgeError("automated Fail Open route proof is invalid")
+        payload["verification"] = "cloudflare-api-readback"
+        payload["route"] = dict(verified_route)
     try:
         _atomic_write(
             paths.fail_open_confirmation,
@@ -1351,7 +1368,7 @@ def confirm_fail_open(
             0o600,
         )
     except OSError as exc:
-        raise EdgeError(f"cannot persist CrowdSec Fail Open confirmation: {exc}") from exc
+        raise EdgeError("cannot persist CrowdSec Fail Open confirmation") from exc
 
 
 def _fail_open_confirmed(path: Path, invocation: str | None) -> bool:
@@ -1563,7 +1580,7 @@ def doctor_checks(
     invocation = _service_invocation_id(runner) if active else None
     confirmed = _fail_open_confirmed(paths.fail_open_confirmation, invocation)
     if active and disabled and config_test.ok and bouncer.ok and confirmed:
-        checks.append(DoctorCheck("crowdsec.cloudflare", "PASS", "Cloudflare Worker bouncer is active, boot-disabled, and Fail Open is operator-confirmed for this invocation"))
+        checks.append(DoctorCheck("crowdsec.cloudflare", "PASS", "Cloudflare Worker bouncer is active, boot-disabled, and Fail Open is confirmed for this invocation (manual or verified API readback)"))
     elif active and disabled and config_test.ok and bouncer.ok:
         checks.append(DoctorCheck("crowdsec.cloudflare", "FAIL", "Cloudflare Worker bouncer is active but Fail Open is not confirmed for this service invocation"))
     else:
