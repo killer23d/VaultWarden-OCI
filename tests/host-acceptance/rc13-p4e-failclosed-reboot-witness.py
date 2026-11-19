@@ -66,7 +66,7 @@ def run(args: list[str], *, allowed: tuple[int, ...] = (0,), timeout: int = 50) 
 
 
 def systemd(name: str) -> dict[str, str]:
-    props = "LoadState,ActiveState,UnitFileState,InvocationID"
+    props = "LoadState,ActiveState,UnitFileState,InvocationID,ExecMainStartTimestampMonotonic"
     output = run(["systemctl", "show", name, "--no-pager", "--property=" + props])
     return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
 
@@ -184,6 +184,15 @@ def check_units(phase: str) -> None:
     if (target.get("LoadState"), target.get("ActiveState"),
             target.get("UnitFileState")) != ("loaded", "inactive", "disabled"):
         hold("target not deliberately disabled/inactive")
+    app = systemd("vaultwarden-oci.service")
+    if (app.get("LoadState"), app.get("ActiveState"),
+            app.get("UnitFileState")) != ("loaded", "inactive", "disabled"):
+        hold("application systemd service unexpectedly enabled/active")
+    dns = systemd("vaultwarden-oci-dns.service")
+    if dns.get("LoadState") != "loaded" or dns.get("ActiveState") != "inactive":
+        hold("DNS synchronization unit unexpectedly active/unavailable")
+    if phase == "postboot" and dns.get("ExecMainStartTimestampMonotonic") not in ("", "0"):
+        hold("DNS writer apparently executed since boot; stop")
     for name in TIMERS:
         row = systemd(name)
         if (row.get("LoadState"), row.get("ActiveState"),
