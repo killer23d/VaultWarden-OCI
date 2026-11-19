@@ -175,10 +175,24 @@ def ensure_fail_open(*, paths=None, runner=None) -> RouteProof:
         )
         _validate_route(updated.get("result"), pattern=pattern, route_id=route_id)
 
-    verified = _validate_route(_api_json(route_url, token).get("result"),
-                               pattern=pattern, route_id=route_id)
-    if verified.get("request_limit_fail_open") is not True:
-        _fail("Cloudflare did not independently report Fail Open=true; operator dashboard confirmation required")
+    # Cloudflare can acknowledge the PUT but briefly return the old
+    # request_limit_fail_open value on a fresh GET. The API readback
+    # is an eventually consistent observation, not a reason to replay a
+    # Cloudflare PUT or restart the daemon. Require two distinct GETs with
+    # literal true and stable identity before persisting confirmation.
+    stable_true = 0
+    for attempt in range(12):
+        verified = _validate_route(
+            _api_json(route_url, token).get("result"),
+            pattern=pattern, route_id=route_id,
+        )
+        stable_true = stable_true + 1 if verified.get("request_limit_fail_open") is True else 0
+        if stable_true >= 2:
+            break
+        if attempt != 11:
+            time.sleep(3)
+    else:
+        _fail("Cloudflare did not independently report Fail Open=true on two consecutive readbacks; operator dashboard confirmation required")
 
     if (edge._service_invocation_id(runner) != invocation
             or not edge._active(edge.BOUNCER_SERVICE, runner)
