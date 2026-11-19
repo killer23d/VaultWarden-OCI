@@ -34,6 +34,7 @@ class RouteAPI:
         self.duplicates = False
         self.info_pages = 1
         self.hidden_list_cycles = 0
+        self.delayed_true_gets = 0
 
     def object(self):
         row = {"id": ROUTE, "pattern": self.pattern, "script": self.script}
@@ -62,7 +63,11 @@ class RouteAPI:
                 self.open = True
             return {"success": True, "result": self.object()}
         assert method == "GET"
-        return {"success": True, "result": self.object()}
+        row = self.object()
+        if self.open and self.delayed_true_gets:
+            self.delayed_true_gets -= 1
+            row["request_limit_fail_open"] = False
+        return {"success": True, "result": row}
 
 
 class AutoFailOpenTests(unittest.TestCase):
@@ -101,7 +106,7 @@ class AutoFailOpenTests(unittest.TestCase):
         proof = self.call()
         self.assertFalse(proof.changed)
         self.assertEqual(proof.invocation_id, INVOCATION)
-        self.assertEqual([x[0] for x in self.api.calls], ["GET", "GET", "GET"])
+        self.assertEqual([x[0] for x in self.api.calls], ["GET", "GET", "GET", "GET"])
         self.confirm.assert_called_once()
         self.assertEqual(self.confirm.call_args.kwargs["verified_route"]["id"], ROUTE)
         self.assertNotIn(TOKEN, str(proof))
@@ -110,7 +115,31 @@ class AutoFailOpenTests(unittest.TestCase):
         proof = self.call()
         self.assertTrue(proof.changed)
         self.assertTrue(self.api.open)
-        self.assertEqual([x[0] for x in self.api.calls], ["GET", "GET", "PUT", "GET"])
+        self.assertEqual([x[0] for x in self.api.calls], ["GET", "GET", "PUT", "GET", "GET"])
+        self.confirm.assert_called_once()
+
+    def test_cloudflare_delayed_post_put_get_converges_with_no_second_put(self):
+        self.api.delayed_true_gets = 2
+        proof = self.call()
+        self.assertTrue(proof.changed)
+        self.assertEqual([x[0] for x in self.api.calls], [
+            "GET", "GET", "PUT", "GET", "GET", "GET", "GET"
+        ])
+        self.confirm.assert_called_once()
+
+    def test_nonconverging_post_put_readback_holds_without_repeat_put(self):
+        self.api.delayed_true_gets = 30
+        with self.assertRaisesRegex(edge.EdgeError, "two consecutive readbacks"):
+            self.call()
+        self.assertEqual([x[0] for x in self.api.calls].count("PUT"), 1)
+        self.confirm.assert_not_called()
+
+    def test_preexisting_true_route_stable_gets_do_not_issue_put(self):
+        self.api.open = True
+        proof = self.call()
+        self.assertFalse(proof.changed)
+        self.assertEqual([x[0] for x in self.api.calls].count("PUT"), 0)
+        self.assertEqual([x[0] for x in self.api.calls].count("GET"), 4)
         self.confirm.assert_called_once()
 
     def test_undocumented_field_not_echoed_is_hold_not_pass(self):
