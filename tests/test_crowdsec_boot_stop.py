@@ -61,6 +61,7 @@ class BootOwnerTests(unittest.TestCase):
             mock.patch.object(edge, "_service_invocation_id", return_value=INV),
             mock.patch.object(crowdsec_worker_policy, "runtime_policy_healthy", return_value=True),
             mock.patch.object(cloudflare_route_mode, "ensure_fail_open", return_value=self.proof),
+            mock.patch.object(cloudflare_route_mode, "wait_owned_route_stable"),
         )
         for p in patches:
             p.start()
@@ -83,6 +84,15 @@ class BootOwnerTests(unittest.TestCase):
             result = crowdsec_boot.reconcile(runner=self.runner)
         self.assertFalse(result.started)
         start.assert_not_called()
+
+    def test_boot_cannot_report_pass_if_provider_route_disappears(self):
+        self.state, self.pid = "active", "333"
+        with mock.patch.object(
+            cloudflare_route_mode, "wait_owned_route_stable",
+            side_effect=edge.EdgeError("Route inconsistent"),
+        ):
+            with self.assertRaisesRegex(edge.EdgeError, "Route inconsistent"):
+                crowdsec_boot.reconcile(runner=self.runner)
 
     def test_failed_worker_not_silently_reset_or_restarted(self):
         self.state = "failed"
