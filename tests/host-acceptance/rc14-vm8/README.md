@@ -114,6 +114,26 @@ the boot one-shot or permit a reboot yet.** The real-boot and scheduled
 service witnesses need separate rc.15-specific tests; the legacy
 rc.14 preboot script still must not be reused.
 
+
+
+**RC15-C actual reboot (after RC15-B PASS):** The rc.15-specific
+`09-rc15-preboot-reboot.sh` is a **one-time, independently consent-gated**
+production-style disposable-host reboot witness. It requires the root-private
+`rc15-b-32beec5bc905/after.json` PASS receipt and unchanged new Worker
+invocation/Route, source, dedicated disk, original 1-user/1-cipher snapshot,
+installed doctor and local-only zero-retention backup configuration. Before
+mutating anything, the operator must type `AUTHORIZE_RC15_VM8_REBOOT`.
+The script then stages a reversible `ConditionPathExists` block on the
+systemd Cloudflare DNS writer, enables only the application target and
+opt-in CrowdSec boot-rearm oneshot (without `--now`), durably records the
+preboot kernel ID/Route/Worker and invokes exactly one real reboot.
+This intentionally changes running service/Worker behavior at next boot,
+and the new bouncer Route can affect the configured hostname even when
+public DNS is unchanged. **Do not run the rc.14 postboot/scheduled/cleanup
+scripts against rc.15.** Separate rc.15 postboot, four scheduled-operation
+and cleanup checks must be versioned and CI-verified. A HOLD after partial
+staging is not authorization to replay or automatically undo the state.
+
 **No automatic retries.** Do not rerun an already-started phase after HOLD.
 The only automatic work is within the approved one-shot service and explicitly
 bounded read-only provider checks. Keep tokens, private journals and the encrypted
