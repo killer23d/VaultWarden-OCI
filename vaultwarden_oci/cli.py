@@ -449,6 +449,11 @@ def _parser() -> argparse.ArgumentParser:
         "ensure-fail-open",
         help="experimental opt-in: set/read back exact current bouncer Route Fail Open without restarting the Worker",
     )
+    crowdsec_commands.add_parser(
+        "remediation-stop",
+        help="explicitly stop Worker and verify Cloudflare cleanup before normalizing upstream SIGTERM exit",
+    )
+    crowdsec_commands.add_parser("boot-reconcile", help=argparse.SUPPRESS)
     crowdsec_commands.add_parser("confirm-fail-open", help="operator-confirm the current Worker Route is set to Fail Open")
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
     crowdsec_commands.add_parser("decisions", help="list active CrowdSec decisions")
@@ -780,6 +785,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "PASS: Cloudflare Route Fail Open verified by independent API readback "
                     f"for current invocation; route={proof.route_id[:8]}; "
                     f"updated={'yes' if proof.changed else 'no'}"
+                )
+                return 0
+            if args.crowdsec_command == "remediation-stop":
+                from . import crowdsec_stop
+
+                result = crowdsec_stop.stop()
+                print(
+                    "PASS: controlled Worker stop, process absent, Cloudflare Route cleanup verified; "
+                    f"upstream_exit={result.original_exit_status}; "
+                    f"failed_state_normalized={'yes' if result.normalized else 'no'}"
+                )
+                return 0
+            if args.crowdsec_command == "boot-reconcile":
+                from . import crowdsec_boot
+
+                result = crowdsec_boot.reconcile()
+                print(
+                    "PASS: boot-scoped CrowdSec Worker and Cloudflare Route verified; "
+                    f"invocation={result.invocation_id}; "
+                    f"started={'yes' if result.started else 'no'}; "
+                    f"updated={'yes' if result.cloudflare_route_updated else 'no'}"
                 )
                 return 0
             if args.crowdsec_command == "confirm-fail-open":
