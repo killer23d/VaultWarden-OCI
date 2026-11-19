@@ -60,8 +60,8 @@ def protected(file):
 
 operator=pwd.getpwnam('ubuntu')
 if (os.geteuid()!=0 or os.environ.get('SUDO_USER')!='ubuntu' or os.environ.get('SUDO_UID')!=str(operator.pw_uid)
-        or WORK!=pathlib.Path('/home/ubuntu/VaultWarden-OCI-rc15-a-92b9300f9612')
-        or EVID!=pathlib.Path('/home/ubuntu/vwoci-acceptance/rc15-c-92b9300f9612')
+        or WORK!=pathlib.Path('/home/ubuntu/VaultWarden-OCI-rc15-a-32beec5bc905')
+        or EVID!=pathlib.Path('/home/ubuntu/vwoci-acceptance/rc15-c-32beec5bc905')
         or PIN!='32beec5bc905cdecdfdc4a359147c3f1d45d8444'):
     hold('Operator/source/evidence identity mismatch')
 if pathlib.Path('/opt/vaultwarden-oci/current').resolve()!=RELEASE:
