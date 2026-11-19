@@ -84,7 +84,7 @@ for relative in files:
     source,installed=WORK/relative,RELEASE/relative
     if not source.is_file() or not installed.is_file() or installed.is_symlink():hold('Installed candidate blob missing')
     if str(relative)=='versions.toml':
-        if tomllib.loads(source.read_text())!=tomllib.loads(installed.read_text()):hold('Frozen version manifest differs')
+        if installed.read_bytes()!=__import__('vaultwarden_oci.update_versions',fromlist=['frozen_versions_toml']).frozen_versions_toml(__import__('vaultwarden_oci.update_versions',fromlist=['resolve_pinned']).resolve_pinned(WORK,machine='arm64')).encode('utf-8'):hold('Frozen ARM64 version manifest differs')
     elif hashlib.sha256(source.read_bytes()).digest()!=hashlib.sha256(installed.read_bytes()).digest():
         hold('Installed immutable release blob differs from acceptance source')
 print('PASS: selected rc15 immutable release matches '+str(len(files))+' candidate blobs')
