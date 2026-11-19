@@ -57,6 +57,19 @@ class FreshHostP0Tests(unittest.TestCase):
         self.assertFalse(module.release_matches('0.1.0-rc.12', '0.1.0-rc.13'))
         self.assertFalse(module.release_matches([], '0.1.0-rc.13'))
 
+    def test_current_release_manifest_needs_exact_reviewed_pin(self):
+        # Release-neutral G0 contract: the installed candidate follows
+        # versions.toml, not a stale rc.13 fixture or a floating ref.
+        import tomllib
+        with (source.parents[2] / 'versions.toml').open('rb') as stream:
+            version = tomllib.load(stream)['vaultwarden_oci']['version']
+        pin = 'f' * 40
+        self.assertTrue(module.valid_candidate_args(version, pin, 'fresh-install'))
+        self.assertTrue(module.release_matches(version, version))
+        self.assertFalse(module.valid_candidate_args(version, None, 'fresh-install'))
+        self.assertFalse(module.valid_candidate_args('latest', pin, 'fresh-install'))
+        self.assertFalse(module.release_matches('0.1.0-rc.13', version))
+
     def test_source_pin_requires_clean_commit_and_refuses_symlink_git(self):
         pinned = 'b' * 40
         with TemporaryDirectory() as temp:
