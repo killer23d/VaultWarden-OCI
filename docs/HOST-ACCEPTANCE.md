@@ -1130,6 +1130,61 @@ Keep PR #436 draft and `v2` unchanged; `RELEASE_GO=HOLD`.
 
 
 
+### rc.15 RC15-A supported installed upgrade accepted — November 19, 2026
+
+**PASS: supported rc.14 → rc.15 verified-recovery update,
+immutable ARM64 installed release and original vault / Worker
+invariants.** On `ubuntu@vaultwarden-oci-8`, the operator executed
+the checksum-pinned host script
+`07-rc15-upgrade.sh` from temporary acceptance branch
+`ade097ff2fde6047b29c156ea13b439957734d78`, gated on [full
+host-harness CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44619089381).
+The candidate source was
+`fix/rc15-cloudflare-failopen-readback-20261119`
+commit `32beec5bc905cdecdfdc4a359147c3f1d45d8444`, with [full
+application CI PASS](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618010233).
+
+Preflight verified accepted `rc14-c` and `rc14-d` private
+receipts, original **1 user / 1 cipher**, unchanged ext4 device,
+zero backup pruning, current CrowdSec Worker invocation, exact
+Cloudflare Route and two independent Fail Open GETs, local-only
+source-policy attestation, doctor PASS, disabled application target
+and optional CrowdSec boot re-arm, no leftover DNS test override,
+and no update-recovery guard. The exact source-pinned update plan
+was rc.14 → rc.15 ARM64 (no latest), and the installed
+`vwctl update apply` **returned exit 0 after the verified encrypted
+`.vwrec` recovery step**, without a retry.
+
+Independent postflight confirmed **all 56 installed rc.15 source
+files** match the tested Git candidate, accounting for the supported
+ARM64-frozen `versions.toml`; the **original vault contents**, Worker
+invocation and Cloudflare Route did not change, and the installed
+rc.15 doctor overall/Cloudflare checks both passed. The new opt-in
+boot service remains disabled and **the VM has not rebooted**.
+
+Operator final markers:
+`RC15_A_PRE_EXIT=0 SAFE_FOR_SUPPORTED_UPGRADE`;
+`RC15_A_POST_EXIT=0 IMMUTABLE_RC15_INSTALLED_AND_ACCEPTED`;
+`RC15_A_EXIT=0 INSTALLED_RC15_UPGRADE_PASS`;
+`BOOT_REARM=NOT_ENABLED; REBOOT=NOT_RUN; RELEASE_GO=HOLD`.
+Private evidence:
+`/home/ubuntu/vwoci-acceptance/rc15-a-4O2fOU/accepted.json`;
+pinned checkout:
+`/home/ubuntu/VaultWarden-OCI-rc15-a-32beec5bc905`.
+
+The rc.15 candidate fixes the original rc.14 post-PUT immediate
+Cloudflare GET stale-readback error: it permits bounded **read-only**
+GET polling, requires two consecutive literal Fail Open true values
+on the exact same Route and never repeats the Cloudflare PUT.
+**Host-level fresh-Route auto-Fail-Open and reboot acceptance remain
+NOT RUN.** Next authorized distinct test: `RC15-B` controlled
+shutdown, one fresh re-arm under installed rc.15, new Route and
+invocation, independent provider and vault/doctor proof. Do **not**
+enable boot/timers, reboot, clean up evidence or merge PR #436
+until later host gates pass; `RELEASE_GO=HOLD`.
+
+
+
 
 ## Acceptance record
 
