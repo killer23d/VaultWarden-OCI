@@ -163,6 +163,8 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertIn("original_cipher_sha256", text)
         self.assertIn("wait_owned_route_stable", text)
         self.assertIn("updated=yes", text)
+        self.assertIn("cloudflare-api-readback", text)
+        self.assertIn("proof_file=edge.FAIL_OPEN_CONFIRMATION", text)
         self.assertIn("remediation-stop", text)
         self.assertIn("remediation-start --auto-fail-open", text)
         self.assertEqual(text.count("vwctl crowdsec remediation-stop"), 1)
