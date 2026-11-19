@@ -649,6 +649,37 @@ Route matching the exact configured site hostname and script, confirmed a litera
 
 
 
+### rc.14 RC14-A isolated-candidate live Cloudflare smoke — November 19, 2026
+
+**PASS for existing-Route idempotence only; no Worker restart or
+automatic false-to-true update.** The operator ran rc.14
+`feature/cf-free-auto-fail-open` pinned to
+`daaca5e190d3469731548f302e4eba052ac17ad0` in a separate
+`/home/ubuntu/VaultWarden-OCI-rc14-daaca5e190d3` checkout while
+the **selected** release remained installed immutable rc.13 source
+`fd56313255c97992dc55c1475d94477597b88602`.
+The exact local candidate source matched the pinned commit and the
+focused `test_cloudflare_route_mode.py` suite passed on the real
+Ubuntu 26.04 ARM64 host.
+
+| RC14-A evidence | Result and scope |
+| --- | --- |
+| Candidate checkout, version and unit suite — **PASS** | `vwctl 0.1.0-rc.14` from exact pinned checkout; focused tests PASS. Does not prove a full rc.14 installation or upgrade. |
+| Original live installation and secrets — **PASS unchanged** | Prior P4-A verified all 52 rc.13 release blobs, dedicated ext4 device/UUID, accepted Admin and backup custody; installed release selection never moved. |
+| Existing Worker Route — **PASS** | Cloudflare GET independently reported exact configured `bw.lazymocha.com/*` Route, upstream CrowdSec Worker script, and `request_limit_fail_open=true`. Prior current Worker invocation `b27e8dd07f9340ad8e1567e16ab2e33d` remained valid. |
+| New command `crowdsec ensure-fail-open` — **PASS, no remote update** | Candidate CLI emitted `updated=no`: it verified the already-Fail-Open Route without issuing a Route PUT, then saved protected `cloudflare-api-readback` provenance bound to the existing invocation. This is a useful idempotence gate, **not a false-to-true automation gate**. |
+| Final doctor and handoff — **PASS** | Installed rc.13 `vwctl doctor --json` exit 0, overall PASS with `crowdsec.cloudflare=PASS`; confirmation remained root-only mode 0600; release selection remained rc.13. |
+| Private evidence | `/home/ubuntu/vwoci-acceptance/rc14-a-Ae4UdN/rc14-a.json`, protected; no tokens, private recovery information or secret values committed. |
+| Remaining rc.14 gates — **NOT RUN** | Fresh bouncer invocation, actual Cloudflare Route recreation, automatic Fail Closed→Fail Open API update, deliberately rejected API-field fallback, whole-appliance installation/upgrade from rc.13, production-target/timer reboot, external origin packet denial. Release GO **HOLD**. |
+
+A new rc.14 candidate revision adding bounded **read-only Route-discovery
+polling** is under PR #436; its source is distinct from the exactly
+host-tested RC14-A commit above. It must pass CI and separate RC14-B
+host acceptance; do not silently transfer RC14-A's source pin or
+claim a false-to-true live-update PASS.
+
+
+
 
 ## Acceptance record
 
