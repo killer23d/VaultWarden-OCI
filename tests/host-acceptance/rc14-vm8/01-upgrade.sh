@@ -112,7 +112,19 @@ work=pathlib.Path(sys.argv[1]).resolve(strict=True);pin=sys.argv[2]
 release=pathlib.Path('/opt/vaultwarden-oci/releases/0.1.0-rc.14')
 if pathlib.Path('/opt/vaultwarden-oci/current').resolve()!=release:
     raise SystemExit('HOLD: selected immutable rc14 release not active')
-paths=subprocess.run(['git','-C',str(work),'ls-files','-z','--','vwctl','versions.toml','email-providers.toml','vaultwarden_oci','systemd'],capture_output=True,check=True).stdout.split(b'\x00')
+# The supported updater freezes versions.toml for the selected ARM64
+# architecture; the source manifest contains both ARM64 and AMD64 pins.
+sys.path.insert(0,str(work))
+from vaultwarden_oci import update_versions
+expected=update_versions.frozen_versions_toml(
+    update_versions.resolve_pinned(work,machine='arm64')
+).encode('utf-8')
+paths=subprocess.run(
+    ['git','-c','safe.directory='+str(work),'-C',str(work),
+     'ls-files','-z','--','vwctl','versions.toml','email-providers.toml',
+     'vaultwarden_oci','systemd'],
+    capture_output=True,check=True
+).stdout.split(b'\x00')
 count=0
 for raw in paths:
     if not raw:continue
@@ -121,8 +133,8 @@ for raw in paths:
     if not source.is_file() or installed.is_symlink() or not installed.is_file():
         raise SystemExit('HOLD: installed rc14 release file unavailable')
     if relative.as_posix()=='versions.toml':
-        if tomllib.loads(source.read_text())!=tomllib.loads(installed.read_text()):
-            raise SystemExit('HOLD: installed rc14 versions semantically differ from pinned candidate')
+        if installed.read_bytes()!=expected:
+            raise SystemExit('HOLD: installed rc14 frozen ARM64 version manifest differs from tested candidate')
     elif hashlib.sha256(source.read_bytes()).digest()!=hashlib.sha256(installed.read_bytes()).digest():
         raise SystemExit('HOLD: installed rc14 differs from candidate tracked source')
     count+=1
