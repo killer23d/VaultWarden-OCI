@@ -86,6 +86,7 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
             ast.parse(body, filename=path.name + ":" + label)
         self.assertIn("CF_SAMPLE_", content)
         self.assertIn("REARM_FAILURE_CATEGORY=", content)
+        self.assertIn("CONTROLLED_STOP_UPSTREAM_EXIT=", content)
         self.assertNotIn("systemctl', 'start'", content)
         self.assertNotIn("systemctl', 'stop'", content)
         self.assertNotIn("remediation-start --auto-fail-open", content)
