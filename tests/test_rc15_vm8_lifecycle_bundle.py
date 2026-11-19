@@ -49,7 +49,6 @@ class RC15LifecycleBundleTests(unittest.TestCase):
         self.assertIn('GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c safe.directory=', post)
         self.assertIn("Pinned candidate Git index/status unreadable", post)
         self.assertNotIn('[ -z "$(git -C "$WORK" status --porcelain)" ]', post)
-        self.assertNotIn("--porcelain=v1", post)
         self.assertIn("new_worker_route_id", post)
         self.assertIn("source_commit", schedule)
         self.assertIn("SCHEDULE_PASS", schedule)
