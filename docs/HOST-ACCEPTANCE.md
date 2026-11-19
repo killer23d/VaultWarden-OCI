@@ -939,6 +939,45 @@ next single-mutation host gate proceed. `RELEASE_GO=HOLD`.
 
 
 
+### rc.14 RC14-C installed-release reconciliation — November 19, 2026
+
+**PASS — supported rc.13→rc.14 update and independent post-upgrade
+acceptance complete; later lifecycle gates not yet run.**
+The original supported update `vwctl update apply` completed once, but
+its historical host verifier had incorrectly compared the dual-arch source
+`versions.toml` with the updater's intentionally frozen ARM64-only
+installed manifest. The operator then executed a separate **read-only**
+reconciliation script from the checksum-pinned temporary acceptance
+branch at `15ab7d2487fce00e20fe5da45c6143677138179f`
+(GitHub Actions [run 44612647342](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44612647342)
+completed success), without repeating the update or restarting services.
+
+Operator evidence printed:
+- `PASS: Original supported rc13 to rc14 update completed once`.
+- `PASS: Exact frozen ARM64 versions manifest matches rc14 candidate`.
+- `PASS: All 56 installed source files match the tested Git commit`.
+- `PASS: Dedicated ext4 volume and no-root-fallback verified`.
+- `PASS: Opt-in boot unit loaded and disabled; update guard clear`.
+- `PASS: Installed rc14 doctor overall PASS; CrowdSec Cloudflare PASS`.
+- `RC14_C_RECONCILE_EXIT=0 INSTALLED_RC14_UPGRADE_PASS`.
+- `RC14_C_RECONCILE_WRAPPER_EXIT=0`, `BOOT_REARM=NOT_ENABLED`,
+  `REBOOT=NOT_RUN`, `RELEASE_GO=HOLD`.
+
+Installed candidate is pinned application commit
+`92b9300f96125d19105cc1d4865024cb49612b28`.
+The original evidence and new protected pass receipt are under
+`/home/ubuntu/vwoci-acceptance/rc14-c-plpbvT`, including
+`rc14-c-reconciled.json`. **Only RC14-C** is accepted.
+Next authorized separate gate is controlled upstream Worker shutdown,
+verified cleanup of its previous Cloudflare Route with no process,
+narrow normalization of its known `SIGTERM` exit 1, and **one** fresh
+`remediation-start --auto-fail-open`, then independent provider, original
+vault data and doctor checks (RC14-D). Do not reboot, enable target/timers
+or delete temporary branch until those further live gates pass.
+**RELEASE_GO=HOLD**.
+
+
+
 
 ## Acceptance record
 
