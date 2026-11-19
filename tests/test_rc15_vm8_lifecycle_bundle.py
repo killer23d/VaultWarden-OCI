@@ -10,7 +10,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1] / "tests/host-acceptance/rc14-vm8"
 BLOBS = {
     "09-rc15-preboot-reboot.sh": "02c08302e57bf5d562cd5d8d15897f67f40199c3",
-    "10-rc15-postboot-verify.sh": "27c918a6e0515afd28198818e65eff071285155a",
+    "10-rc15-postboot-verify.sh": "2ac8662168bad82a2f16e2ee82e384d94af0f5e5",
     "11-rc15-scheduled-operations.sh": "19620161143eb26197c13f5b51865bcdf8825906",
     "12-rc15-safe-cleanup.sh": "77d366a279742cee02e56349be9fa864c31eeb6b",
 }
@@ -49,6 +49,7 @@ class RC15LifecycleBundleTests(unittest.TestCase):
         self.assertIn('GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c safe.directory=', post)
         self.assertIn("Pinned candidate Git index/status unreadable", post)
         self.assertNotIn('[ -z "$(git -C "$WORK" status --porcelain)" ]', post)
+        self.assertNotIn("--porcelain=v1", post)
         self.assertIn("new_worker_route_id", post)
         self.assertIn("source_commit", schedule)
         self.assertIn("SCHEDULE_PASS", schedule)
