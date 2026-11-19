@@ -766,7 +766,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     proof = cloudflare_route_mode.ensure_fail_open()
                     print(
                         "PASS: Cloudflare Route Fail Open verified by independent API readback "
-                        f"for current invocation; route={proof.route_id[:8]}"
+                        f"for current invocation; route={proof.route_id[:8]}; "
+                        f"updated={'yes' if proof.changed else 'no'}"
                     )
                 else:
                     print("ACTION: set current bouncer-created Worker Route to Fail Open in Cloudflare and run 'vwctl crowdsec confirm-fail-open', or use the opt-in 'vwctl crowdsec ensure-fail-open'")
