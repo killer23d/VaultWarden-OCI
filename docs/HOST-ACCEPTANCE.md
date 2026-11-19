@@ -547,6 +547,43 @@ be reconciled independently. Release GO remains **HOLD**.
 
 
 
+### rc.13 P4-E2 real fail-closed reboot witness — November 19, 2026
+
+**PASS: genuine new-kernel-boot persistence of protected data and
+intentionally fail-closed public application availability.** The operator
+executed the [pinned P4-E2 pre/post witness](https://github.com/killer23d/VaultWarden-OCI/blob/a9e3cbe63ee5fe3b54ffaebc271405ee1746e1bb/tests/host-acceptance/rc13-p4e-failclosed-reboot-witness.py)
+(SHA-256 `ebde6905044dad8daf56b8ab2d59ea57e7d40d651c64bc6e40f955e95c10930d`)
+with the prior `p4e-kXzQYJ` protected checkpoint, performed a real
+`systemctl reboot`, and reconnected via approved private SSH. The
+pre-reboot terminal output ended during the reboot command (the expected
+SSH disruption), so the reboot command's exit code was **not separately
+captured**; the post-boot script independently compared the kernel boot
+ID against the armed checkpoint and reported:
+`P4_E2_POSTBOOT_EXIT=0 FAIL_CLOSED_BOOT_PASS`,
+`P4_E2_POST_WRAPPER_EXIT=0`.
+
+| P4-E2 evidence | Accepted result / explicit boundary |
+| --- | --- |
+| Genuine reboot — **PASS** | New `/proc/sys/kernel/random/boot_id` differs from the owner-private armed preboot record; no reliance on remote-session disconnect alone. |
+| Installed source/volume — **PASS** | Rechecked all 52 immutable blobs from actual tested release source `fd56313255c97992dc55c1475d94477597b88602`, Ubuntu 26.04 ARM64/Python 3.14, dedicated ext4 data disk `f4e0bd62-48e7-4745-8987-44b14013216d`, no root fallback. |
+| Recovery persistence — **PASS** | Independent read-only SQLite snapshot with `integrity_check=ok`, exactly **one user and one original cipher**, with the original cipher-record fingerprint `10b53feb60db4f7d94f280b6601e6fdfd35d6137d13eb351b94f99234c4149fa` unchanged. No restore performed. |
+| Fail-closed application publication — **PASS** | Caddy Docker restart policy `no` and Caddy **not running** after reboot; Vaultwarden Docker policy `unless-stopped` remained as designed. This does not demonstrate web availability after boot and **must not** be reported as a normal automatic-start PASS. |
+| Disabled automation and Worker — **PASS for intended disabled state** | `vaultwarden-oci.target`/appliance service and all four timers stayed inactive/disabled. CrowdSec Cloudflare Worker was inactive and boot-disabled. DNS synchronizer was inactive and had no postboot execution timestamp; no boot-triggered DNS publish observed by these checks. |
+| Automatic lifecycle — **NOT RUN** | No enabled-target/automatic service or timer operation, scheduled backup, scheduled DNS update, CrowdSec re-arm, external non-Cloudflare origin packet-denial test, or live predecessor upgrade was executed. |
+| Release disposition — **HOLD** | Postboot explicitly printed `P4_E2_AUTOMATIC_TARGET_TIMER_PERSISTENCE=NOT_RUN` and `RELEASE_GO=HOLD`. |
+
+The script only observed state and recorded root-private evidence in
+`/home/ubuntu/vwoci-acceptance/p4e-kXzQYJ/postboot.json`.
+**Next:** separately use the installed `vwctl start` (not enable timers)
+and invocation-bound `vwctl crowdsec remediation-start`. Once the
+Worker is started, explicitly inspect its current Cloudflare Worker
+Routes and confirm **Fail Open** for the *new* invocation before
+`vwctl crowdsec confirm-fail-open`. No confirmation from the old
+invocation can be carried forward. Keep test VM DNS, host packages,
+retention, remote objects, and unsupported live upgrade unchanged.
+
+
+
 
 ## Acceptance record
 
