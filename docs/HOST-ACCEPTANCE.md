@@ -578,3 +578,31 @@ Then exercise one real built-in operational HTTPS provider success, one document
 Collect only secret-free evidence: commit/version, architecture/Ubuntu build, storage identity/mount evidence, exact resolved pins, command/result, doctor JSON, artifact hashes, systemd invocation IDs, nftables hook names, reconciliation-marker digest/state (not secret values), and external verification notes. Do not record generated private identities, recovery-kit passphrases, admin plaintext credentials, SMTP passwords, bouncer API keys, or other plaintext secrets as acceptance evidence. Remove acceptance-only hosts/remote objects explicitly and rotate test credentials as appropriate.
 
 Report each architecture and each external-provider section as `PASS`, `FAIL`, or `NOT RUN`. CI integration that builds Caddy, uses real Age/SOPS/rclone on temporary data, verifies an AES ZIP, or exercises Docker packet rules is valuable, but it is not a substitute for this disposable real-host gate.
+
+## RC15 VM8 checkpoint — November 19, 2026 UTC (software release HOLD)
+
+This checkpoint records operator terminal evidence from the disposable
+`ubuntu@vaultwarden-oci-8`, Ubuntu 26.04 ARM64, Python 3.14. It is **not**
+approval for production deployment or an immutable final release tag. The
+software candidate is `0.1.0-rc.15`, source commit
+`32beec5bc905cdecdfdc4a359147c3f1d45d8444`; acceptance harness
+commits are **not** release source commits. Keep the root-private receipts
+on VM8, never in Git.
+
+| Gate | Result and boundary |
+| --- | --- |
+| RC15-A supported rc.14 to rc.15 installed update | **PASS (operator output)**: source-pinned candidate, full candidate CI, verified-recovery supported update exit 0, 56 immutable ARM64 release files/frozen manifest, data UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, original one user/one cipher, Worker invocation and Fail Open Route unchanged, doctor PASS; no reboot/boot enablement. Private `rc15-a-4O2fOU/accepted.json`. |
+| RC15-B controlled Worker stop and new re-arm | **PASS (operator output)**: full CI on harness `3f7cd8c9a9dc18fd1175bf9c6c984b01ecd8b375` (run `44620398584`), expected upstream stop exit-1 normalized only after verified Route cleanup, inactive/success boot-disabled service, exactly one new invocation via `remediation-start --auto-fail-open`, new Route ID, one successful Fail Open update, two independent provider samples, invocation-bound protected API readback receipt, unchanged original cipher, rc.15 installed doctor PASS. Private `rc15-b-32beec5bc905/after.json`. |
+| Prior rc.14 single-command re-arm | **Historical FAIL, independently reconciled**: initial immediate post-PUT readback did not prove Fail Open. Later provider reads were true; existing invocation was reconciled with `updated=no`. Do not overwrite this historical failure with RC15-B's successful new-invocation result. |
+| RC15-C / D genuine DNS-isolated reboot and postboot | **NOT RUN**; opt-in boot re-arm, real boot ID change, production target/timers, new Route and automatic Fail Open remain to be proven with separately authorized host mutation. |
+| RC15-E four scheduled services, RC15-F safe cleanup | **NOT RUN**; do not infer operational timer results from static CI. |
+| External direct-origin denial and release decision | External test **NOT RUN** where a supported controlled probe is unavailable. Software release **HOLD** until outstanding mandatory gates are assessed and explicit claims are bounded. |
+
+Temporary version-specific VM8 scripts are retained on
+`acceptance/rc14-vm8-lifecycle-scripts-20261119` only until acceptance
+completes. The legacy rc.14 reboot/postboot/scheduled/cleanup scripts are
+not valid on installed rc.15. No public DNS, production origin, VCN,
+network-security-list, public SSH, IPv6 or external historical Box mutation
+is authorized by this checkpoint. The installed update does not imply a
+general Ubuntu package upgrade.
+
