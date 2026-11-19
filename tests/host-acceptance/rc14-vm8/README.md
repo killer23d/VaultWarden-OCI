@@ -94,6 +94,26 @@ successful first re-arm that did not occur. Separate rc.15 live
 stop/re-arm, DNS-isolated reboot, postboot, timed services and cleanup
 instruments will follow once this exact installed upgrade passes.
 
+**RC15-B fresh invocation after supported upgrade:** Once the
+operator has an accepted `rc15-a-4O2fOU/accepted.json`, run only
+`08-rc15-controlled-stop-rearm.sh`. It verifies that the rc.15
+immutable release is selected, the approved upgrade's exact Worker
+invocation/Route/boot ID remain unchanged, local source policy, and
+the original 1-user/1-cipher database and dedicated ext4 device
+still pass. It issues **one** supported `remediation-stop`, verifies
+complete Route cleanup and inactive/success systemd state, then
+issues **one** installed rc.15
+`remediation-start --auto-fail-open` with the bounded post-PUT GET
+convergence behavior. It requires `updated=yes`, a completely new
+invocation and Route ID, two independent new Route Fail Open
+readbacks, root-private confirmation, full doctor and unchanged
+vault. A private `rc15-b-32beec5bc905/after.json` is written only
+after independent acceptance. Any stop/re-arm HOLD is non-replay:
+diagnose live state before another mutation. **This does not enable
+the boot one-shot or permit a reboot yet.** The real-boot and scheduled
+service witnesses need separate rc.15-specific tests; the legacy
+rc.14 preboot script still must not be reused.
+
 **No automatic retries.** Do not rerun an already-started phase after HOLD.
 The only automatic work is within the approved one-shot service and explicitly
 bounded read-only provider checks. Keep tokens, private journals and the encrypted
