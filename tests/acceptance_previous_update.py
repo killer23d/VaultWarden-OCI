@@ -279,9 +279,19 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
     if active_release != previous_version:
         raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {previous_version}")
     previous_units = update_unit_migration._systemd_source(previous)
+    candidate_units = update_unit_migration._systemd_source(candidate)
     installed_units = layout.path(install.SYSTEMD_DIR)
-    for unit in install.SYSTEMD_UNITS:
-        if (installed_units / unit).read_bytes() != (previous_units / unit).read_bytes():
+    # A new candidate may ADD a unit that the predecessor never owned.
+    # Coherent rollback must remove that unit, not try to read a
+    # nonexistent predecessor file or leave a stale boot service behind.
+    for unit in update_unit_migration._owned_units(previous_units, candidate_units):
+        expected = previous_units / unit
+        actual = installed_units / unit
+        if not expected.is_file():
+            if actual.exists() or actual.is_symlink():
+                raise SystemExit(f"candidate-owned rollback left candidate-only systemd unit behind: {unit}")
+        elif (actual.is_symlink() or not actual.is_file()
+              or actual.read_bytes() != expected.read_bytes()):
             raise SystemExit(f"candidate-owned rollback did not restore predecessor unit: {unit}")
     if marker.read_text(encoding="utf-8") != "previous-data\n":
         raise SystemExit("candidate-owned rollback did not restore pre-update data")
