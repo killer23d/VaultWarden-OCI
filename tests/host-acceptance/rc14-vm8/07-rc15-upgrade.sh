@@ -100,7 +100,7 @@ if (row.get('result')!='CURRENT_WORKER_ROUTE_RECONCILED'
     or upgrade.get('candidate_sha')!=pin
     or row.get('boot_id')!=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     or not re.fullmatch('[a-f0-9]{32}',str(row.get('new_invocation','')))
-    or not re.fullmatch('[a-f0-9]{32}',str(row.get('new_route_id',''))):
+    or not re.fullmatch('[a-f0-9]{32}',str(row.get('new_route_id','')))):
     hold('Previous rc14 source/data/boot/worker acceptance differs')
 sys.path.insert(0,'/opt/vaultwarden-oci/releases/0.1.0-rc.14')
 from vaultwarden_oci import cloudflare_route_mode as cf,crowdsec_worker_policy,edge,runtime,storage
