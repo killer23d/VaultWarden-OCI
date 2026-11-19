@@ -92,8 +92,17 @@ if (
     or not re.fullmatch('[a-f0-9]{32}', str(before.get('old_route_id', '')))
 ):
     hold('Original prestop identity does not match RC14-D')
-if 'controlled Worker stop' not in read_private('stop.stdout', operator.pw_uid):
+stop_text = read_private('stop.stdout', operator.pw_uid)
+if 'controlled Worker stop' not in stop_text:
     hold('Original controlled stop receipt missing')
+stop_result = re.search(
+    r'upstream_exit=(0|1); failed_state_normalized=(yes|no)',
+    stop_text
+)
+if not stop_result:
+    hold('Original controlled stop normalization receipt malformed')
+print('CONTROLLED_STOP_UPSTREAM_EXIT=' + stop_result.group(1))
+print('CONTROLLED_STOP_FAILED_STATE_NORMALIZED=' + stop_result.group(2))
 stdout = read_private('rearm.stdout', operator.pw_uid)
 stderr = read_private('rearm.stderr', operator.pw_uid)
 
