@@ -198,3 +198,71 @@ def ensure_fail_open(*, paths=None, runner=None) -> RouteProof:
         invocation_id=invocation,
         changed=changed,
     )
+
+
+def _owned_route_context() -> tuple[str, str, str]:
+    """Host-only Route inventory identity. Token never leaves local memory."""
+    from . import edge, runtime, secrets
+
+    cfg = runtime.load_config()
+    domain = cfg.domain
+    if not isinstance(domain, str) or len(domain) > 253 or not DOMAIN.fullmatch(domain):
+        _fail("Configured Cloudflare application hostname is unsafe")
+    token = secrets.load(cfg.offline_recovery_recipient).get("cloudflare_remediation_token")
+    if not isinstance(token, str) or not token:
+        _fail("Cloudflare remediation credential unavailable")
+    _, zone = edge.resolve_cloudflare_zone(domain, token)
+    if not isinstance(zone, str) or not ZONE_OR_ROUTE_ID.fullmatch(zone):
+        _fail("Configured Cloudflare zone identity invalid")
+    return domain, token, zone
+
+
+def _owned_list(base_url: str, token: str) -> list[dict]:
+    response = _api_json(base_url + "?per_page=100", token)
+    routes = response.get("result")
+    info = response.get("result_info")
+    if not isinstance(routes, list) or len(routes) >= 100:
+        _fail("Cloudflare Worker Route inventory is incomplete or malformed")
+    if isinstance(info, dict) and (info.get("total_pages", 1) != 1 or info.get("page", 1) != 1):
+        _fail("Cloudflare Worker Route inventory requires pagination")
+    if not all(isinstance(route, dict) for route in routes):
+        _fail("Cloudflare Worker Route listing contains malformed entries")
+    return routes
+
+
+def read_owned_route_id(*, require_fail_open: bool = True) -> str:
+    """Independent read-only exact managed-Route proof before a controlled stop."""
+    domain, token, zone = _owned_route_context()
+    base = f"{CLOUDFLARE_API}/zones/{zone}/workers/routes"
+    pattern = domain + "/*"
+    matches = [route for route in _owned_list(base, token) if _matching_route(route, pattern)]
+    if len(matches) != 1:
+        _fail("Expected exactly one Cloudflare Worker Route before controlled stop")
+    selected = _validate_route(matches[0], pattern=pattern)
+    actual = _validate_route(
+        _api_json(base + "/" + selected["id"], token).get("result"),
+        pattern=pattern, route_id=selected["id"],
+    )
+    if require_fail_open and actual.get("request_limit_fail_open") is not True:
+        _fail("Current CrowdSec Route is not independently confirmed Fail Open")
+    return selected["id"]
+
+
+def wait_owned_route_absent(route_id: str) -> None:
+    """Bounded read-only cleanup proof. One requested stop, no API mutations."""
+    if not isinstance(route_id, str) or not ZONE_OR_ROUTE_ID.fullmatch(route_id):
+        _fail("Previous CrowdSec Route identity is invalid")
+    domain, token, zone = _owned_route_context()
+    base = f"{CLOUDFLARE_API}/zones/{zone}/workers/routes"
+    pattern = domain + "/*"
+    for attempt in range(12):
+        rows = _owned_list(base, token)
+        matches = [
+            route for route in rows
+            if route.get("id") == route_id or _matching_route(route, pattern)
+        ]
+        if not matches:
+            return
+        if attempt != 11:
+            time.sleep(3)
+    _fail("Previous CrowdSec Route still present after bounded shutdown cleanup verification")
