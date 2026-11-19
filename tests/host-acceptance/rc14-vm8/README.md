@@ -36,6 +36,18 @@ update, restart, or Cloudflare API mutation; only the final protected
 reconciliation receipt is written. The corrected `01-upgrade.sh`
 contains the same frozen-manifest comparison for new acceptance runs.
 
+**RC14-D interrupted re-arm:** If the once-only controlled stop
+prints PASS but `remediation-start --auto-fail-open` then returns 1,
+do **not** replay `02-controlled-stop-rearm.sh` or restart the Worker.
+The new read-only `02b-diagnose-rearm-readonly.sh` reads only the
+original private stdout/stderr evidence, an explicit systemd status and
+two independent Cloudflare Route inventory/GET snapshots. It prints a
+sanitized error *category*, never stdout/stderr contents or token
+values. This identifies whether the Worker started but provider Route
+verification failed, or whether the Worker itself did not start.
+No replay or public DNS mutation is allowed before that exact state
+has been reconciled.
+
 **No automatic retries.** Do not rerun an already-started phase after HOLD.
 The only automatic work is within the approved one-shot service and explicitly
 bounded read-only provider checks. Keep tokens, private journals and the encrypted
