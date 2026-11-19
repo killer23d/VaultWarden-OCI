@@ -33,6 +33,7 @@ class RouteAPI:
         self.with_field = True
         self.duplicates = False
         self.info_pages = 1
+        self.hidden_list_cycles = 0
 
     def object(self):
         row = {"id": ROUTE, "pattern": self.pattern, "script": self.script}
@@ -46,6 +47,9 @@ class RouteAPI:
             raise AssertionError("unapproved endpoint")
         assert token == TOKEN
         if url.endswith("?per_page=100"):
+            if self.hidden_list_cycles:
+                self.hidden_list_cycles -= 1
+                return {"success": True, "result": [], "result_info": {"total_pages": self.info_pages}}
             rows = [self.object()]
             if self.duplicates:
                 rows.append(self.object())
@@ -68,6 +72,7 @@ class AutoFailOpenTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.patches = [
             mock.patch.object(routes, "_api_json", side_effect=self.api),
+            mock.patch.object(routes.time, "sleep"),
             mock.patch.object(routes.os, "geteuid", return_value=0),
             mock.patch.object(edge, "_active", return_value=True),
             mock.patch.object(edge, "_disabled", return_value=True),
@@ -129,14 +134,31 @@ class AutoFailOpenTests(unittest.TestCase):
 
     def test_wrong_route_pattern_is_not_picked(self):
         self.api.pattern = "other.example.net/*"
-        with self.assertRaisesRegex(edge.EdgeError, "exactly one"):
+        with self.assertRaisesRegex(edge.EdgeError, "readiness deadline"):
             self.call()
+        self.assertFalse(any(x[0] == "PUT" for x in self.api.calls))
+        self.assertEqual(len(self.api.calls), 12)
+        self.confirm.assert_not_called()
+
+    def test_new_route_eventually_created_without_retrying_put(self):
+        self.api.hidden_list_cycles = 3
+        proof = self.call()
+        self.assertTrue(proof.changed)
+        self.assertEqual([x[0] for x in self.api.calls].count("PUT"), 1)
+        self.assertEqual(len([x for x in self.api.calls if x[1].endswith("?per_page=100")]), 4)
+        self.confirm.assert_called_once()
+
+    def test_missing_new_route_times_out_without_put_or_confirmation(self):
+        self.api.hidden_list_cycles = 20
+        with self.assertRaisesRegex(edge.EdgeError, "readiness deadline"):
+            self.call()
+        self.assertEqual(len(self.api.calls), 12)
         self.assertFalse(any(x[0] == "PUT" for x in self.api.calls))
         self.confirm.assert_not_called()
 
     def test_multiple_routes_is_hold(self):
         self.api.duplicates = True
-        with self.assertRaisesRegex(edge.EdgeError, "exactly one"):
+        with self.assertRaisesRegex(edge.EdgeError, "Multiple Cloudflare Worker Routes"):
             self.call()
         self.confirm.assert_not_called()
 
