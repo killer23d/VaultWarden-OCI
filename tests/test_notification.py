@@ -321,6 +321,7 @@ class SystemdSurfaceTests(unittest.TestCase):
             {
                 "vaultwarden-oci.target",
                 "vaultwarden-oci.service",
+                "vaultwarden-oci-crowdsec-boot.service",
                 "vaultwarden-oci-health.service",
                 "vaultwarden-oci-health.timer",
                 "vaultwarden-oci-dns.service",
