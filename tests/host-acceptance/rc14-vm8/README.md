@@ -1,6 +1,6 @@
 # rc.14 VM8 temporary production-acceptance harness
 
-**Temporary acceptance branch — never merge these host scripts to `v2` or to PR #436.**
+**Isolated VM8 test harness — these files are not part of the production release.**
 
 This directory holds the exact six one-shot scripts prepared for the disposable
 `ubuntu@vaultwarden-oci-8` Ubuntu 26.04 ARM64 host. They are uploaded here
@@ -10,7 +10,7 @@ results in `docs/HOST-ACCEPTANCE.md` and delete this temporary branch.
 The tested **application** candidate remains independently pinned to
 `92b9300f96125d19105cc1d4865024cb49612b28`
 on `feature/cf-free-auto-fail-open`; the harness branch's commit is not
-an application release. Existing selected rc.13 remains until Phase 01 explicitly
+an application release. Existing selected rc.13 remains until the upgrade script explicitly
 health-gates the supported updater and verifies its encrypted pre-update recovery.
 
 | Phase | Script | Gate |
@@ -34,7 +34,7 @@ and fetch all six files and `SHA256SUMS.txt` from
 verify `sha256sum --check SHA256SUMS.txt` and `bash -n`, then execute the first
 phase with `bash 01-upgrade.sh`. Always fetch by immutable SHA, never a moving
 branch URL. Run later phases one at a time. Reconnect over approved private
-OCI access after the genuine reboot (Phase 03); no public SSH is necessary.
+OCI access after the genuine reboot triggered by `03-preboot-reboot.sh`; no public SSH is necessary.
 
 **Important scope limit:** the suite contains a reversible test-only
 `ConditionPathExists` override for the public Cloudflare DNS writer. It
