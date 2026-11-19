@@ -680,6 +680,41 @@ claim a false-to-true live-update PASS.
 
 
 
+### rc.14 RC14-B new-Route automatic Fail Open test — November 19, 2026
+
+**HOLD — inconclusive immediately after the first authorized CrowdSec
+service stop, before the candidate was started.** On the disposable
+`ubuntu@vaultwarden-oci-8` (installed selected release still **rc.13**),
+the operator ran the checksum-pinned RC14-B one-shot against rc.14 source
+`b2079822886f80538f4d9ded221bcb52a856b564`. Full CI for that
+source, focused unit tests, immutable rc.13 source (52 installed files),
+dedicated ext4 disk/UUID, credentials, accepted backup policy, restored
+cipher and the current original Fail Open Route all passed before mutation.
+Private evidence: `/home/ubuntu/vwoci-acceptance/rc14-b-fNE0f8`.
+
+The **one and only** reported state change was
+`systemctl stop crowdsec-cloudflare-worker-bouncer.service`, which
+returned **exit 0**. The immediately subsequent verification stopped at
+`RC14_B_EXIT=2 HOLD: Worker did not stop`, because the one-host
+witness required `systemctl show ActiveState=inactive` and observed
+something else. The value of `ActiveState` was **not printed**, so
+whether the unit is active, failed, stopping, or restarted is
+**unverified**. Because that check failed before querying Cloudflare
+Route inventory, its old Route cleanup and the current Route's availability
+are also **unverified**.
+
+**NOT RUN:** No candidate rc.14
+`crowdsec remediation-start --auto-fail-open`, new systemd invocation,
+Cloudflare PUT, independent new Route verification, or post-restart doctor
+was executed. The outcome does **not** establish an rc.14 product defect
+or a successful automatic false-to-true change. Do not retry the entire
+one-shot, stop or start the Worker again, or claim the new-Route gate
+passed until a fresh **read-only systemd/Cloudflare inventory** establishes
+the exact service state, old/new route identity and Fail Open value.
+Keep PR #436 draft pending corrected RC14-B acceptance. **RELEASE_GO=HOLD**.
+
+
+
 
 ## Acceptance record
 
