@@ -1,9 +1,8 @@
 [Unit]
 Description=VaultWarden-OCI opt-in CrowdSec Cloudflare Worker boot re-arm
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-Wants=network-online.target
+Wants=network-online.target crowdsec.service crowdsec-firewall-bouncer.service
 After=network-online.target crowdsec.service crowdsec-firewall-bouncer.service
-Requires=crowdsec.service crowdsec-firewall-bouncer.service
 RequiresMountsFor=/var/lib/vaultwarden-oci
 OnFailure=vaultwarden-oci-notify@%n.service
 
