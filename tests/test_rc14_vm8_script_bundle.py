@@ -142,6 +142,36 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertNotIn("systemctl enable", content)
         self.assertNotIn("Cloudflare Route PUT", content)
 
+    def test_rc15_controlled_stop_new_invocation_and_bounded_rearm_once(self) -> None:
+        path = BASE / "08-rc15-controlled-stop-rearm.sh"
+        text = path.read_text()
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True,
+            text=True, check=False, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blocks = HEREDOC.findall(text)
+        self.assertEqual([name for name, _ in blocks], ["PY_PRE", "PY_STOP", "PY_AFTER"])
+        for label, body in blocks:
+            with self.subTest(label=label):
+                ast.parse(body, filename=path.name + ":" + label)
+        self.assertIn("32beec5bc905cdecdfdc4a359147c3f1d45d8444", text)
+        self.assertIn("rc15-a-4O2fOU/accepted.json", text)
+        self.assertIn("INSTALLED_RC15_UPGRADE_PASS", text)
+        self.assertIn("0.1.0-rc.15", text)
+        self.assertIn("verified_release_files", text)
+        self.assertIn("original_cipher_sha256", text)
+        self.assertIn("wait_owned_route_stable", text)
+        self.assertIn("updated=yes", text)
+        self.assertIn("remediation-stop", text)
+        self.assertIn("remediation-start --auto-fail-open", text)
+        self.assertEqual(text.count("vwctl crowdsec remediation-stop"), 1)
+        self.assertEqual(text.count("vwctl crowdsec remediation-start --auto-fail-open"), 1)
+        self.assertNotIn("systemctl reboot", text)
+        self.assertNotIn("systemctl enable", text)
+        self.assertNotIn("systemctl start", text)
+        self.assertNotIn("rc14-c", text)
+
     def test_phase_ownership_and_mutation_scopes(self) -> None:
         scripts = {n: (BASE / n).read_text() for n in HASHES}
         self.assertIn("vwctl update apply", scripts["01-upgrade.sh"])
