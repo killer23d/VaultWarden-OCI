@@ -255,14 +255,53 @@ def wait_owned_route_absent(route_id: str) -> None:
     domain, token, zone = _owned_route_context()
     base = f"{CLOUDFLARE_API}/zones/{zone}/workers/routes"
     pattern = domain + "/*"
+    absent_streak = 0
     for attempt in range(12):
         rows = _owned_list(base, token)
         matches = [
             route for route in rows
             if route.get("id") == route_id or _matching_route(route, pattern)
         ]
-        if not matches:
+        absent_streak = absent_streak + 1 if not matches else 0
+        if absent_streak >= 2:
             return
         if attempt != 11:
             time.sleep(3)
-    _fail("Previous CrowdSec Route still present after bounded shutdown cleanup verification")
+    _fail("Previous CrowdSec Route not consistently absent after bounded shutdown cleanup verification")
+
+
+def wait_owned_route_stable(route_id: str) -> None:
+    """Two independent GET/list samples of the exact current route.
+
+    Provider Route listings can briefly lag after daemon creates a Route.
+    Poll only GET, never retry a Cloudflare PUT or silently accept another
+    Route ID, ownership mismatch, or missing Fail Open field.
+    """
+    if not isinstance(route_id, str) or not ZONE_OR_ROUTE_ID.fullmatch(route_id):
+        _fail("Expected CrowdSec Route identity is invalid")
+    domain, token, zone = _owned_route_context()
+    base = f"{CLOUDFLARE_API}/zones/{zone}/workers/routes"
+    pattern = domain + "/*"
+    stable = 0
+    for attempt in range(12):
+        rows = _owned_list(base, token)
+        candidates = [route for route in rows if _matching_route(route, pattern)]
+        if len(candidates) > 1:
+            _fail("Cloudflare now reports multiple matching Worker Routes")
+        if len(candidates) == 1:
+            row = _validate_route(candidates[0], pattern=pattern, route_id=route_id)
+            detail = _validate_route(
+                _api_json(base + "/" + route_id, token).get("result"),
+                pattern=pattern, route_id=route_id,
+            )
+            stable = stable + 1 if (
+                row.get("request_limit_fail_open") is True
+                and detail.get("request_limit_fail_open") is True
+            ) else 0
+        else:
+            stable = 0
+        if stable >= 2:
+            return
+        if attempt != 11:
+            time.sleep(3)
+    _fail("Cloudflare Worker Route did not remain uniquely present and Fail Open across two independent checks")
