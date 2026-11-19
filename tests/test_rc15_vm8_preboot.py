@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tests/host-acceptance/rc14-vm8/09-rc15-preboot-reboot.sh"
 EXPECTED_GIT_BLOB = "02c08302e57bf5d562cd5d8d15897f67f40199c3"
-PY_BLOCK = re.compile(r"<<'(PY_[A-Z0-9_]+)'\\s*\\n([\\s\\S]*?)^\\1\\s*$", re.MULTILINE)
+PY_BLOCK = re.compile(r"<<'(PY_[A-Z0-9_]+)'\s*\n([\s\S]*?)^\1\s*$", re.MULTILINE)
 
 
 class RC15PrebootTests(unittest.TestCase):
