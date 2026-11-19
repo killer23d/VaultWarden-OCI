@@ -895,6 +895,50 @@ DNS updates on VM8 or mark production GO until these live gates PASS.
 
 
 
+### rc.14 RC14-C supported upgrade — November 19, 2026
+
+**Supported updater returned exit 0; independent post-upgrade acceptance
+HOLD due to a verifier defect.** The operator ran the exact branch-hosted
+acceptance bundle pinned at
+`abd63ece3cc761eb4471ea3491a99f21185a3efd`
+on `ubuntu@vaultwarden-oci-8`. All six scripts passed integrity and
+static parsing. The selected rc.13 source and configuration, dedicated
+ARM64 ext4 disk, original doctor, and pinned rc.14 CI all passed.
+The installed update owner accepted the pinned local source
+`92b9300f96125d19105cc1d4865024cb49612b28`,
+planned `0.1.0-rc.13 → 0.1.0-rc.14`, ran one
+`vwctl update apply --source … --yes --json`, and returned exit **0**
+after the verified pre-update recovery procedure.
+
+The test subsequently printed
+`HOLD: installed rc14 versions semantically differ from pinned candidate`
+before attempting the remaining source/disk/doctor proofs. The cause
+was a false equality assumption in the acceptance script:
+the *source* `versions.toml` includes **both** AMD64 and ARM64 image
+digest keys, but the supported updater's
+`frozen_versions_toml(resolve_pinned(..., machine='arm64'))`
+**intentionally publishes only the selected ARM64 digests** in the
+immutable installed release. The erroneous check compared these TOML
+documents for identical dictionaries; that difference is expected.
+The same script would later have run Git under root against an
+Ubuntu-owned checkout without a Git `safe.directory` allowance.
+Neither verifier defect establishes that the application update
+failed, nor that all installed source bytes are correct.
+
+Private partial-upgrade evidence:
+`/home/ubuntu/vwoci-acceptance/rc14-c-plpbvT`.
+**Do not re-run the upgrade or advance to the Worker stop/reboot.**
+The temporary acceptance branch now contains a corrected new-upgrade
+manifest comparator plus a separate read-only
+`01b-reconcile-installed-upgrade.sh`: it requires the exact original
+upgrade receipt, the actual updater-frozen ARM64 `versions.toml`,
+all other immutable source files, the dedicated disk UUID, clear
+update recovery guard, disabled boot opt-in and full installed doctor.
+Only when that verifier prints `INSTALLED_RC14_UPGRADE_PASS` may the
+next single-mutation host gate proceed. `RELEASE_GO=HOLD`.
+
+
+
 
 ## Acceptance record
 
