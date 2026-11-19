@@ -38,7 +38,7 @@ class RC15LifecycleBundleTests(unittest.TestCase):
                 self.assertNotIn("0.1.0-rc.14", body)
 
     def test_boundary_and_phase_ownership(self):
-        pre, post, schedule, cleanup = (BASE / p).read_text() for p in BLOBS
+        pre, post, schedule, cleanup = tuple((BASE / p).read_text() for p in BLOBS)
         self.assertIn("AUTHORIZE_RC15_VM8_REBOOT", pre)
         self.assertIn("rc15-b-${PIN:0:12}/after.json", pre)
         self.assertIn("ConditionPathExists=", pre)
