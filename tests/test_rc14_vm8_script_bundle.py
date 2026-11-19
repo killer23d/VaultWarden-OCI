@@ -55,8 +55,8 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
 
     def test_handoff_readme_lists_all_phases_and_temporary_scope(self) -> None:
         readme = (BASE / "README.md").read_text()
-        self.assertIn("Temporary acceptance branch", readme)
-        self.assertIn("never merge", readme)
+        self.assertIn("Isolated VM8 test harness", readme)
+        self.assertIn("not part of the production release", readme)
         for name in HASHES:
             self.assertIn(name, readme)
 
