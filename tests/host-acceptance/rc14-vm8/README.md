@@ -54,7 +54,7 @@ Cloudflare GET, independent diagnostics showed a new healthy Worker
 and one correctly owned Route with Fail Open `true`, twice, but no
 local invocation-bound receipt. In that exact state only, use
 `02c-reconcile-active-route.sh` instead of replaying the stopped
-Phase 02: it checks the original protected stdout/stderr category,
+original test: it checks the original protected stdout/stderr category,
 current systemd invocation, 2 provider samples, source confinement
 and data, then calls the **installed, idempotent**
 `vwctl crowdsec ensure-fail-open` **once**. Require `updated=no`;
@@ -62,7 +62,7 @@ unexpected `updated=yes` is HOLD, not a silent PASS. It only accepts
 the correct new invocation, exact previous Route ID change, direct
 Cloudflare Fail Open, installed doctor and original vault fingerprint.
 The script writes `reconciled.json` with the initial error preserved,
-**not** Phase 02's original `after.json`. Therefore Phase 03's
+**not** the initial stop/rearm `after.json`. Therefore the reboot test's
 automatic reboot remains blocked until the rc.15 bounded GET readback
 fix is CI-accepted and exercised on an installed release. No public
 DNS publication or Worker restart is part of this reconciliation.
