@@ -842,6 +842,59 @@ Do not mark production GO based on two snapshots alone.
 
 
 
+### rc.14 RC14-B final independent new-Route acceptance — November 19, 2026
+
+**PASS for source-isolated rc.14 automatic Cloudflare Worker Route
+Fail Open under a genuine fresh invocation, not an installed rc.14
+host upgrade or reboot.** After the earlier transient route-inventory
+HOLD, two read-only Cloudflare samples proved the newly generated Route
+stable and Fail Open. The operator then reran **only** the original
+independent `rc14b-check.py after` postflight (no repeat stop, Worker
+restart or Cloudflare mutation). It printed
+`RC14_B_EXIT=0 AUTOMATIC_NEW_ROUTE_FAIL_OPEN_PASS` and
+`RC14_B_FINAL_WRAPPER_EXIT=0`, with a new invocation, different Route ID,
+a direct Cloudflare GET returning Fail Open, current local-only policy,
+root-private API verification receipt and full installed doctor PASS.
+The previous restored data and all 52 selected immutable **rc.13**
+source files remained unchanged. Private evidence:
+`/home/ubuntu/vwoci-acceptance/rc14-b-fNE0f8/after.json`.
+Pinned candidate source:
+`b2079822886f80538f4d9ded221bcb52a856b564`;
+full [GitHub CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44602523118)
+concluded success.
+
+The same one-host sequence surfaced an **independent upstream
+daemon shutdown issue**: `systemctl stop` returned success and
+Cloudflare Route cleanup was independently confirmed, but systemd
+reported `ActiveState=failed`, `Result=exit-code`,
+`ExecMainStatus=1`. CrowdSec upstream's
+`cmd/root.go` `HandleSignals` returns `received SIGTERM` as an
+error, and its `main.go` calls `log.Fatal` for that error, so the
+process exits status 1 even after deferred cleanup. This does **not**
+prove a clean service stop or an unexpected crash; the previous
+explicit stop remains a documented lifecycle warning. Do **not** set
+`SuccessExitStatus=1` globally.
+
+**Additional requested acceptance before rc.14 release GO:**
+The rc.14 feature branch now contains a **disabled-by-default opt-in
+boot one-shot** and a **verified `remediation-stop` owner** that
+normalizes only an intentional exit 1 after independent no-process and
+two Cloudflare Route-absence proofs. These additions were **not**
+included in pinned RC14-B host-tested source and require their own
+CI and VM8 acceptance. Required sequence: finish CI on the new exact
+candidate SHA, test the supported controlled stop/rearm, use the
+installed **rc.13→rc.14 update owner** with a verified pre-update
+`.vwrec`, verify selected-release and restored data, opt in to the
+standalone boot re-arm unit while keeping the package Worker
+boot-disabled, perform a **real VM reboot**, and prove the new Worker
+invocation, unique provider Route ID, Fail Open, local-only decision
+sources, kernel boot change, source/data invariants and full doctor.
+Separately verify production-style Caddy/Vaultwarden target and four
+timers with DNS-writing isolation. Do not merge PR #436, enable public
+DNS updates on VM8 or mark production GO until these live gates PASS.
+
+
+
 
 ## Acceptance record
 
