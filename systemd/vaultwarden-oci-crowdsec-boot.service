@@ -1,0 +1,26 @@
+[Unit]
+Description=VaultWarden-OCI opt-in CrowdSec Cloudflare Worker boot re-arm
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+Wants=network-online.target
+After=network-online.target crowdsec.service
+Requires=crowdsec.service
+RequiresMountsFor=/var/lib/vaultwarden-oci
+OnFailure=vaultwarden-oci-notify@%n.service
+
+[Service]
+Type=oneshot
+Restart=no
+TimeoutStartSec=180
+ExecStart=/opt/vaultwarden-oci/current/vwctl crowdsec boot-reconcile
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vaultwarden-oci-crowdsec-boot
+
+[Install]
+WantedBy=multi-user.target
