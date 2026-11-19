@@ -440,8 +440,21 @@ def _parser() -> argparse.ArgumentParser:
     crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
     crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
     crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec path")
-    crowdsec_commands.add_parser("remediation-start", help="explicitly start one Cloudflare remediation invocation")
-    crowdsec_commands.add_parser("confirm-fail-open", help="confirm current Worker Routes are set to Fail Open")
+    remediation = crowdsec_commands.add_parser("remediation-start", help="explicitly start one Cloudflare remediation invocation")
+    remediation.add_argument(
+        "--auto-fail-open", action="store_true",
+        help="experimental opt-in: set and independently verify Cloudflare Route Fail Open using an undocumented API field",
+    )
+    crowdsec_commands.add_parser(
+        "ensure-fail-open",
+        help="experimental opt-in: set/read back exact current bouncer Route Fail Open without restarting the Worker",
+    )
+    crowdsec_commands.add_parser(
+        "remediation-stop",
+        help="explicitly stop Worker and verify Cloudflare cleanup before normalizing upstream SIGTERM exit",
+    )
+    crowdsec_commands.add_parser("boot-reconcile", help=argparse.SUPPRESS)
+    crowdsec_commands.add_parser("confirm-fail-open", help="operator-confirm the current Worker Route is set to Fail Open")
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
     crowdsec_commands.add_parser("decisions", help="list active CrowdSec decisions")
     unban = crowdsec_commands.add_parser("unban", help="remove CrowdSec decisions for one IP")
@@ -752,11 +765,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.crowdsec_command == "remediation-start":
                 edge.start_remediation()
                 print("PASS: CrowdSec Cloudflare remediation started for one explicit service invocation")
-                print("ACTION: set every bouncer-created Worker Route to Fail Open in Cloudflare, then run 'vwctl crowdsec confirm-fail-open'")
+                if args.auto_fail_open:
+                    from . import cloudflare_route_mode
+
+                    proof = cloudflare_route_mode.ensure_fail_open()
+                    print(
+                        "PASS: Cloudflare Route Fail Open verified by independent API readback "
+                        f"for current invocation; route={proof.route_id[:8]}; "
+                        f"updated={'yes' if proof.changed else 'no'}"
+                    )
+                else:
+                    print("ACTION: set current bouncer-created Worker Route to Fail Open in Cloudflare and run 'vwctl crowdsec confirm-fail-open', or use the opt-in 'vwctl crowdsec ensure-fail-open'")
+                return 0
+            if args.crowdsec_command == "ensure-fail-open":
+                from . import cloudflare_route_mode
+
+                proof = cloudflare_route_mode.ensure_fail_open()
+                print(
+                    "PASS: Cloudflare Route Fail Open verified by independent API readback "
+                    f"for current invocation; route={proof.route_id[:8]}; "
+                    f"updated={'yes' if proof.changed else 'no'}"
+                )
+                return 0
+            if args.crowdsec_command == "remediation-stop":
+                from . import crowdsec_stop
+
+                result = crowdsec_stop.stop()
+                print(
+                    "PASS: controlled Worker stop, process absent, Cloudflare Route cleanup verified; "
+                    f"upstream_exit={result.original_exit_status}; "
+                    f"failed_state_normalized={'yes' if result.normalized else 'no'}"
+                )
+                return 0
+            if args.crowdsec_command == "boot-reconcile":
+                from . import crowdsec_boot
+
+                result = crowdsec_boot.reconcile()
+                print(
+                    "PASS: boot-scoped CrowdSec Worker and Cloudflare Route verified; "
+                    f"invocation={result.invocation_id}; "
+                    f"started={'yes' if result.started else 'no'}; "
+                    f"updated={'yes' if result.cloudflare_route_updated else 'no'}"
+                )
                 return 0
             if args.crowdsec_command == "confirm-fail-open":
                 edge.confirm_fail_open()
-                print("PASS: Fail Open confirmation recorded for the current CrowdSec Cloudflare invocation")
+                print("PASS: operator Fail Open confirmation recorded for the current CrowdSec Cloudflare invocation")
                 return 0
             if args.crowdsec_command == "prepare-remediation":
                 edge.prepare_remediation(config_path=DEFAULT_CONFIG_PATH)
