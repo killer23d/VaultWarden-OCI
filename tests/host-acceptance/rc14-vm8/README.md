@@ -67,6 +67,33 @@ automatic reboot remains blocked until the rc.15 bounded GET readback
 fix is CI-accepted and exercised on an installed release. No public
 DNS publication or Worker restart is part of this reconciliation.
 
+**CI-green rc.15 transition (separate live acceptance):**
+The original rc.14 auto-Fail-Open re-arm command failed because its
+immediate post-PUT API readback did not show `true`; later two provider
+GETs did show true. After the operator's one-shot
+`02c-reconcile-active-route.sh` has reconciled the already-running
+Worker with `updated=no` and written the protected
+`rc14-d-92b9300f9612/reconciled.json`, the safe next release is
+**rc.15**, candidate SHA
+`32beec5bc905cdecdfdc4a359147c3f1d45d8444` on
+`fix/rc15-cloudflare-failopen-readback-20261119`
+([full CI success](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618010233)).
+Run only `07-rc15-upgrade.sh`: it demands the original rc.14
+reconciliation and unchanged vault/Worker/Route, gets the exact
+candidate source from Git, runs the focused regression suite, uses
+the **installed supported updater** for one encrypted verified-recovery
+upgrade, and independently compares installed ARM64 frozen manifest
+and all other immutable release bytes. It confirms the old vault,
+original Worker and provider Route, update guard, health and disabled
+boot rearm. Its protected `accepted.json` is the **new** release
+checkpoint. Any failure after the updater begins is a non-replay HOLD;
+never rerun the updater to fix an evidence-checker issue.
+The prior rc.14 reboot one-shot must **not** be used against rc.15,
+since it deliberately expects rc.14's old source and a previously
+successful first re-arm that did not occur. Separate rc.15 live
+stop/re-arm, DNS-isolated reboot, postboot, timed services and cleanup
+instruments will follow once this exact installed upgrade passes.
+
 **No automatic retries.** Do not rerun an already-started phase after HOLD.
 The only automatic work is within the approved one-shot service and explicitly
 bounded read-only provider checks. Keep tokens, private journals and the encrypted
