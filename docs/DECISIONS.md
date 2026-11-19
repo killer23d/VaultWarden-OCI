@@ -139,6 +139,8 @@ Remediation is intentionally split:
 
 The CrowdSec firewall bouncer must never own Docker `forward` or `DOCKER-USER`. Those remain exclusively owned by the project Cloudflare origin filter, avoiding two independent mutation owners for published container ingress.
 
+**Cloudflare Free Worker availability:** Keep the Worker boot-disabled and its local-only decisions / per-invocation attestation authoritative. The daemon-created Route may default to Fail Closed after each restart. A small **explicit opt-in**, bounded to the single configured hostname and exact managed Worker script, may request Cloudflare's currently accepted but **undocumented** `request_limit_fail_open` field through the existing encrypted remediation token. The invocation can be confirmed programmatically only after a fresh API GET proves the same Route ID, pattern and script report a literal Boolean true and the original Worker source-policy invocation remains current. Unknown/missing field, ambiguous Route, provider error or invocation drift must **not** record a PASS; the existing human Cloudflare dashboard confirmation remains the fallback. Do not create a new edge credential, upstream fork, second daemon, public LAPI, automatic Worker boot enablement or general Cloudflare Route mutation framework for this feature. A Cloudflare API readback proves state at that instant, not continuous provider state.
+
 Do not add another Docker firewall backend or generic firewall/cloud-provider abstraction.
 
 ## 11. `/admin` defense in depth
