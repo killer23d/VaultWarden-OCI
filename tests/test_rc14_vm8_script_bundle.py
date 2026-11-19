@@ -118,6 +118,30 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertNotIn("method=\"PUT\"", content)
         self.assertNotIn("evid/'after.json'", content)
 
+    def test_rc15_upgrade_is_pinned_one_shot_with_frozen_manifest_and_private_receipt(self) -> None:
+        path = BASE / "07-rc15-upgrade.sh"
+        content = path.read_text()
+        parsed = subprocess.run(["bash", "-n", str(path)], capture_output=True,
+                                text=True, check=False, timeout=15)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        blocks = HEREDOC.findall(content)
+        self.assertEqual(len(blocks), 5)
+        for label, body in blocks:
+            with self.subTest(block=label):
+                ast.parse(body, filename=path.name + ":" + label)
+        self.assertIn("32beec5bc905cdecdfdc4a359147c3f1d45d8444", content)
+        self.assertIn("0.1.0-rc.14", content)
+        self.assertIn("0.1.0-rc.15", content)
+        self.assertIn("VWOCI_SOURCE_OVERRIDE=1", content)
+        self.assertIn("frozen_versions_toml", content)
+        self.assertIn("INSTALLED_RC15_UPGRADE_PASS", content)
+        self.assertIn("original_cipher_sha256", content)
+        self.assertEqual(content.count("vwctl update apply"), 1)
+        self.assertNotIn("systemctl reboot", content)
+        self.assertNotIn("remediation-start", content)
+        self.assertNotIn("systemctl enable", content)
+        self.assertNotIn("Cloudflare Route PUT", content)
+
     def test_phase_ownership_and_mutation_scopes(self) -> None:
         scripts = {n: (BASE / n).read_text() for n in HASHES}
         self.assertIn("vwctl update apply", scripts["01-upgrade.sh"])
