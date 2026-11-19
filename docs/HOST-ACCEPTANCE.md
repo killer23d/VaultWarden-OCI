@@ -1022,6 +1022,66 @@ automatic post-reboot startup gate is NOT RUN.
 
 
 
+### rc.14 RC14-D initial re-arm failed immediate readback; actual Route converged — November 19, 2026
+
+**READ-ONLY DIAGNOSIS PASS; original single-command automatic re-arm
+remains HOLD.** Following the accepted rc.14 installed upgrade
+(`RC14_C_RECONCILE_EXIT=0`) and one supported controlled Worker stop,
+the VM8 operator ran the checksum-pinned
+`02b-diagnose-rearm-readonly.sh` **without repeating any stop,
+restart, Cloudflare PUT, DNS update, timer activation or reboot**.
+
+The diagnostic verified the original upstream SIGTERM exit status
+`1` and `failed_state_normalized=yes`. It classified the failed
+`remediation-start --auto-fail-open` as
+`REARM_FAILURE_CATEGORY=ROUTE_FAIL_OPEN_NOT_VERIFIED`.
+The original installed command had reached the
+`CrowdSec Cloudflare remediation started` milestone, but had
+**not** reached the automatic Fail Open readback success milestone.
+The new Worker nevertheless remained `active/running`, systemd
+`Result=success`, PID `17054`, `NRestarts=0`,
+`Restart=no`, boot unit disabled, a **new invocation** and
+current local-only source-policy attestation.
+
+Two separate, independent Cloudflare provider inventories then
+reported **exactly one** correct **new** CrowdSec Worker Route
+(`CF_SAMPLE_1_COUNT=1`, `CF_SAMPLE_2_COUNT=1`), with both
+direct API detail requests returning literal
+`request_limit_fail_open=true`. The invocation lacked a local
+Fail Open receipt (`LOCAL_FAIL_OPEN_RECEIPT_CURRENT=false`;
+`LOCAL_API_PROOF_PRESENT=false`), because its initial single
+GET-after-PUT returned a non-true field and aborted before saving
+that receipt. The stdout/stderr evidence remained private.
+`DIAGNOSIS=WORKER_ACTIVE_UNVERIFIED_DO_NOT_START_OR_STOP`;
+`RC14_D_DIAG_EXIT=0 READ_ONLY_STATE_CAPTURED`;
+`RC14_D_ACCEPTANCE=HOLD`, `RELEASE_GO=HOLD`.
+
+**Recovery plan:** a separate `02c-reconcile-active-route.sh` in
+the temporary pinned acceptance branch requires this precise original
+failure, the same Worker invocation, twice-reported stable Fail Open
+Route, dedicated data and original cipher. It calls the supported
+**existing-invocation**, idempotent `vwctl crowdsec ensure-fail-open`
+**once**, requiring `updated=no`; then independently checks the
+current API-bound proof and doctor without any Worker restart. It
+records `reconciled.json` and **does not create the original Phase 02
+`after.json`** or turn the failed single-command test into PASS.
+
+**Code-level release finding:** rc.14 uses one immediate direct
+GET after PUT. Cloudflare can return a temporarily old value after
+the PUT despite later reporting `true`; the exact reason for the
+observed lag is not independently established. The isolated
+`fix/rc15-cloudflare-failopen-readback-20261119` branch is based on
+tested rc.14 source and bumps `versions.toml` to **rc.15**, requiring
+**two consecutive literal `true` GETs**, no more than 12 bounded
+read-only observations and **exactly one PUT** for the Route. It has
+new delayed-readback / no-second-PUT regression tests; CI and live
+rc.15 upgrade/boot acceptance remain **NOT RUN / HOLD** until their
+respective results exist. Do not enable the boot unit or perform the
+real reboot while the installed rc.14 immediate-GET bug is unresolved.
+PR #436 remains draft; no merge into `v2`.
+
+
+
 
 ## Acceptance record
 
