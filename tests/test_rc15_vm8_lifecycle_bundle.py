@@ -10,7 +10,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1] / "tests/host-acceptance/rc14-vm8"
 BLOBS = {
     "09-rc15-preboot-reboot.sh": "02c08302e57bf5d562cd5d8d15897f67f40199c3",
-    "10-rc15-postboot-verify.sh": "a6b2c9ee417ae0bf7b906da8fb879e2c61350bb4",
+    "10-rc15-postboot-verify.sh": "7f236002a63ead561bdeae9fa79cd35869a33645",
     "11-rc15-scheduled-operations.sh": "19620161143eb26197c13f5b51865bcdf8825906",
     "12-rc15-safe-cleanup.sh": "77d366a279742cee02e56349be9fa864c31eeb6b",
 }
