@@ -76,10 +76,10 @@ if (pre.get('result')!='PREBOOT_ARMED' or pre.get('source_commit')!=PIN or pre.g
 print('PASS: genuine new kernel boot ID differs from protected preboot checkpoint')
 
 # The supported updater freezes dual-architecture source to exact ARM64-only versions.
-sys.path.insert(0,str(WORK))
+sys.path.insert(0,str(RELEASE))
 from vaultwarden_oci import update_versions
-if not pathlib.Path(update_versions.__file__).resolve().is_relative_to(WORK):
-    hold('Pinned candidate manifest helper source mismatch')
+if not pathlib.Path(update_versions.__file__).resolve().is_relative_to(RELEASE):
+    hold('Installed rc15 manifest helper source mismatch')
 expected_manifest=update_versions.frozen_versions_toml(
     update_versions.resolve_pinned(WORK,machine='arm64')
 ).encode('utf-8')
@@ -95,7 +95,6 @@ for relative in files:
         hold('Installed immutable release blob differs from acceptance source')
 print('PASS: selected rc15 immutable release matches '+str(len(files))+' candidate blobs')
 
-sys.path.insert(0,str(RELEASE))
 from vaultwarden_oci import cloudflare_route_mode as route, crowdsec_worker_policy, edge, storage, runtime
 identity=storage.verify()
 if identity.uuid!=UUID or identity.fs_type!='ext4':hold('Dedicated ext4 UUID changed/root fallback suspected')
