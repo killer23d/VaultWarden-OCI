@@ -279,7 +279,7 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
     if active_release != previous_version:
         raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {previous_version}")
     previous_units = update_unit_migration._systemd_source(previous)
-    candidate_units = update_unit_migration._systemd_source(candidate)
+    candidate_units = update_unit_migration._systemd_source(candidate_root)
     installed_units = layout.path(install.SYSTEMD_DIR)
     # A new candidate may ADD a unit that the predecessor never owned.
     # Coherent rollback must remove that unit, not try to read a
