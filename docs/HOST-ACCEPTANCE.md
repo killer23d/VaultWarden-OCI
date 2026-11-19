@@ -584,6 +584,41 @@ retention, remote objects, and unsupported live upgrade unchanged.
 
 
 
+### rc.13 P4-E3 postboot application and Worker re-arm — November 19, 2026
+
+**PASS for operator-reconciled installed-host application/Worker recovery;
+Fail Open local confirmation remains NOT RUN.** On disposable
+`ubuntu@vaultwarden-oci-8` following the genuine P4-E2 reboot, the
+operator ran the pinned P4-E3 workflow and separate read-only phase
+reconciliation. The final reconciler printed
+`P4_E3_STATUS_EXIT=0 READ_ONLY_RECONCILIATION_PASS` and
+`P4_E3_STATUS_WRAPPER_EXIT=0`. It independently verified protected
+`p4e3-preflight.json`, `p4e3-app.json`, `p4e3-worker.json` against
+the current kernel boot ID and original source. The earlier P4-D and P4-E2
+item/disk proofs remain accepted separately.
+
+| Postboot recovery boundary | Exact result |
+| --- | --- |
+| Immutable installed source/disk — **PASS** | The 52 installed rc.13 files still match actual host-tested source `fd56313255c97992dc55c1475d94477597b88602`; dedicated ext4 UUID `f4e0bd62-48e7-4745-8987-44b14013216d`, no root fallback. |
+| Supported application start — **PASS via protected phase evidence** | Private `p4e3-app.json` reported healthy Caddy and the expected original current-boot phase. The reconciler required completion of the existing application preflight and healthy-start phase. This is not automatic target-owned startup. |
+| CrowdSec Worker re-arm — **PASS for running/source policy** | New invocation `b27e8dd07f9340ad8e1567e16ab2e33d` was active, **boot-disabled**, tied to this current boot, and verified with the installed invocation-bound **local-only** `cscli/crowdsec` configuration attestation. The previous invocation was not reused. |
+| Cloudflare Route Fail Open — **manual dashboard observation only; confirmation NOT RUN** | The operator reported manually selecting Fail Open for the Worker Route. However, the installed `/var/lib/vaultwarden-oci/state/crowdsec-cloudflare-fail-open.json` did not yet contain confirmation for the new invocation, and the read-only reconciler explicitly printed `local Fail Open confirmation=NOT_RUN`. Therefore `crowdsec.cloudflare` remains **FAIL** until the supported manual confirmation for that exact invocation (or an independently accepted later candidate implementation) succeeds. |
+| Automatic boot/timers/DNS — **NOT RUN** | The target and all four timers remained disabled under the isolated fail-closed reboot protocol. This stage did not prove production-style target-owned boot, scheduled backups/maintenance/health or DNS publication. |
+| New potential candidate — **separate release** | Opt-in Cloudflare Free Route Fail Open automation is being developed on `feature/cf-free-auto-fail-open` as **rc.14**, under draft PR #436. That change is **not** part of installed VM8 rc.13, and cannot inherit the prior live-source acceptance. |
+
+No evidence that the new rc.14 experimental API mode works on Cloudflare
+Free has been collected from this host yet; do not apply that candidate
+through unreviewed source replacement. After the operator's existing
+Cloudflare dashboard check, the currently installed **rc.13** can close
+its own invocation by running the supported
+`sudo vwctl crowdsec confirm-fail-open`, then checking
+`vwctl crowdsec status` and `vwctl doctor --json`.
+This operation does **not** create a new Worker Route or restart the
+Worker. Release GO remains **HOLD** pending enabled-target/timer and
+other remaining gates.
+
+
+
 
 ## Acceptance record
 
