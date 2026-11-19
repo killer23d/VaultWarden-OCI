@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -137,17 +138,28 @@ def ensure_fail_open(*, paths=None, runner=None) -> RouteProof:
 
     pattern = domain + "/*"
     base_url = f"{CLOUDFLARE_API}/zones/{zone_id}/workers/routes"
-    listed = _api_json(base_url + "?per_page=100", token)
-    routes = listed.get("result")
-    info = listed.get("result_info")
-    if not isinstance(routes, list) or len(routes) >= 100:
-        _fail("Cloudflare Worker Route inventory is incomplete or invalid")
-    if isinstance(info, dict) and (info.get("total_pages", 1) != 1 or info.get("page", 1) != 1):
-        _fail("Cloudflare Worker Route inventory requires pagination; refusing ambiguous update")
-    candidates = [r for r in routes if _matching_route(r, pattern)]
-    if len(candidates) != 1:
-        _fail("Expected exactly one Cloudflare Worker Route for the configured hostname")
-    selected = _validate_route(candidates[0], pattern=pattern)
+    # systemd Type=simple can become active before the upstream daemon has
+    # finished creating its Cloudflare Route. Poll only read-only inventory;
+    # never retry a PUT or silently accept multiple/foreign Route owners.
+    selected = None
+    for attempt in range(12):
+        listed = _api_json(base_url + "?per_page=100", token)
+        routes = listed.get("result")
+        info = listed.get("result_info")
+        if not isinstance(routes, list) or len(routes) >= 100:
+            _fail("Cloudflare Worker Route inventory is incomplete or invalid")
+        if isinstance(info, dict) and (info.get("total_pages", 1) != 1 or info.get("page", 1) != 1):
+            _fail("Cloudflare Worker Route inventory requires pagination; refusing ambiguous update")
+        candidates = [r for r in routes if _matching_route(r, pattern)]
+        if len(candidates) > 1:
+            _fail("Multiple Cloudflare Worker Routes match the configured hostname")
+        if len(candidates) == 1:
+            selected = _validate_route(candidates[0], pattern=pattern)
+            break
+        if attempt != 11:
+            time.sleep(3)
+    if selected is None:
+        _fail("CrowdSec Worker Route not created before the bounded readiness deadline")
     route_id = selected["id"]
     route_url = base_url + "/" + route_id
 
