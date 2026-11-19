@@ -75,6 +75,23 @@ class RC14TemporaryHostBundleTests(unittest.TestCase):
         self.assertNotIn("systemctl reboot", content)
         self.assertNotIn("remediation-stop", content)
 
+    def test_failed_rearm_diagnostic_is_read_only_and_parses(self) -> None:
+        path = BASE / "02b-diagnose-rearm-readonly.sh"
+        content = path.read_text()
+        syntax = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, check=False, timeout=15)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        blocks = HEREDOC.findall(content)
+        self.assertEqual(len(blocks), 1)
+        for label, body in blocks:
+            ast.parse(body, filename=path.name + ":" + label)
+        self.assertIn("CF_SAMPLE_", content)
+        self.assertIn("REARM_FAILURE_CATEGORY=", content)
+        self.assertNotIn("systemctl', 'start'", content)
+        self.assertNotIn("systemctl', 'stop'", content)
+        self.assertNotIn("remediation-start --auto-fail-open", content)
+        self.assertNotIn('method="PUT"', content)
+        self.assertNotIn("systemctl reboot", content)
+
     def test_phase_ownership_and_mutation_scopes(self) -> None:
         scripts = {n: (BASE / n).read_text() for n in HASHES}
         self.assertIn("vwctl update apply", scripts["01-upgrade.sh"])
