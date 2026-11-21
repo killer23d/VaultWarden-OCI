@@ -27,7 +27,7 @@ format, activate, alter provider policy or restore.
 ## Release-readiness reconciliation: rc.15 (RC15-G, 2026-11-19)
 
 **Decision: HOLD; no production GO.** Baseline source is immutable
-[`v2` commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`](https://github.com/killer23d/VaultWarden-OCI/commit/91162bc3e0188f3a75a565b90aff1ea62c6324d0).
+[commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`](https://github.com/killer23d/VaultWarden-OCI/commit/91162bc3e0188f3a75a565b90aff1ea62c6324d0).
 The RC15-G review branch starts at this commit; its eventual distinct HEAD needs
 its own full CI and a new G0 run. The authoritative rc.15 installed live
 candidate, VM8 receipts and the RC15-C Git-index exception remain recorded
@@ -37,10 +37,11 @@ are valid *earlier-release* evidence, not an exact rc.15 live regression.
 
 | Release gate | Status as of reconciliation | Evidence / bounded next step |
 | --- | --- | --- |
-| Exact rc.15 source, component pins and release review | PASS for pinned `v2` source | Commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`; `versions.toml` identifies `0.1.0-rc.15`. Final RC15-G HEAD and its checks must be pinned separately. |
+| Exact rc.15 source, component pins and release review | PASS for pinned baseline source | Commit `91162bc3e0188f3a75a565b90aff1ea62c6324d0`; `versions.toml` identifies `0.1.0-rc.15`. Final RC15-G HEAD and its checks must be pinned separately. |
 | Exact rc.15 candidate CI | PASS for archived executed candidate; NOT RUN for new RC15-G HEAD until checks complete | [rc.15 candidate CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44618010233), [archived harness CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44628483849); do not transfer results to different SHAs. |
 | Supported rc.14 → rc.15 upgrade / Worker re-arm and Fail Open | PASS | VM8 RC15-A/B, supported upgrade with recovery and new invocation/Route readback; see historical archive. Do not replay. |
 | Real reboot, selected application/Worker activation and four scheduled jobs | PASS for expressly staged VM8 scope | VM8 RC15-C/D/E; RC15-C Git-index wrapper exception retained, independent RC15-D corrected-source check PASS. RC15-F cleanup deliberately disabled future auto-start; no further VM8 work. |
+| RC15-G0 new-host read-only source/storage preflight | PASS at `d847fbfc861a5be0886e4d911f51649619e33def` | Operator report from `vaultwarden-oci-9-vnic` at `2026-11-21T07:04:42Z`: exact source/preflight blob `56176804491c9ab9c38b1e1efb3386aab40e3c60`, 10/10 focused tests, Ubuntu 26.04 ARM64/Python 3.14.4, root `/dev/sdb1` excluded, 50 GiB unmounted signature-blank nonboot candidate with stable alias, no installed appliance, `RC15_G0_EXIT=0`. Protected local evidence: `~/vwoci-acceptance/production-newhost-p0-20261121T070442Z-13549`. Disk attachment and format authorization remain **PENDING**. Any later source commit is not retroactively tested. |
 | Exact rc.15 fresh blank-disk installation and first-run offline recovery-kit custody | NOT RUN | Independent new Ubuntu 26.04 ARM64 host. G0 read-only first; separately authorize formatting/install/custody and verify root-only refusal, setup-generated versus explicit-recipient and headless boundaries with focused regression coverage rather than multiple permanent VM harnesses. |
 | Real non-Cloudflare origin denial across Docker DNAT/FORWARD and userland proxy; fail-closed policy | NOT RUN | A disposable test host with independent external non-Cloudflare probe and safe Cloudflare probe; distinguish Docker published-port path from host INPUT. Preserve both families in software policy/CI; no live IPv6 rollout required. No public SSH/80. |
 | Exact rc.15 Caddy/Admin/local TLS, CrowdSec and core health | PASS within tested VM8 scope | RC15-A/D/E; local TLS 200/200/401 and doctor PASS. Real external-client origin behavior is the distinct NOT RUN gate above. |
@@ -61,6 +62,8 @@ mounts/formats storage, installs packages, starts services, changes firewall,
 contacts SMTP/Box/Cloudflare or restarts the host. Protected evidence is
 operator-private in `~/vwoci-acceptance`; share only its sanitized summary.
 Storage identity/blankness still require independent operator verification.
+
+**Preserved CI exception:** Initial RC15-G branch commit `d847fbfc861a5be0886e4d911f51649619e33def` passed eight of nine CI jobs but [the quality-unit documentation audit failed](https://github.com/killer23d/VaultWarden-OCI/actions/runs/44635980353) because this matrix contained a disallowed product-generation branch label. This documentation-only audit failure is preserved as FAIL for that exact run; the label was removed on the same review branch without weakening the audit. Await full green CI on the corrected HEAD. No appliance runtime source or preflight instrument changed.
 
 **Next grouped phases (each separately authorized):** G1 fresh-install and
 first-run custody; G2 live origin denial + Caddy/Admin and SMTP/notification
