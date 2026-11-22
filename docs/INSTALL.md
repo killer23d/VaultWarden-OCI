@@ -202,7 +202,28 @@ On an isolated test host, run `sudo vwctl start`, `sudo vwctl backup`
 and `sudo vwctl doctor --json` *without* `sudo vwctl dns update`.
 Test TLS locally using the configured hostname/SNI and explicit
 loopback resolution, then publish DNS only in a separately approved
-cutover. A local verified backup typically moves `recovery.local`
+cutover. **Container health does not prove TLS readiness:** Docker Compose
+`--wait` and Caddy's container health check can complete while Caddy is
+still obtaining its first ACME DNS-01 certificate. Immediately after a
+fresh authorized start, run the bounded read-only acceptance probe from
+the exact reviewed source checkout (not from an unverified moving branch):
+
+```bash
+python3 -B tests/host-acceptance/https_readiness.py \
+  --hostname vault.example.com --timeout-seconds 180
+```
+
+Substitute the **installed hostname** for `vault.example.com`. The probe
+connects to `127.0.0.1:443` with the correct SNI, checks the system trust
+chain (never `--insecure`), and requires HTTP 200 for `/` and `/api/config`
+and HTTP 401 for unauthenticated `/admin/`. A transient first-handshake
+TLS error may be retried within the bounded window while ACME completes;
+unexpected HTTP responses and a timeout remain **HOLD**. The probe never
+starts/restarts containers, changes DNS or firewall rules, or sends mail.
+An HTTPS loopback PASS does **not** prove public Cloudflare-only origin
+packet denial; confirm that boundary from an independent external source.
+
+A local verified backup typically moves `recovery.local`
 from WARN to PASS; optional `recovery.offsite` and `recovery.rclone`
 can remain WARN if remote publication is deliberately disabled.
 Keep automation disabled until its own acceptance gate is complete.
