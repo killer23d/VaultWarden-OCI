@@ -615,7 +615,8 @@ def _remote_parts(remote: str) -> tuple[str, str]:
     return name, path.rstrip("/")
 
 
-def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+def rclone_local_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+    """Inspect local rclone configuration without contacting any provider."""
     if not runner(["rclone", "version"]).ok:
         return False, "rclone is unavailable"
     if not runner(["rclone", "config", "file"]).ok:
@@ -633,6 +634,14 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
     name, _ = _remote_parts(remote)
     if name not in configured:
         return False, f"rclone remote {name!r} is not configured"
+    return True, f"rclone remote {name!r} is configured locally"
+
+
+def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+    ok, message = rclone_local_diagnostics(remote, runner=runner)
+    if not ok or remote is None:
+        return ok, message
+    name, _ = _remote_parts(remote)
     if not runner(["rclone", "lsf", f"{name}:", "--max-depth", "1"]).ok:
         return False, f"rclone remote {name!r} is not reachable"
     return True, f"rclone remote {name!r} is reachable"
@@ -1328,6 +1337,67 @@ def prune_remote(
     return decision
 
 
+def backup_receipt_evidence(
+    remote: str | None,
+    paths: RecoveryPaths = RecoveryPaths(),
+) -> dict[str, dict[str, object]]:
+    """Inspect backup receipts without decrypting, downloading or changing state.
+
+    These are historical verification receipts, not proof of off-host custody.
+    Only a receipt for the exact routine publication folder applies to its policy.
+    """
+    state = _load_state(paths.state_file)
+    result: dict[str, dict[str, object]] = {}
+    for kind, location_key in (("local", "artifact"), ("offsite", "remote_object")):
+        row: dict[str, object] = {"state": "unknown", "verified_at": None}
+        result[kind] = row
+        if type(state.get("schema_version")) is not int or state["schema_version"] != 1 or state.get("state_error"):
+            continue
+        if kind not in state:
+            row["state"] = "never_verified"
+            continue
+        receipt = state[kind]
+        if not isinstance(receipt, dict):
+            continue
+        when, location = receipt.get("verified_at"), receipt.get(location_key)
+        digest, size = receipt.get("sha256"), receipt.get("size")
+        if not (
+            isinstance(when, str) and when
+            and isinstance(location, str) and location
+            and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+            and isinstance(size, int) and not isinstance(size, bool) and size > 0
+        ):
+            continue
+        row["verified_at"] = when
+        if kind == "local":
+            artifact = Path(location)
+            if artifact.parent != paths.backups or _recovery_name_time(artifact.name) is None:
+                continue
+            try:
+                info = artifact.lstat()
+            except FileNotFoundError:
+                row["state"] = "failed"
+                row["detail"] = "recorded local artifact is missing"
+                continue
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                row["state"] = "failed"
+                row["detail"] = "recorded local artifact is not a regular file of the recorded size"
+                continue
+        else:
+            try:
+                _, object_path = _remote_parts(location)
+            except RecoveryError:
+                continue
+            name = PurePosixPath(object_path).name
+            if _recovery_name_time(name) is None:
+                continue
+            row["matches_destination"] = remote is not None and location == _remote_object(remote, name)
+        row["state"] = "verified"
+    return result
+
+
 def status_rows(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, str]]:
     state = _load_state(paths.state_file)
     rows: list[dict[str, str]] = []
@@ -1351,7 +1421,15 @@ def doctor_checks(
     paths: RecoveryPaths = RecoveryPaths(),
     *,
     runner: Runner = run_command,
+    state_verified: bool = True,
 ) -> list[DoctorCheck]:
+    if not state_verified:
+        ok, message = rclone_local_diagnostics(runner=runner)
+        return [
+            DoctorCheck("recovery.local", "SKIP", "dedicated storage is not verified; receipt not inspected"),
+            DoctorCheck("recovery.offsite", "SKIP", "dedicated storage is not verified; receipt not inspected"),
+            DoctorCheck("recovery.rclone", "PASS" if ok else "WARN", message),
+        ]
     rows = {row["kind"]: row for row in status_rows(paths)}
     local, offsite = rows["local"], rows["offsite"]
     rclone_ok, rclone_message = rclone_diagnostics(runner=runner)

@@ -304,6 +304,7 @@ def doctor_checks(
     versions_path: Path = DEFAULT_VERSIONS_PATH,
     os_release_path: Path = OS_RELEASE_PATH,
     machine: str | None = None,
+    persistent_state_verified: bool = True,
 ) -> list[DoctorCheck]:
     try:
         release = read_os_release(os_release_path)
@@ -353,6 +354,7 @@ def doctor_checks(
     notification_checks = notification.doctor_checks(
         config=config if config is not None else notification_config,
         secret_values=secret_values,
+        **({} if persistent_state_verified else {"state_verified": False}),
     )
     if config is None and notification_config is not None:
         provider_check = next(
@@ -374,8 +376,8 @@ def doctor_checks(
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
         *notification_checks,
-        *edge.doctor_checks(),
-        *recovery.doctor_checks(),
+        *edge.doctor_checks(**({} if persistent_state_verified else {"state_verified": False})),
+        *recovery.doctor_checks(**({} if persistent_state_verified else {"state_verified": False})),
     ]
 
 
@@ -404,6 +406,9 @@ def _parser() -> argparse.ArgumentParser:
         commands.add_parser(action)
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", help="stable structured appliance status")
+
+    readiness = commands.add_parser("readiness", help="read-only local deployment foundations and evidence limits")
+    readiness.add_argument("--json", action="store_true")
 
     logs = commands.add_parser("logs")
     logs.add_argument("service", nargs="?", choices=("vaultwarden", "caddy"))
@@ -594,15 +599,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.json:
             from . import operations
             return operations.status_command()
-        from . import notification, recovery, runtime
+        from . import edge, notification, recovery, runtime, storage
         overall, rows = runtime.status()
         for row in rows:
             print(f"{row['service']}: {row['state']} (health={row['health']})")
-        for row in recovery.status_rows():
-            print(f"recovery-{row['kind']}: {row['state']} (verified_at={row['verified_at']})")
-        notification_row = notification.status_row()
-        from . import edge
-        edge_checks = edge.doctor_checks()
+        try:
+            storage.verify()
+        except (storage.StorageError, OSError):
+            # Preserve the legacy health-service boundary for a verified mount,
+            # but never consume apparent success from the boot filesystem.
+            print("storage.dedicated: FAIL (dedicated storage is not verified)")
+            for kind in ("local", "offsite"):
+                print(f"recovery-{kind}: unknown (verified_at=-)")
+            notification_row = {"state": "unknown", "transport": "-", "detail": "dedicated storage is not verified"}
+            edge_checks = edge.doctor_checks(state_verified=False)
+            overall = "degraded" if overall in {"running", "stopped"} else overall
+        else:
+            for row in recovery.status_rows():
+                print(f"recovery-{row['kind']}: {row['state']} (verified_at={row['verified_at']})")
+            notification_row = notification.status_row()
+            edge_checks = edge.doctor_checks()
         for check in edge_checks:
             print(f"{check.check_id}: {check.status} ({check.message})")
         print(
@@ -615,6 +631,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             overall = "degraded"
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
+    if args.command == "readiness":
+        from . import operations
+        return operations.readiness_command(machine=args.json)
     if args.command == "timers":
         from . import operations
         return operations.timers_command(machine=args.json)

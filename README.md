@@ -52,6 +52,7 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 | Preview DNS change (no write) | `sudo vwctl dns update --dry-run` |
 | Test authenticated SMTP | `sudo vwctl notification test --smtp` |
 | Check scheduled jobs | `sudo vwctl timers` |
+| Assess local deployment foundations | `sudo vwctl readiness` |
 | Create an encrypted recovery point | `sudo vwctl backup` |
 
 ## Backup and disaster-recovery essentials

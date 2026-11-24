@@ -223,7 +223,7 @@ class VwctlUnitTests(unittest.TestCase):
             self.assertIn(f"caddy_runtime {frozen.caddy_runtime_image.reference}", output.getvalue())
 
     def test_status_notification_warning_does_not_fail_runtime_health(self) -> None:
-        from vaultwarden_oci import edge, notification, recovery, runtime
+        from vaultwarden_oci import edge, notification, recovery, runtime, storage
 
         rows = [
             {"service": "vaultwarden", "state": "running", "health": "healthy"},
@@ -238,6 +238,7 @@ class VwctlUnitTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(runtime, "status", return_value=("running", rows)),
+            mock.patch.object(storage, "verify", return_value=mock.Mock()),
             mock.patch.object(recovery, "status_rows", return_value=[]),
             mock.patch.object(notification, "status_row", return_value=notification_row),
             mock.patch.object(edge, "doctor_checks", return_value=[]),

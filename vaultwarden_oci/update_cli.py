@@ -602,12 +602,13 @@ def _host_upgrade_command(argv: Sequence[str]) -> int:
 
 
 def _doctor_command(args: Sequence[str]) -> int:
-    checks = cli.doctor_checks()
     try:
         identity = storage.verify()
-    except storage.StorageError as exc:
+    except (storage.StorageError, OSError) as exc:
+        checks = cli.doctor_checks(persistent_state_verified=False)
         storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "FAIL", str(exc))
     else:
+        checks = cli.doctor_checks()
         storage_check = cli.DoctorCheck(
             _STORAGE_DOCTOR_ID,
             "PASS",

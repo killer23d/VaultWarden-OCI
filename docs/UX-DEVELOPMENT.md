@@ -33,6 +33,58 @@ independently supplied in the PR/handover. The next stage must verify that merge
 and resulting tree before branching. A commit must never claim to contain its
 own SHA. No tag, release, production change or subsequent stage is authorized.
 
+## UX-01 stage receipt (candidate; HOLD)
+
+| Field | Recorded evidence |
+| --- | --- |
+| Scope | Authoritative operational evidence and local deployment-readiness assessment. No lifecycle or scheduling mutation; no dashboard menu redesign. |
+| Accepted base | `6e89d2feac53a9cc7ac69af07b8b10471b0d117d` — [UX-00 acceptance and equivalent squash integration](https://github.com/killer23d/VaultWarden-OCI/pull/443#issuecomment-7139887051). |
+| Base tree | `379debac850371238288963e1f1acf5bf6fb8d56` independently matches exact reviewed UX-00 head; single parent is original baseline. |
+| Branch | `ux/01-status-readiness`, independently verified at the accepted base before edits. |
+| Changed owners | Existing recovery, update status/guard, edge, operations, CLI and dashboard presentation; storage/config validation, notification and Worker evidence owners; operations manual, README and focused tests. |
+| Decisions | Preserve status schema 1 and exit contracts; additive operational evidence, separate readiness schema 1. Project prerelease identity changes to `0.1.0-rc.17` solely to satisfy immutable release identity; all upstream component and image pins unchanged. No tag, publication, new installed module, mutation owner, dependency or service. No provider probe on periodic health. |
+| Prior implementation head | `8ca122795aab4c1fabf24e288db4eeda158e58a1`; 12 new focused tests and all 600 tests passed in [Ubuntu 26.04 CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45455248409/job/138662818750), but [quality-unit](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45455248409/job/138662818230) failed the same-version immutable-release check. Prior result FAIL, not accepted. |
+| Remediation implementation | `ee81c8d860847aacd1d96016dfe00a1e89dc973c`: distinct prerelease identity; require all foundations for OPERATIONAL, distinguish boot persistence and execution, verify exact local rclone remote without provider polling, withhold untrusted state on invalid storage, exercise negative readiness/guard/HTTPS cases. This subsequent receipt/test commit does not change installed release content. |
+| Focused and regression tests | Local full checkout NOT RUN (GitHub DNS resolution unavailable). First remediation executed 607 tests: one failure in the existing host preflight's exact version grammar; other 606 passed. The existing isolated current-predecessor success and coherent rollback checks passed. Final exact-head validation is mandatory. |
+| CI | First remediation [45456495348](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456495348) passed the immutable identity/update transition but failed `test_current_release_manifest_needs_exact_reviewed_pin` because preflight accepts the established `-rc.N` suffix. Corrected candidate uses rc.17 without modifying the preflight or CI. Exact final-head CI conclusions must be recorded independently in PR. |
+| Live acceptance | NOT RUN; disposable native OCI ARM64 host, exact installed source and permitted scope not authorized. Required installed-entrypoint and read-only readiness verification remain HOLD. |
+| Limitations | Receipts describe historical verification, not current remote presence, off-host custody or a successful fresh restore. No independent mailbox/public network/provider proof. |
+| PR / head | [#444](https://github.com/killer23d/VaultWarden-OCI/pull/444); exact receipt head recorded independently in the PR and handover, not self-referentially in this commit. |
+| Verdict | HOLD pending mandatory validation. No merge or next stage authorized. |
+
+### Independent UX-01 review follow-up
+
+The prior exact reviewed candidate `86423a222ebe04e2003c27603b67821dfe87d4ab`
+passed all 20 focused tests and all 608 regression tests in quality CI, including
+the installed-entrypoint staging checks and current supported predecessor
+success and coherent rollback instruments. Its
+[push CI 45456776188](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456776188)
+and [PR CI 45456787463](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456787463)
+completed successfully; independently verified all nine job conclusions in
+each, including native Ubuntu 26.04 ARM64 and security/Caddy/crypto integrations.
+
+Independent source review found that captured non-TTY status still consumed
+persistent history on an unverified mount, notification success could be
+inherited across provider changes, incomplete update evidence could look fresh,
+unknown doctor aggregate could pass readiness, and optional CrowdSec boot
+failure was not reflected in the outcome. The follow-up changes the existing
+owners and adds focused regressions. No new runtime dependency, unit or upstream
+pin; candidate project identity remains the unaccepted rc.17. No earlier
+installed copy may be overwritten or treated as the new source. Exact final
+head, focused and complete regression tests, and both CI run references must
+be independently recorded in PR #444. Local complete checkout still NOT RUN
+(GitHub DNS unavailable). Native OCI ARM64 exact installed-candidate witness
+NOT RUN and requires explicit host, source and scope. **HOLD** until final
+mandatory evidence is verified. No merge or subsequent stage authorized.
+
+The review also closes the UX-00 F3 bytecode finding where it directly affects
+the changed status presentation. Both existing dashboard launchers invoke the
+same Python module with bytecode writes suppressed. Expanded immutable-tree
+tests invoke the installed dashboard help and the source wrapper without
+inherited bytecode suppression. No menu, dispatch, release-selection or
+lifecycle redesign belongs to this change. Final installed native ARM64
+witness must check the actual dashboard invocation as well as CLI readiness.
+
 ## 1. Fixed snapshot and complete repository structure
 
 All source line references in this record refer to

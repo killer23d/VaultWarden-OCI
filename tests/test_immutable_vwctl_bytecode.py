@@ -33,6 +33,7 @@ class ImmutableVwctlBytecodeTests(unittest.TestCase):
 
             env = dict(os.environ)
             env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
             completed = subprocess.run(
                 [str(release / "vwctl"), "--help"],
                 cwd=release,
@@ -43,8 +44,52 @@ class ImmutableVwctlBytecodeTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            before = {path.relative_to(release): path.read_bytes() for path in release.rglob("*") if path.is_file()}
+            for args in (("readiness", "--help"), ("status", "--help")):
+                result = subprocess.run(
+                    [str(release / "vwctl"), *args],
+                    cwd=release, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            dashboard = release / "vaultwarden_oci/dashboard.sh"
+            result = subprocess.run(
+                ["bash", str(dashboard), "--help"],
+                cwd=release, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Operations Dashboard", result.stdout)
+            after = {path.relative_to(release): path.read_bytes() for path in release.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
             self.assertFalse(any(release.rglob("*.pyc")))
             self.assertFalse(any(path.name == "__pycache__" for path in release.rglob("*")))
+
+
+    def test_source_dashboard_help_does_not_write_bytecode(self) -> None:
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            install._copy_release_tree(source, checkout)
+            wrapper = checkout / "dashboard.sh"
+            wrapper.write_bytes((source / "dashboard.sh").read_bytes())
+            for path in checkout.rglob("*"):
+                if path.is_dir():
+                    path.chmod(0o755)
+            env = dict(os.environ)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            before = {path.relative_to(checkout): path.read_bytes() for path in checkout.rglob("*") if path.is_file()}
+            result = subprocess.run(
+                ["bash", str(wrapper), "--help"], cwd=checkout, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Operations Dashboard", result.stdout)
+            after = {path.relative_to(checkout): path.read_bytes() for path in checkout.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
+            self.assertFalse(any(checkout.rglob("*.pyc")))
+            self.assertFalse(any(path.name == "__pycache__" for path in checkout.rglob("*")))
 
 
 if __name__ == "__main__":

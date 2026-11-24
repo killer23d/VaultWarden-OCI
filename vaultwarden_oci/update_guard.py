@@ -113,11 +113,25 @@ def load(path: Path = RECOVERY_REQUIRED_STATE) -> dict[str, object] | None:
         raise UpdateGuardError(f"cannot load update recovery guard: {exc}") from exc
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != 1
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
         or value.get("recovery_required") is not True
     ):
         raise UpdateGuardError("update recovery guard has invalid content")
     return value
+
+
+def status_snapshot(path: Path = RECOVERY_REQUIRED_STATE) -> dict[str, str]:
+    """Report guard evidence without clearing it or exposing recovery material."""
+    try:
+        value = load(path)
+    except (UpdateGuardError, OSError):
+        return {"state": "unknown", "detail": "update recovery guard is invalid or unreadable"}
+    if value is None:
+        return {"state": "absent", "detail": "no update recovery guard recorded"}
+    if value.get("detail") == "root-owned recovery guard is not readable by this caller":
+        return {"state": "unknown", "detail": "update recovery guard cannot be inspected by this caller"}
+    return {"state": "active", "detail": "coherent update recovery is required"}
 
 
 def active(path: Path = RECOVERY_REQUIRED_STATE) -> bool:

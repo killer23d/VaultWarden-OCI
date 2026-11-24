@@ -145,7 +145,7 @@ def _load_identity(path: Path, label: str) -> StorageIdentity:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode): raise StorageError(f"{label} is not a regular file: {path}")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except StorageError: raise
-    except (OSError, json.JSONDecodeError) as exc: raise StorageError(f"cannot read {label} {path}: {exc}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc: raise StorageError(f"cannot read {label} {path}: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1: raise StorageError(f"{label} has an unsupported schema")
     try: identity = StorageIdentity(uuid=str(payload["uuid"]), fs_type=str(payload["fs_type"]), source=str(payload["source"]), mount=str(payload["mount"]))
     except KeyError as exc: raise StorageError(f"{label} is incomplete") from exc
