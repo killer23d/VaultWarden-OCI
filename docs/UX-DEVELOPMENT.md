@@ -225,6 +225,71 @@ CI and focused/full results are recorded independently in PR #445. Native
 OCI acceptance remains NOT RUN / HOLD until the exact installed source is
 witnessed on an explicitly approved disposable host. UX-05-F01 remains open.
 
+### UX-02 accepted integration — November 24, 2026
+
+**PASS — accepted and integrated for the scoped dashboard/console gate.**
+This dated reconciliation supersedes the historical candidate HOLD and
+unperformed-validation statements above, not their original provenance.
+
+- Accepted base `d5e0e81b2a8f418511e75e04daa4fd04aff164f5`; exact reviewed
+  head `4b44ad0a389f54c8c5370b9bc884f5bb0356e3e6`, tree
+  `de2877fded700a8a3c03189456b83c0af3933bb5`.
+- [PR #445](https://github.com/killer23d/VaultWarden-OCI/pull/445) was closed
+  after administrator-authorized squash-equivalent integration. GitHub
+  reports closed / merged=false; this is not a native GitHub squash.
+  The accepted `v3` commit
+  [8cbe7bd00131990420f5bb82e4b4211376b7d761](https://github.com/killer23d/VaultWarden-OCI/commit/8cbe7bd00131990420f5bb82e4b4211376b7d761)
+  independently has exactly the accepted base as sole parent and the exact
+  reviewed tree. Preserved `v2` remains
+  `03c3437b2191b052534718d94e2ce96f129c62aa`; default `main` remains
+  `16dc4c82a57234f8de8b54aa709a8ef32831f4e6`.
+- Reviewed-head [push CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45474258129)
+  and [PR CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45474271729)
+  PASS 18/18. Focused 54/54 tests are included within the complete 662/662
+  regression suite, not a separate rerun.
+  [Integration CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45475850475)
+  PASS 9/9 independently verified at the accepted integration SHA,
+  including native Ubuntu 26.04 ARM64 CI.
+- Operator-reported VM9 native witness: rc.18 from reviewed head,
+  canonical ARM64 frozen manifest, six console exit/default-No cases PASS,
+  56 immutable files unchanged, 13 installed units, dedicated storage,
+  absent recovery guard, local-only zero-retention backup and healthy
+  Vaultwarden/Caddy; Doctor without FAIL. Original protected receipt:
+  `~/vwoci-acceptance/ux02-update-20261124T195242Z-K9hqOw/console-receipt.json`,
+  reported SHA-256 `c0cda23e774a17100c70575a31f45cb744aad876bf93a0e1740e5354f69cbea2`.
+  No independent retrieval of protected host JSON or broader recovery,
+  provider, custody, production or failed-update live acceptance is claimed.
+- UX-05-F01 remains OPEN, deferred to UX-05. A healthy snapshot does not
+  resolve the earlier concurrency finding.
+
+## UX-03 entry and A0 preflight (in progress; HOLD for live activation)
+
+- Stage branch `ux/03-guided-installation` created from the accepted UX-02
+  integration SHA above. Target `v3` only. No UX-03 executable change,
+  candidate release, focused or regression run, PR or merge at this checkpoint.
+- Operator-reported A0 on existing disposable `vaultwarden-oci-9-vnic`,
+  Ubuntu 26.04 ARM64, verified exact rc.18 reviewed source, six safe native
+  console cases, 56 immutable files, 13 units and canonical ARM64 frozen
+  manifest. Dedicated ext4 UUID `0d043614-606c-4098-9617-1b1467155b6f`;
+  recovery guard absent; healthy containers; Doctor PASS; local-only backup
+  and both retention values zero. Status exit 0, automation overall PASS.
+  Evidence `~/vwoci-acceptance/ux03-a0-20261124T214834Z-ouG6DF/console-receipt.json`,
+  operator-reported SHA-256 `8a792945b3fb6f35a26978c83d112d1ba030864289b8a25a34e15c3e0cb56aa5`.
+- A0 stopped with exit 2 HOLD because `vaultwarden-oci.target` was loaded,
+  active and enabled rather than the harness's assumed isolated state.
+  Existing-appliance integrity and health PASS; isolation was not proven.
+  This is a harness prerequisite mismatch, not proof of an appliance
+  failure or a newly installed UX-03 candidate. No automatic isolation,
+  timer disablement, service restart, DNS write, storage mutation or reset
+  is authorized by the A0 receipt. Existing scheduled behavior may continue;
+  the health service independently wants the DNS synchronization service.
+- UX-03 source development may use the accepted base without changing VM9.
+  Before activation testing, separately establish the permitted host/source
+  and mutation scope. Fresh-install live coverage requires an expressly
+  approved blank dedicated-data host or separately authorized disposable
+  reset; preserve the existing VM9 state by default. All UX-03 candidate
+  validation is NOT RUN. Overall stage HOLD; no UX-04 or merge authorization.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,
