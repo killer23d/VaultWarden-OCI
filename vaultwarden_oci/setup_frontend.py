@@ -175,12 +175,12 @@ def _confirm_use_latest(args: Sequence[str]) -> bool:
 
 
 def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
-    if result.emailed:
-        return
     ui = _ui()
-    ui.action(f"Copy the verified encrypted recovery kit off-host now: {result.archive}")
+    if result.emailed:
+        ui.info("SMTP acceptance alone does not prove receipt in the intended mailbox. Confirm the archive is accessible off-host or copy the verified local kit.")
+    ui.action(f"Verified encrypted recovery kit for off-host custody: {result.archive}")
     ui.action("Keep its ZIP passphrase separately from the archive.")
-    ui.info("If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.")
+    ui.info("If needed, leave this prompt open and use a second terminal to copy the protected ZIP securely off-host before typing SAVED.")
     try:
         answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()
     except EOFError as exc:

@@ -133,7 +133,7 @@ Follow the prompts in order:
 1. **Disk:** select the separate volume. Approve adopting an existing ext4/xfs filesystem or, separately, confirm formatting a blank disk **only after checking the device**.
 2. **SMTP config:** in the validated config editor, replace `smtp.invalid` with your SMTP host and set port, security and sender. This lives in `/etc/vaultwarden-oci/config.toml`.
 3. **Encrypted secrets:** in the secrets editor, enter the two Cloudflare tokens and `smtp_username`/`smtp_password`. Keep the already generated admin credentials. The encrypted file is `/etc/vaultwarden-oci/secrets.sops.yaml`.
-4. **Recovery kit:** if you did not supply an existing offline public recipient, interactive setup creates the offline recovery private identity temporarily, packs it into a **verified AES-256 ZIP**, and prompts for its passphrase and handoff. Keep the kit **off the server** and store its passphrase separately. Complete the exact acknowledgement or verified email handoff before rebooting.
+4. **Recovery kit:** if you did not supply an existing offline public recipient, interactive setup creates the offline recovery private identity temporarily, packs it into a **verified AES-256 ZIP**, and prompts for its passphrase and handoff. Keep the kit **off the server** and store its passphrase separately. After local export or SMTP acceptance, confirm the verified archive is accessible off-host and type `SAVED` before the temporary private identity is removed. SMTP acceptance alone does not establish mailbox receipt. If acknowledgment is declined or interrupted, secure the retained private identity before rebooting.
 
 Setup may finish successfully while the **vault is still stopped**. Continue with the installed guide:
 

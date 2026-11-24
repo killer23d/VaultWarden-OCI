@@ -376,6 +376,30 @@ verified. Native first-run and activation acceptance are NOT RUN; the
 existing activated VM9 baseline cannot substitute for a blank-host install.
 No reset, deployment, merge or subsequent stage authorized. **HOLD.**
 
+### UX-03 contract re-review before live acceptance
+
+The explicitly supplied stage contract is Guided First-Run Installation and Safe
+Activation; the older dependency planning table below is historical, not the
+authority for stage numbering or acceptance. Exact reviewed head
+`0f51be6fb7b9923545b85ed9e0c59f3bcad29154` passed 689 unit tests including
+27 focused tests. Both native ARM64 CI jobs passed; the final Caddy integration
+jobs were still pending at the time of this observation. See draft
+[PR #446](https://github.com/killer23d/VaultWarden-OCI/pull/446) for current
+exact-head CI and live gate updates.
+
+Before the first native candidate install, re-review found three input/custody
+gaps: final hostname validation could be deferred until after storage work,
+nonpositive interactive disk indexes could select a different candidate, and
+SMTP acceptance skipped explicit custody acknowledgment in initial setup.
+The setup owner now validates the final hostname before storage, rejects
+explicit ports including zero and out-of-range disk indexes; initial recovery
+handoff requires explicit SAVED acknowledgment even after SMTP accepts the
+verified ZIP. Focused tests cover these boundaries. Existing explicit/headless
+forms and dependency, storage and recovery owners remain in place. Candidate
+release identity stays rc.19 (no native rc.19 installation accepted yet).
+Exact new-head tests and all required native fresh-install evidence remain
+pending. No host reset, DNS cutover, merge or later stage authorized.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from argparse import Namespace
 from unittest import mock
 
 from vaultwarden_oci import setup, setup_frontend
@@ -178,6 +179,55 @@ class GeneratedCustodyGuardTests(unittest.TestCase):
             ):
                 setup_frontend._require_new_custody()
             self.assertEqual(list(root.iterdir()), [])
+
+class AcceptanceBoundaryTests(unittest.TestCase):
+    def test_bad_hostname_or_explicit_zero_port_refused_before_owner(self):
+        for domain, url in (("bad..net", "https://vault.bad..net"),
+                            ("-bad.net", "https://vault.-bad.net"),
+                            ("example.net", "https://vault.example.net:0"),
+                            ("example.net", "https://@vault.example.net")):
+            with (
+                self.subTest(domain=domain, url=url),
+                mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                mock.patch("builtins.input", side_effect=[domain, url, "admin@example.net"]),
+                mock.patch.object(setup, "main") as owner,
+                mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(setup_frontend.main(["install"]), 1)
+                owner.assert_not_called()
+                generate.assert_not_called()
+
+    def test_nonpositive_disk_selection_never_selects_last_device(self):
+        args = Namespace(data_mount=str(setup.storage.STATE_ROOT), data_device=None, auto=False)
+        rows = [{"path": "/dev/vdb", "size": 1000, "mountpoints": [], "fstype": "", "model": ""}]
+        for answer in ("0", "-1", "2"):
+            with (
+                self.subTest(answer=answer),
+                mock.patch.object(setup.sys.stdin, "isatty", return_value=True),
+                mock.patch.object(setup.storage, "inventory", return_value=rows),
+                mock.patch("builtins.input", return_value=answer),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "invalid storage selection"):
+                    setup._select_storage(args, setup.UI(color=False))
+
+    def test_smtp_acceptance_does_not_skip_custody_acknowledgment(self):
+        result = setup_frontend.recovery_ux.KitResult(
+            Path("/root/vaultwarden-recovery/test.zip"),
+            setup_frontend.recovery_ux.KIT_MEMBERS, True)
+        for response in ("", "n", "SAVED"):
+            with (
+                self.subTest(response=response),
+                mock.patch("builtins.input", return_value=response) as prompt,
+                redirect_stdout(io.StringIO()),
+            ):
+                if response == "SAVED":
+                    setup_frontend._confirm_local_handoff(result)
+                else:
+                    with self.assertRaises(setup_frontend.SetupFrontendError):
+                        setup_frontend._confirm_local_handoff(result)
+                prompt.assert_called_once()
 
 
 if __name__ == "__main__":
