@@ -498,6 +498,62 @@ completion. Final stage receipt and explicit squash authorization remain
 required. Preserved baseline/default branch unchanged; do not begin the
 next UX stage.
 
+### UX-03 A4 accelerated execution receipt
+
+Operator explicitly authorized the temporary native timer schedule test on
+disposable VM10. Source remains the installed rc.19 executable candidate
+`cdd155a6406ffe3ff150446e7b8d6668c63caa99`. The preceding documentation-only
+checkpoint `18404b12bb784239cdfd17d5f5243ac1dc064d15` passed both exact-head
+CI runs ([push 45508446415](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45508446415),
+[PR 45508460178](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45508460178)),
+18/18 jobs independently verified.
+
+Operator-returned acceleration evidence:
+`~/vwoci-acceptance/ux03-a4-fast-20261124T232055Z-egA4He`.
+Checksum-pinned paste-only script SHA-256
+`ae5d3303a1808cd86bf7f9555af982f6a0d9f0895518a77841d26a4d6653196e`.
+Original health/DNS schedules kept active; missing update-check, backup
+and maintenance timers triggered their unmodified services sequentially
+using individually scoped transient /run systemd timer drop-ins. Genuine
+service completion records, Result=success and ExecMainStatus=0:
+health and independent DNS 23:18:22 UTC, update-check 23:21:27 UTC,
+backup 23:22:15 UTC and maintenance 23:22:34 UTC, 2026-11-24.
+All temporary overrides removed; original timer definitions and
+enablement restored. Before/after unit-definition witness hashes match:
+`e6be75550449b3fbb778def750f0a4e0b7a7f82327d2281a24068188bbde8fe5`.
+Wall clock unchanged. This establishes real timer-triggered execution
+under authorized temporary test schedules, not natural daily calendar
+execution; post-restoration calendar LastTrigger values need not equal
+the captured transient trigger timestamps.
+
+Final independent A4 read-only verification:
+`~/vwoci-acceptance/ux03-a4-verify-20261124T232236Z-6JWo2x/summary.txt`,
+operator-reported SHA-256
+`fcc8d3e04c18bfba3b779d870bd8db27dd23b76de9f4be310a2cb2b5834d7230`.
+Exact release, units, storage, authority, original ZIP and first backup
+ciphertext checksums, in-sync DNS, all 28 required readiness checks and
+five service completion records PASS. A4_VERIFY_EXIT=0,
+A4_FAST_EXIT=0, ORIGINAL_TIMER_CONFIG_RESTORED=YES,
+SYSTEM_CLOCK_CHANGED=NO. No direct assistant access to host artifacts
+claimed. Native machine readiness and positive-path installation,
+continuation and activation acceptance PASS. No further runtime changes
+or repeated timer execution indicated.
+
+**Stage disposition remains HOLD pending administrator scope decision.**
+Actual live PUBLISH refusal and deliberately interrupted retained-key
+export variants are NOT RUN; prior native early guide refusal and
+observed-state continuation, normal custody cleanup, unchanged DNS
+before explicit publication and existing automated coverage are distinct
+evidence. Existing filesystem adoption and explicit-recipient handling
+have automated coverage. Do not undo successful VM10 custody or DNS
+solely to manufacture missing variants. Administrator may explicitly
+accept the automated negative-path coverage in lieu of additional native
+variants, or require a separate disposable isolated test. This is not
+an implicit waiver, stage PASS, deployment approval or authorization
+to merge. Final review requires exact documentation-head CI, documented
+scope decision and explicit exact-head squash authorization; preserve
+v2 and default main, do not begin UX-04.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,
