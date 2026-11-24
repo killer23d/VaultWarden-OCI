@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from . import cli, install, storage, update, update_appliance, update_guard
+from . import cli, install, operator_output, storage, update, update_appliance, update_guard
 from .update_versions import UpdateError, resolve_pinned_file
 
 _STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "dns", "crowdsec", "notify", "notification"}
@@ -25,7 +25,7 @@ if _STORAGE_DOCTOR_ID not in cli.DOCTOR_CHECK_IDS:
 class UI:
     def __init__(self, *, color: bool | None = None) -> None:
         if color is None:
-            color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+            color = operator_output.color_enabled(sys.stdout)
         self.color = color
 
     def _line(self, label: str, text: str, code: str) -> None:
@@ -674,6 +674,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return update_candidate.main(args[1:])
     if not args or args in (["--help"], ["-h"]):
         return _print_top_help()
+    if args[0] in {"menu", "guide"}:
+        # Opening the console must work on an incomplete or guarded host.
+        # Operations chosen inside it re-enter this authoritative CLI and its
+        # existing storage, recovery, and consent gates.
+        return cli.main(args)
     if args[0] == "doctor":
         if any(flag in args[1:] for flag in ("--help", "-h")):
             return cli.main(args)

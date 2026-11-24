@@ -2,27 +2,92 @@
 
 These operations apply to supported Ubuntu 24.04 LTS Noble and Ubuntu 26.04 LTS Resolute hosts. Application updates and Ubuntu package maintenance remain separate; `vwctl update` does not perform an Ubuntu release upgrade.
 
-`dashboard.sh` is the normal day-2 human interface. `vwctl` remains the single implementation and mutation authority: the dashboard reads stable status/doctor output and delegates every state-changing action to `vwctl`. Its only direct command is bounded read-only `journalctl` display.
+`sudo vwctl menu` opens the day-2 administrator console. `vwctl` remains the single implementation and mutation authority: the console reads the authoritative operational status and delegates state-changing actions to existing `vwctl` commands. Its only direct system command is bounded read-only `journalctl` display. Both existing `dashboard.sh` launchers remain supported.
 
 **OCI administrator access:** Before using SSH or changing network rules, consult [Cloud Shell network modes and private-only SSH](OCI-CLOUD-SHELL-AND-PRIVATE-SSH.md). Use Cloud Shell Public Network for GitHub clones, OCI Service Network for provider readback, and Private Network Access for authenticated SSH to the approved VM **private IPv4**. Do not open public TCP22 as a troubleshooting workaround; independently verify all attached security lists and NSGs. The documented P8T private SSH correction is accepted only for its disposable host, not a reusable automatic network change.
 
 ## Dashboard
 
-**Prerequisite:** a completed installation with valid dedicated storage.
+Open the console from the installed CLI:
+
+```bash
+sudo vwctl menu
+```
+
+The console remains available for diagnosis when setup is incomplete or a recovery
+guard blocks an operation. Each operation still uses its existing storage,
+permission, recovery, and confirmation checks. Root is required for interactive
+operation; help remains available without root.
+
+The existing installed launcher and source-checkout launcher remain compatible:
 
 ```bash
 sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh
-```
-
-From a source checkout:
-
-```bash
+# From the source checkout:
 sudo ./dashboard.sh
 ```
 
-The main screen covers Vaultwarden/Caddy, doctor, dedicated-storage usage, local/offsite recovery age, rclone, CrowdSec/Cloudflare, timers, notifications, installed/update state, `/admin` protection, and reboot-required state. Menus cover Stack, Diagnostics, Backup & Recovery, Security, Config & Secrets, Recovery Kit, Email & Notifications, Updates & Host, and Automation. `NO_COLOR=1` disables color; JSON and non-TTY output remain machine-safe.
+The home screen shows the observed operational outcome and actionable exceptions
+before routine choices. It distinguishes recovery required, critical problems,
+attention, operational, incomplete setup, and a stopped appliance with unknown
+administrator intent. It keeps detailed diagnostics, exact versions, service
+results, and logs available in the menus.
+
+| Menu | Administrator objective |
+| --- | --- |
+| Setup and readiness | Inspect local foundations and complete the supported first-start steps. |
+| Backup and disaster recovery | Create, list, verify, or restore application recovery points; manage saved offsite publishing and the separate credential kit. |
+| Security and connectivity | Diagnose origin, DNS, and CrowdSec protection; perform explicitly selected supported changes. |
+| Automation and alerts | Inspect timer/service execution and notification configuration; explicitly send a test message. |
+| Updates and maintenance | Check or apply the recommended application update and separately maintain Ubuntu packages. |
+| Configuration | Edit and validate the existing TOML and encrypted SOPS authorities. |
+| Diagnose a problem | Inspect checks, container logs, selected system journals, versions, and sanitized support diagnostics. |
+| Advanced operations | Find supported expert operations without making them routine defaults. |
+
+Use the displayed number or shortcut, `b` to go back, and `q` or `e` to exit.
+Invalid input leaves the current menu open. Confirmation defaults to **No**.
+`NO_COLOR` disables color, including when its value is empty; a non-TTY or
+`TERM=dumb` also uses plain output. Existing JSON, captured CLI output, raw logs,
+and systemd exit contracts are unchanged.
+
+Installed console commands use `/usr/local/bin/vwctl`, including the supported
+temporary update-controller handoff. If immutable release selection changes,
+the old console exits safely and asks you to reopen `sudo vwctl menu`. It never
+patches a release, changes the launcher itself, or keeps navigating with stale
+presentation code. The legacy launchers suppress Python bytecode writes too.
+
+**Cancellation and interruption:** read the operation owner's result and next
+action. Some successful cancellations deliberately return exit 0; this is not
+evidence that a mutation completed. The console does not add a generic successful
+mutation message based only on that code. Ctrl-C or EOF at a menu exits safely.
+After interrupting an operation, inspect its result and current status before
+retrying; an interrupted command may already have performed part of its work.
 
 **Expected success:** the screen truthfully reflects `vwctl status --json` and doctor state. **On failure:** exit to `sudo vwctl status --json` and `sudo vwctl doctor --json`; never interpret a dashboard presentation error as appliance health.
+
+### Available guided operations
+
+```bash
+sudo vwctl guide
+sudo vwctl guide restore
+sudo vwctl guide offsite
+sudo vwctl guide recovery-kit
+```
+
+These entries explain purpose, prerequisites, impact, and verification before
+calling existing guided owners:
+
+| Guide | Existing operation | Required decision and next check |
+| --- | --- | --- |
+| `restore` | `vwctl restore` local/remote picker and shared offline-identity chooser | Review the authenticated selected point and type `RESTORE` only to authorize replacement. The default leaves the stack stopped; review recovered policy, then explicitly start and run doctor when appropriate. |
+| `offsite` | `vwctl recovery offsite configure` | Configure root's rclone first, select the intended folder, and type `ENABLE` to save it. Check offsite status, then create and verify a recovery point when authorized. |
+| `recovery-kit` | `vwctl recovery-kit export` | Supply the existing offline identity through its protected chooser and enter an independent ZIP passphrase. Email has separate consent. Keep the verified kit off-host and its passphrase separately. |
+
+Opening a guide does not authorize its changes. The original CLI forms and their
+noninteractive arguments remain available. No setup, update, security, or
+automation wizard is implied by this selector; use the relevant menu and manual
+for those operations. Local verification or a sent email does not establish
+independent off-host custody or successful disaster recovery.
 
 ### Operational evidence and deployment readiness
 
@@ -107,6 +172,10 @@ journalctl -u vaultwarden-oci-backup.service
 journalctl -u vaultwarden-oci-maintenance.service
 journalctl -u vaultwarden-oci-update-check.service
 journalctl -u 'vaultwarden-oci-notify@*'
+journalctl -u vaultwarden-oci-crowdsec-boot.service
+journalctl -u crowdsec.service
+journalctl -u crowdsec-firewall-bouncer.service
+journalctl -u crowdsec-cloudflare-worker-bouncer.service
 ```
 
 `sudo vwctl support-bundle` creates a bounded sanitized artifact in root-only volatile storage by default. It excludes config/secrets files and includes journal text only when loaded secret values can be applied to fail-closed redaction.

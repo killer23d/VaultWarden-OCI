@@ -395,6 +395,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
+    commands.add_parser("menu", help="open the interactive administrator console")
+    guide = commands.add_parser("guide", help="choose an available guided operation")
+    guide.add_argument(
+        "workflow", nargs="?", choices=("restore", "offsite", "recovery-kit"),
+        help="open an existing guided restore, offsite setup, or recovery-kit export",
+    )
+
     config = commands.add_parser("config", help="validate or safely edit operator configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     validate = config_commands.add_parser("validate")
@@ -548,6 +555,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         _parser().print_help()
         return 0
+    if args.command in {"menu", "guide"}:
+        from . import dashboard
+
+        if args.command == "menu":
+            return dashboard.main([])
+        return dashboard.guide([] if args.workflow is None else [args.workflow])
     if args.command == "config":
         from . import runtime
         try:

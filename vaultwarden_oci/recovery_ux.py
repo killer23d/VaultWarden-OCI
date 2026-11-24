@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Mapping, Sequence
 
-from . import notification, offsite, recovery, runtime, secrets, sevenzip_secure, storage
+from . import notification, offsite, operator_output, recovery, runtime, secrets, sevenzip_secure, storage
 
 PUBLICATION_DIR = Path("/root/vaultwarden-recovery")
 SENSITIVE_RUN = Path("/run/vaultwarden-oci")
@@ -70,7 +70,7 @@ class KitResult:
 class UI:
     def __init__(self, *, color: bool | None = None) -> None:
         if color is None:
-            color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+            color = operator_output.color_enabled(sys.stdout)
         self.color = color
 
     def _line(self, label: str, text: str, code: str) -> None:

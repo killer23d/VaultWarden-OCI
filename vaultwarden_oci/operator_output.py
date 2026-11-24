@@ -22,7 +22,11 @@ _ROOT_SAFE_GUIDANCE = {
 
 def color_enabled(stream: TextIO) -> bool:
     """Honor terminal capability and the standard NO_COLOR opt-out."""
-    return bool(stream.isatty() and not os.environ.get("NO_COLOR"))
+    return bool(
+        stream.isatty()
+        and "NO_COLOR" not in os.environ
+        and os.environ.get("TERM") != "dumb"
+    )
 
 
 def colorize(text: str) -> str:
