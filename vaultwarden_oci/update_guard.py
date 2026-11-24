@@ -113,7 +113,8 @@ def load(path: Path = RECOVERY_REQUIRED_STATE) -> dict[str, object] | None:
         raise UpdateGuardError(f"cannot load update recovery guard: {exc}") from exc
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != 1
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
         or value.get("recovery_required") is not True
     ):
         raise UpdateGuardError("update recovery guard has invalid content")

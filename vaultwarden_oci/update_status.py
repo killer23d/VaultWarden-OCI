@@ -41,12 +41,14 @@ def snapshot(
     stale = age is None or age > MAX_AGE_SECONDS
     recorded_current = state.get("current")
     valid = (
-        state.get("schema_version") == 1
+        type(state.get("schema_version")) is int and state["schema_version"] == 1
+        and {"checked_at", "current", "candidate", "available", "error"} <= state.keys()
         and isinstance(recorded_current, str) and bool(recorded_current)
         and isinstance(state.get("available"), bool)
-        and (state.get("candidate") is None or isinstance(state.get("candidate"), str))
-        and (state.get("error") is None or isinstance(state.get("error"), str))
-        and (reason is None or isinstance(reason, str))
+        and (state.get("candidate") is None or isinstance(state.get("candidate"), str) and bool(state["candidate"].strip()))
+        and (state.get("error") is None or isinstance(state.get("error"), str) and bool(state["error"].strip()))
+        and (reason is None or isinstance(reason, str) and bool(reason.strip()))
+        and (state.get("candidate") is not None or bool(state.get("error")) or bool(reason))
         and (state.get("available") is not True or (
             bool(state.get("candidate")) and state.get("candidate") != recorded_current and not state.get("error")
         ))

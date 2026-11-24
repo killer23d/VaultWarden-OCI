@@ -1351,7 +1351,7 @@ def backup_receipt_evidence(
     for kind, location_key in (("local", "artifact"), ("offsite", "remote_object")):
         row: dict[str, object] = {"state": "unknown", "verified_at": None}
         result[kind] = row
-        if state.get("schema_version") != 1 or state.get("state_error"):
+        if type(state.get("schema_version")) is not int or state["schema_version"] != 1 or state.get("state_error"):
             continue
         if kind not in state:
             row["state"] = "never_verified"

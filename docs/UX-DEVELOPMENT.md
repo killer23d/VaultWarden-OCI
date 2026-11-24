@@ -52,6 +52,31 @@ own SHA. No tag, release, production change or subsequent stage is authorized.
 | PR / head | [#444](https://github.com/killer23d/VaultWarden-OCI/pull/444); exact receipt head recorded independently in the PR and handover, not self-referentially in this commit. |
 | Verdict | HOLD pending mandatory validation. No merge or next stage authorized. |
 
+### Independent UX-01 review follow-up
+
+The prior exact reviewed candidate `86423a222ebe04e2003c27603b67821dfe87d4ab`
+passed all 20 focused tests and all 608 regression tests in quality CI, including
+the installed-entrypoint staging checks and current supported predecessor
+success and coherent rollback instruments. Its
+[push CI 45456776188](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456776188)
+and [PR CI 45456787463](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456787463)
+completed successfully; independently verified all nine job conclusions in
+each, including native Ubuntu 26.04 ARM64 and security/Caddy/crypto integrations.
+
+Independent source review found that captured non-TTY status still consumed
+persistent history on an unverified mount, notification success could be
+inherited across provider changes, incomplete update evidence could look fresh,
+unknown doctor aggregate could pass readiness, and optional CrowdSec boot
+failure was not reflected in the outcome. The follow-up changes the existing
+owners and adds focused regressions. No new runtime dependency, unit or upstream
+pin; candidate project identity remains the unaccepted rc.17. No earlier
+installed copy may be overwritten or treated as the new source. Exact final
+head, focused and complete regression tests, and both CI run references must
+be independently recorded in PR #444. Local complete checkout still NOT RUN
+(GitHub DNS unavailable). Native OCI ARM64 exact installed-candidate witness
+NOT RUN and requires explicit host, source and scope. **HOLD** until final
+mandatory evidence is verified. No merge or subsequent stage authorized.
+
 ## 1. Fixed snapshot and complete repository structure
 
 All source line references in this record refer to

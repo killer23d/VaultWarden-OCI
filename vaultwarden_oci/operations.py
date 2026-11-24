@@ -405,6 +405,11 @@ def _notification_evidence(
         "smtp_delivery": "not_established",
         "operational_route": route,
         "delivery_history": history,
+        "history_provider_match": (
+            notification.history_provider_match(config.notification_provider, history)
+            if route == "configured" and config is not None else "not_established"
+        ),
+        "current_route_delivery": "not_established",
     }
 
 
@@ -440,6 +445,7 @@ def _operational_classification(
     payload: dict[str, object], backup: dict[str, object], guard: dict[str, str],
     mail: dict[str, object], config: runtime.RuntimeConfig | None,
     automation_evidence: dict[str, object],
+    boot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     storage_state = _object(payload.get("storage")).get("state")
     runtime_state = _object(payload.get("runtime")).get("overall")
@@ -481,9 +487,14 @@ def _operational_classification(
         attention.append("update check needs attention")
     if mail.get("operational_route") == "attention" or (
         mail.get("operational_route") == "configured"
-        and _object(mail.get("delivery_history")).get("state") != "success"
+        and (
+            _object(mail.get("delivery_history")).get("state") != "success"
+            or mail.get("history_provider_match") != "matches_configured_provider"
+        )
     ):
         attention.append("operational notifications need attention")
+    if boot is not None and _job_result(boot) == "failed":
+        attention.append("CrowdSec boot reconciliation reported failure")
     if payload.get("reboot_required") or storage_state == "warning":
         attention.append("host maintenance or disk usage needs attention")
     return {
@@ -506,7 +517,7 @@ def operational_snapshot(payload: dict[str, object]) -> dict[str, object]:
     boot = _systemd_properties("vaultwarden-oci-crowdsec-boot.service")
     automation = _automation_evidence(payload, jobs)
     return {
-        **_operational_classification(payload, backup, guard, mail, config, automation),
+        **_operational_classification(payload, backup, guard, mail, config, automation, boot),
         "automation": automation,
         "backup": backup,
         "update_guard": guard,
@@ -645,7 +656,10 @@ def readiness_payload() -> dict[str, object]:
         _local_https(config, _object(payload.get("admin")))
         if config is not None else {"status": "UNKNOWN", "message": "verified storage, valid config and running stack required"}
     )
+    doctor_overall = _object(payload.get("doctor")).get("overall")
     required.extend((
+        {"id": "diagnostics.overall", "status": "PASS" if doctor_overall in {"PASS", "WARN"} else "FAIL" if doctor_overall == "FAIL" else "UNKNOWN",
+         "message": "doctor aggregate must be available without failures"},
         {"id": "runtime.running", "status": "PASS" if runtime_ok else "FAIL", "message": "running stack required"},
         {"id": "update.guard", "status": "PASS" if guard.get("state") == "absent" else "FAIL", "message": guard.get("detail", "guard not established")},
         {"id": "automation.required", "status": "PASS" if auto.get("activation") == "PASS" else "FAIL", "message": "active target and required timers"},
@@ -667,7 +681,9 @@ def readiness_payload() -> dict[str, object]:
          "destination_connectivity": "not_established"},
         {"id": "notification.operational", "state": mail.get("operational_route", "unknown")},
         {"id": "update.check", "state": _object(payload.get("update")).get("check_state", "unknown")},
-        {"id": "crowdsec.boot_reconciliation", "state": _object(_object(operational.get("crowdsec")).get("boot_reconciliation")).get("enabled", "unknown")},
+        {"id": "crowdsec.boot_reconciliation",
+         "state": _object(_object(operational.get("crowdsec")).get("boot_reconciliation")).get("state", "unknown"),
+         "enablement": _object(_object(operational.get("crowdsec")).get("boot_reconciliation")).get("enabled", "unknown")},
     ]
     statuses = {row.get("status") for row in required}
     if _object(payload.get("doctor")).get("overall") == "FAIL":

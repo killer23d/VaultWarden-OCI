@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from vaultwarden_oci import cli, dashboard, edge, notification, operations, recovery, update_guard, update_status, update_cli
+from vaultwarden_oci import cli, dashboard, edge, notification, operations, recovery, storage, update_guard, update_status, update_cli
 
 
 class ReceiptEvidenceTests(unittest.TestCase):
@@ -108,6 +108,26 @@ class UpdateAndGuardTests(unittest.TestCase):
                 result = update_status.snapshot(path=path, now=101)
         self.assertEqual(result["check_state"], "unknown")
         self.assertTrue(result["check_stale"])
+
+    def test_incomplete_or_boolean_schema_update_cannot_be_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "update.json"
+            base = {"schema_version": 1, "current": "0.1.0", "checked_at": 100,
+                    "candidate": None, "available": False, "error": None,
+                    "availability_reason": "no newer stable release"}
+            cases = [
+                {**base, "schema_version": True},
+                {**base, "availability_reason": None},
+                {**base, "error": ""},
+                {key: value for key, value in base.items() if key != "error"},
+            ]
+            with mock.patch.object(update_status.cli, "load_versions", return_value=SimpleNamespace(version="0.1.0")):
+                for record in cases:
+                    with self.subTest(record=record):
+                        path.write_text(json.dumps(record))
+                        result = update_status.snapshot(path=path, now=101)
+                        self.assertEqual(result["check_state"], "unknown")
+                        self.assertTrue(result["check_stale"])
 
     def test_guard_absent_active_and_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -347,6 +367,72 @@ class OperationalReadinessTests(unittest.TestCase):
         self.assertEqual(operations._job_result(unit), "not_recorded")
         self.assertEqual(operations._job_result({**unit, "last_exited": "today"}), "success_recorded")
         self.assertEqual(operations._job_result({**unit, "result": "exit-code"}), "failed")
+
+    def test_non_tty_status_fails_closed_before_persistent_receipt_reads(self):
+        with (
+            mock.patch.object(storage, "verify", side_effect=storage.StorageError("missing mount")),
+            mock.patch.object(operations.runtime, "status", return_value=("running", [])),
+            mock.patch.object(recovery, "status_rows") as receipts,
+            mock.patch.object(notification, "status_row") as delivery,
+            mock.patch.object(edge, "doctor_checks", return_value=[]) as checks,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(update_cli.main(["status"]), 1)
+        receipts.assert_not_called()
+        delivery.assert_not_called()
+        checks.assert_called_once_with(state_verified=False)
+        self.assertIn("storage.dedicated: FAIL", output.getvalue())
+        self.assertIn("recovery-offsite: unknown", output.getvalue())
+        self.assertIn("Overall: degraded", output.getvalue())
+
+    def test_provider_change_cannot_inherit_successful_delivery(self):
+        payload = self.payload()
+        payload["doctor"]["checks"].extend([
+            {"id": key, "status": "PASS", "message": "configured"}
+            for key in ("notification.provider", "notification.api_secret")
+        ])
+        config = SimpleNamespace(notification_provider="mailersend")
+        payload["notification"] = {"state": "success", "provider": "cyberpersons", "transport": "https"}
+        evidence = operations._notification_evidence(config, payload, True)
+        self.assertEqual(evidence["history_provider_match"], "different_provider")
+        self.assertEqual(evidence["current_route_delivery"], "not_established")
+        backup = {"local": {"state": "current"}, "policy": "local_only"}
+        guard = {"state": "absent", "detail": "none"}
+        auto = payload["operational"]["automation"]
+        result = operations._operational_classification(payload, backup, guard, evidence, config, auto)
+        self.assertEqual(result["state"], "ATTENTION")
+        payload["notification"]["provider"] = "mailersend"
+        evidence = operations._notification_evidence(config, payload, True)
+        self.assertEqual(evidence["history_provider_match"], "matches_configured_provider")
+        self.assertEqual(evidence["current_route_delivery"], "not_established")
+        self.assertEqual(operations._operational_classification(payload, backup, guard, evidence, config, auto)["state"], "OPERATIONAL")
+
+    def test_unknown_doctor_aggregate_never_passes_readiness(self):
+        payload = self.payload()
+        payload["doctor"]["overall"] = "UNKNOWN"
+        with (
+            mock.patch.object(operations, "status_payload", return_value=payload),
+            mock.patch.object(operations, "_config_snapshot", return_value=SimpleNamespace(domain="vault.example.invalid")),
+            mock.patch.object(operations, "_local_https", return_value={"status": "PASS", "message": "loopback"}),
+        ):
+            report = operations.readiness_payload()
+        self.assertEqual(report["overall"], "HOLD")
+        self.assertEqual(next(row["status"] for row in report["required"] if row["id"] == "diagnostics.overall"), "UNKNOWN")
+
+    def test_optional_boot_failure_is_visible_but_disabled_is_not_failure(self):
+        payload = self.payload()
+        backup = {"local": {"state": "current"}, "policy": "local_only"}
+        guard = {"state": "absent", "detail": "none"}
+        mail = {"operational_route": "not_configured"}
+        auto = payload["operational"]["automation"]
+        config = SimpleNamespace()
+        boot = {"load_state": "loaded", "active_state": "inactive", "result": "success", "enabled": "disabled"}
+        self.assertEqual(operations._operational_classification(payload, backup, guard, mail, config, auto, boot)["state"], "OPERATIONAL")
+        boot["result"] = "exit-code"
+        boot["active_state"] = "failed"
+        result = operations._operational_classification(payload, backup, guard, mail, config, auto, boot)
+        self.assertEqual(result["state"], "ATTENTION")
+        self.assertIn("CrowdSec boot reconciliation reported failure", result["reason"])
 
     def test_new_command_keeps_json_machine_readable_and_help_ungated(self):
         with (

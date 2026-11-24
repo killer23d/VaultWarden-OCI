@@ -207,8 +207,12 @@ def draw_status(payload: dict[str, object]) -> None:
     if isinstance(mail, dict):
         history = mail.get("delivery_history")
         history_state = history.get("state", "unknown") if isinstance(history, dict) else "unknown"
+        match = mail.get("history_provider_match")
+        history_label = _state(history_state)
+        if history_state == "success" and match != "matches_configured_provider":
+            history_label = STYLE.warning("historical success (current provider not established)")
         print(f" {STYLE.bold('Notifications:')} {str(mail.get('operational_route', 'unknown')).replace('_', ' ')}"
-              f" | delivery history {_state(history_state)} | SMTP {str(mail.get('application_smtp', 'unknown')).replace('_', ' ')}")
+              f" | delivery history {history_label} | SMTP {str(mail.get('application_smtp', 'unknown')).replace('_', ' ')}")
     else:
         print(f" {STYLE.bold('Notifications:')} {_state(notification.get('state', 'unknown') if isinstance(notification, dict) else 'unknown')}")
     if isinstance(update, dict):

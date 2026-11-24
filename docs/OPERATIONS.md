@@ -29,8 +29,10 @@ The main screen covers Vaultwarden/Caddy, doctor, dedicated-storage usage, local
 The status JSON retains its existing fields and exit behavior and adds an
 `operational` object. Its outcome distinguishes OPERATIONAL, SETUP INCOMPLETE,
 ATTENTION, MAINTENANCE / STOPPED (intent unknown), CRITICAL, and RECOVERY
-REQUIRED. Existing captured status text and the health service's exit boundary
-are unchanged. Use the new evidence rather than interpreting a historical
+REQUIRED. Captured status text and the health service's exit boundary remain
+unchanged on a verified dedicated mount; unverified storage fails closed
+without reading recovery or notification receipts. Use the new evidence rather
+than interpreting a historical
 receipt as a currently enabled backup policy. A running stack with a missing,
 skipped or unverified required foundation cannot be OPERATIONAL. A stopped
 stack with missing setup foundations is incomplete unless genuine failures
@@ -62,7 +64,12 @@ take precedence; neither label establishes the administrator's intent.
   unit is reported independently; recorded confirmation for the observed Worker
   invocation is not current Cloudflare API readback.
 - Application SMTP configuration, optional operational alert configuration and
-  past delivery results are different. Configuration does not prove delivery.
+  past delivery results are different. A successful receipt for another provider
+  is historical and cannot establish success for the configured provider.
+  A matching provider still does not prove the current recipient, credentials,
+  configuration or mailbox delivery. An optional boot-reconciliation service
+  that reports failure is visible as attention, not silently treated as healthy.
+  Unconfigured optional protection alone does not mean a delivery failed.
 
 Run `sudo vwctl readiness` after setup or when reviewing deployment foundations.
 The read-only command returns 0 for locally verified required foundations,

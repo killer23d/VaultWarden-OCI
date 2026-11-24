@@ -891,7 +891,22 @@ def status_row(path: Path = STATE_PATH) -> dict[str, str]:
         "state": state,
         "transport": result.transport,
         "detail": f"{result.category} at {result.recorded_at}",
+        "provider": result.provider if re.fullmatch(r"[a-z][a-z0-9_-]*", result.provider) else "unknown",
     }
+
+
+def history_provider_match(configured_provider: str, history: Mapping[str, object]) -> str:
+    """A matching provider is historical evidence, not proof of current delivery."""
+    recorded = history.get("provider")
+    if history.get("state") not in {"success", "warning"} or not isinstance(recorded, str) or recorded == "unknown":
+        return "not_established"
+    try:
+        catalog = load_catalog()
+        expected = catalog.resolve(configured_provider).provider_id
+        actual = catalog.resolve(recorded).provider_id
+    except CatalogError:
+        return "not_established"
+    return "matches_configured_provider" if actual == expected else "different_provider"
 
 
 def doctor_checks(
