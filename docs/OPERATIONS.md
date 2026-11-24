@@ -31,7 +31,10 @@ The status JSON retains its existing fields and exit behavior and adds an
 ATTENTION, MAINTENANCE / STOPPED (intent unknown), CRITICAL, and RECOVERY
 REQUIRED. Existing captured status text and the health service's exit boundary
 are unchanged. Use the new evidence rather than interpreting a historical
-receipt as a currently enabled backup policy.
+receipt as a currently enabled backup policy. A running stack with a missing,
+skipped or unverified required foundation cannot be OPERATIONAL. A stopped
+stack with missing setup foundations is incomplete unless genuine failures
+take precedence; neither label establishes the administrator's intent.
 
 - Local and offsite backup receipts use the existing 36-hour freshness threshold.
   A current local receipt also checks that the recorded regular archive exists
@@ -41,11 +44,21 @@ receipt as a currently enabled backup policy.
   for a different destination has no current applicable verification. Scheduled
   backup service failure is separate from the last successful artifact receipt;
   manual failures without a service result are not recorded by this view.
+  The exact saved rclone remote name is checked against local configuration
+  without cloud polling. A local configuration match is not proof of destination
+  reachability; use the explicit offsite status command to check access.
+- If dedicated storage is unverified, status JSON and doctor withhold persistent
+  backup, delivery, update, and invocation-bound security evidence. Untrusted
+  files on the boot filesystem cannot be counted as successful receipts.
 - Update check history is separate from a current check of this installed release;
   stale, invalid and failed evidence must not be shown as a fresh success.
 - Automation target, timers, triggered service results and independent DNS job
   results are separate. A systemd default success result without an observed
-  service exit is not execution evidence. The optional CrowdSec boot reconciliation
+  service exit is not execution evidence. Runtime-only target enablement is
+  not boot persistence. Required jobs, including DNS, need a recorded successful
+  completion before the operational outcome is green; a pending or currently
+  running job remains unestablished. These are separate from the legacy timer
+  and non-TTY health-service exit contracts. The optional CrowdSec boot reconciliation
   unit is reported independently; recorded confirmation for the observed Worker
   invocation is not current Cloudflare API readback.
 - Application SMTP configuration, optional operational alert configuration and

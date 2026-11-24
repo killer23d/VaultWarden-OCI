@@ -41,13 +41,15 @@ own SHA. No tag, release, production change or subsequent stage is authorized.
 | Accepted base | `6e89d2feac53a9cc7ac69af07b8b10471b0d117d` — [UX-00 acceptance and equivalent squash integration](https://github.com/killer23d/VaultWarden-OCI/pull/443#issuecomment-7139887051). |
 | Base tree | `379debac850371238288963e1f1acf5bf6fb8d56` independently matches exact reviewed UX-00 head; single parent is original baseline. |
 | Branch | `ux/01-status-readiness`, independently verified at the accepted base before edits. |
-| Changed owners | Existing recovery, update status/guard, edge, operations, CLI and dashboard presentation; operations manual, README and focused tests. |
-| Decisions | Preserve status schema 1 and exit contracts; additive operational evidence, separate readiness schema 1; no new installed module, mutation owner, dependency, service or pin. No claim of intentional maintenance. No provider probe on periodic health. |
-| Focused and regression tests | NOT RUN locally: execution environment cannot resolve GitHub for a complete checkout. Candidate requires exact-head automated tests and independent review. |
-| CI | NOT RUN at receipt assembly; exact candidate head and workflow references must be independently recorded in PR. |
+| Changed owners | Existing recovery, update status/guard, edge, operations, CLI and dashboard presentation; storage/config validation, notification and Worker evidence owners; operations manual, README and focused tests. |
+| Decisions | Preserve status schema 1 and exit contracts; additive operational evidence, separate readiness schema 1. Project prerelease identity changes to `0.1.0-rc.16.1` solely to satisfy immutable release identity; all upstream component and image pins unchanged. No tag, publication, new installed module, mutation owner, dependency or service. No provider probe on periodic health. |
+| Prior implementation head | `8ca122795aab4c1fabf24e288db4eeda158e58a1`; 12 new focused tests and all 600 tests passed in [Ubuntu 26.04 CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45455248409/job/138662818750), but [quality-unit](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45455248409/job/138662818230) failed the same-version immutable-release check. Prior result FAIL, not accepted. |
+| Remediation implementation | `ee81c8d860847aacd1d96016dfe00a1e89dc973c`: distinct prerelease identity; require all foundations for OPERATIONAL, distinguish boot persistence and execution, verify exact local rclone remote without provider polling, withhold untrusted state on invalid storage, exercise negative readiness/guard/HTTPS cases. This subsequent receipt/test commit does not change installed release content. |
+| Focused and regression tests | Local full checkout NOT RUN (GitHub DNS resolution unavailable). Prior-head evidence does not validate remediation. Exact receipt-head tests and results must be recorded independently. |
+| CI | Prior head FAIL; remediation push [45456495348](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45456495348) was queued at initial readback. Record exact receipt-head push and PR job conclusions independently in PR. |
 | Live acceptance | NOT RUN; disposable native OCI ARM64 host, exact installed source and permitted scope not authorized. Required installed-entrypoint and read-only readiness verification remain HOLD. |
 | Limitations | Receipts describe historical verification, not current remote presence, off-host custody or a successful fresh restore. No independent mailbox/public network/provider proof. |
-| PR / head | To be recorded independently in the PR and handover, not self-referentially in this commit. |
+| PR / head | [#444](https://github.com/killer23d/VaultWarden-OCI/pull/444); exact receipt head recorded independently in the PR and handover, not self-referentially in this commit. |
 | Verdict | HOLD pending mandatory validation. No merge or next stage authorized. |
 
 ## 1. Fixed snapshot and complete repository structure

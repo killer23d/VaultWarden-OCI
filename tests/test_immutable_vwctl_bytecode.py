@@ -43,6 +43,16 @@ class ImmutableVwctlBytecodeTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            before = {path.relative_to(release): path.read_bytes() for path in release.rglob("*") if path.is_file()}
+            for args in (("readiness", "--help"), ("status", "--help")):
+                result = subprocess.run(
+                    [str(release / "vwctl"), *args],
+                    cwd=release, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            after = {path.relative_to(release): path.read_bytes() for path in release.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
             self.assertFalse(any(release.rglob("*.pyc")))
             self.assertFalse(any(path.name == "__pycache__" for path in release.rglob("*")))
 

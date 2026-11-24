@@ -296,6 +296,29 @@ class OperationalReadinessTests(unittest.TestCase):
         self.assertTrue(payload["update"]["check_stale"])
         self.assertEqual(payload["notification"]["state"], "unknown")
 
+    def test_doctor_owners_withhold_untrusted_persistent_state(self):
+        with (
+            mock.patch.object(recovery, "status_rows") as receipts,
+            mock.patch.object(recovery, "rclone_local_diagnostics", return_value=(True, "local")),
+            mock.patch.object(notification, "load_result") as delivery,
+        ):
+            checks = recovery.doctor_checks(state_verified=False)
+            self.assertEqual([row.status for row in checks[:2]], ["SKIP", "SKIP"])
+            mail = notification.doctor_checks(config=None, secret_values=None, state_verified=False)
+            self.assertEqual(next(row.status for row in mail if row.check_id == "notification.last_delivery"), "SKIP")
+        receipts.assert_not_called()
+        delivery.assert_not_called()
+        def runner(argv):
+            return cli.CommandResult(tuple(argv), "nonzero", 1, "", "")
+        with mock.patch.object(edge, "load_lkg") as ranges, mock.patch.object(edge, "_fail_open_confirmed") as confirm:
+            checks = edge.doctor_checks(runner=runner, state_verified=False)
+        ranges.assert_not_called()
+        confirm.assert_not_called()
+        by_id = {row.check_id: row.status for row in checks}
+        self.assertEqual(by_id["edge.cloudflare.cidrs"], "FAIL")
+        self.assertEqual(by_id["edge.cloudflare.iptables"], "FAIL")
+        self.assertEqual(by_id["crowdsec.cloudflare"], "FAIL")
+
     def test_guard_blocks_https_and_execution_gap_holds(self):
         payload = self.payload()
         payload["operational"]["update_guard"]["state"] = "unknown"
