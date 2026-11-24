@@ -103,7 +103,21 @@ Compare the root/boot device with the separate disk. The installer will show pla
 
 ## 4. Run interactive setup
 
-Replace the example values with your own:
+For an interactive terminal, start with:
+
+```bash
+sudo ./setup.sh install
+```
+
+Setup prompts only for missing site arguments. Enter the DNS domain or exact
+vault hostname, the exact public HTTPS URL, and the administrator/certificate
+contact email. A blank response, EOF or Ctrl-C cancels this input step before
+installation. Invalid site input is rejected before installation. Disk selection
+and the separate adoption/formatting confirmations remain in the storage owner.
+
+You may instead supply any or all site arguments explicitly; supplied values
+are not replaced. For automatic, noninteractive and dry-run forms, supply all
+three required site arguments as before. For example:
 
 ```bash
 sudo ./setup.sh install \
@@ -121,7 +135,7 @@ Follow the prompts in order:
 3. **Encrypted secrets:** in the secrets editor, enter the two Cloudflare tokens and `smtp_username`/`smtp_password`. Keep the already generated admin credentials. The encrypted file is `/etc/vaultwarden-oci/secrets.sops.yaml`.
 4. **Recovery kit:** if you did not supply an existing offline public recipient, interactive setup creates the offline recovery private identity temporarily, packs it into a **verified AES-256 ZIP**, and prompts for its passphrase and handoff. Keep the kit **off the server** and store its passphrase separately. Complete the exact acknowledgement or verified email handoff before rebooting.
 
-Setup may finish successfully while the **vault is still stopped**. Follow its next-actions output and continue below. If a key handoff fails, **secure the exact transient key before reboot**; do not rerun with a new key for already-encrypted secrets. See [Recovery](RECOVERY.md#recovery-kit-export-and-first-run-handoff).
+Setup may finish successfully while the **vault is still stopped**. Follow its next-actions output and continue below. If a key handoff fails, **secure the exact transient key before reboot**; do not rerun with a new key for already-encrypted secrets. Generated-custody setup refuses to create another offline identity when configuration, encrypted secrets or a previous transient setup workspace exists. Continue with the existing identity and supported recovery-kit handoff; this refusal does not delete or regenerate any key. See [Recovery](RECOVERY.md#recovery-kit-export-and-first-run-handoff).
 
 ## 5. Review and validate settings
 

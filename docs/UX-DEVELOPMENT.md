@@ -290,6 +290,43 @@ unperformed-validation statements above, not their original provenance.
   reset; preserve the existing VM9 state by default. All UX-03 candidate
   validation is NOT RUN. Overall stage HOLD; no UX-04 or merge authorization.
 
+### UX-03 A0R baseline reconciliation and first source slice
+
+The administrator returned A0R exit 0 from disposable VM9. The prior A0
+console receipt checksum was reverified, dedicated storage and absent guard
+reconfirmed, runtime running/healthy for both containers, Doctor PASS and
+automation PASS, status exit 0. The target is loaded, active and enabled;
+all four timers are loaded, active/waiting and individually disabled;
+their last triggers were recorded. All five scheduled services (including
+independent DNS synchronization) were inactive/dead after successful
+execution (Result=success, ExecMainStatus=0). Active timers via the enabled
+target are normal for this already activated appliance.
+
+Operator-reported evidence:
+`~/vwoci-acceptance/ux03-a0r-20261124T215035Z-KizmmS`.
+Baseline inventory COMPLETE/PASS, no automation or DNS mutation by the
+script. Isolation and first-run activation NOT RUN. Do not disable the
+target merely to satisfy the original A0 harness assumption; active
+schedules can still execute while source development proceeds.
+
+First source slice: permit omitted site arguments in ordinary terminal
+setup via the existing authoritative setup parser, retain explicit/auto/
+non-TTY/dry-run behavior and owner validation, and stop before generated
+custody if config, encrypted secrets or a previous transient workspace
+exists. No private identity deletion, replacement, or new storage
+consent. Preserve existing setup, install, storage and recovery owners.
+Change the project prerelease identity to rc.19 for the changed immutable
+files only; upstream versions, digests and units unchanged. Add focused
+mocked regressions and update installation documentation.
+
+This is an incremental implementation checkpoint, **not complete UX-03**.
+The state-derived post-install continuation, security/SMTP/Worker consent,
+first-start/DNS/backup/automation sequence, dashboard/readiness integration
+and exact-candidate native fresh-install acceptance remain outstanding.
+Focused and complete regression execution, CI and live candidate
+acceptance are NOT RUN at the time of this source commit; verify the
+exact head externally. No merge or UX-04 authorized.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,

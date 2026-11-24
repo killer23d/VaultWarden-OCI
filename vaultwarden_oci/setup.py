@@ -371,10 +371,10 @@ def _ensure_secret_start(operational: str, offline: str) -> None:
     _write_atomic(ENCRYPTED, result.stdout); _validate_existing_secrets(operational, offline)
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, collect_site: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="setup.sh", description="Supported VaultWarden-OCI blank-VM setup")
     commands = parser.add_subparsers(dest="command", required=True); install_cmd = commands.add_parser("install")
-    for flag in ("--domain", "--url", "--email"): install_cmd.add_argument(flag, required=True)
+    for flag in ("--domain", "--url", "--email"): install_cmd.add_argument(flag, required=not collect_site)
     install_cmd.add_argument("--data-device"); install_cmd.add_argument("--data-mount", default=str(storage.STATE_ROOT)); install_cmd.add_argument("--offline-recipient")
     install_cmd.add_argument("--accept-existing-filesystem", action="store_true"); install_cmd.add_argument("--confirm-format", action="store_true")
     install_cmd.add_argument("--auto", action="store_true"); install_cmd.add_argument("--use-latest", action="store_true"); install_cmd.add_argument("--dry-run", action="store_true")
