@@ -400,6 +400,104 @@ release identity stays rc.19 (no native rc.19 installation accepted yet).
 Exact new-head tests and all required native fresh-install evidence remain
 pending. No host reset, DNS cutover, merge or later stage authorized.
 
+### UX-03 native installation and activation checkpoint
+
+**Disposition: HOLD, live positive path passed; final acceptance outstanding.**
+
+Accepted development base: `8cbe7bd00131990420f5bb82e4b4211376b7d761`.
+Branch: `ux/03-guided-installation`; [PR #446](https://github.com/killer23d/VaultWarden-OCI/pull/446).
+Reviewed and installed executable source: `cdd155a6406ffe3ff150446e7b8d6668c63caa99`
+(rc.19); reviewed tree `76ead0a2793450cce70e2857dae64f31d34ddf2e`.
+Exact source [push CI 45498187643](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45498187643)
+and [PR CI 45498202585](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45498202585)
+both completed successfully (18/18 jobs, 692/692 regression tests
+including 30/30 focused methods). Both ARM64 compatibility jobs passed.
+Executable source changes are confined to the guided setup/frontend,
+existing CLI and dashboard routing, DNS/Worker consent seams, related
+tests and release identity. No new service, state database, upstream
+component/image pin or unit-file change. This checkpoint changes the
+development record only; separately verify its integration CI and
+source-equivalent runtime delta before any final review.
+
+Operator-returned native acceptance evidence (not direct assistant host
+access):
+
+- VM9 A0/A0R verified prior appliance health, storage, custody boundary and
+  immutable baseline; A2A `~/vwoci-acceptance/ux03-a2a-20261124T221654Z-xyBstk`
+  passed 30 native focused tests and 8/8 real source terminal/headless
+  checks, including omitted-site cancellation, invalid hostname,
+  existing-custody refusal, latest-version default-No, headless dry-run,
+  real root-disk refusal and missing headless site/recipient refusal.
+  Existing appliance authority and runtime were not modified by that
+  script. VM9 was subsequently terminated by the operator.
+- VM10 A3/A3R `~/vwoci-acceptance/ux03-a3-20261124T223958Z-sSVSEx`:
+  fresh Ubuntu 26.04 native ARM64 disposable host, exact source,
+  independently identified blank non-boot volume, omitted site inputs,
+  separate explicit format consent, dedicated ext4 UUID
+  `bcc0bc7b-cb47-44d6-b688-663661eaa0b7`, dependency and immutable
+  installation, validated encrypted credentials, verified encrypted
+  recovery kit, SMTP acceptance, explicit SAVED acknowledgment and
+  transient identity cleanup reported PASS. Initial setup exited 0;
+  the wrapper exited 2 because the planned deliberate retained-key
+  interruption was not performed. Do not repeat setup or recreate an
+  offline identity to manufacture an interruption.
+- VM10 A3B `~/vwoci-acceptance/ux03-a3b-20261124T224944Z-JeFLAo`:
+  independent installed integrity and six actual console smoke cases
+  passed (57 immutable files, 13 units); original recipient, operational
+  identity, configuration/SOPS and fstab witnessed; no retained private
+  identity workspace. Operator matched independently saved encrypted ZIP
+  SHA-256 `473362b8556cb8d97f7a7af9cdbcc40e225af86fd3d409abc3ecc0a42aba56f8`.
+  Real installed guide CUSTODY refusal and subsequent resumption passed,
+  with unchanged authority and DNS. Real SMTP/mailbox acknowledgment,
+  CrowdSec host INPUT-only setup, explicit Worker start and API-assisted
+  current-invocation Fail Open readback, origin filtering and supported
+  first start succeeded. Genuine partial pre-start runtime-path FAIL and
+  Caddy SKIPs remained visible. Guide correctly held on initially
+  unestablished loopback TLS; independent follow-up found trusted TLS
+  and all local foundations PASS with schedules isolated and DNS unchanged.
+  The wrapper's subsequent question assumed a PUBLISH prompt had appeared;
+  it had not. No live PUBLISH refusal PASS is claimed.
+- The operator then resumed the actual installed guide: verified custody,
+  SMTP and trusted HTTPS; explicitly consented PUBLISH, BACKUP and ENABLE.
+  DNS owner verified A-record readback; first verified encrypted local
+  backup `recovery-20261124T230700Z-aa940088.vwrec`, SHA-256
+  `e035bbfdd72191eb936f1cd58a92cbc97580360a030e07b33da158b7f2ac96b9`.
+  Active enabled systemd target and four active target-managed timers,
+  local-only policy and zero retention. Guide exit 1 correctly reported
+  local readiness HOLD on automation.execution UNKNOWN. No premature
+  activation or replay of healthy Worker/start observed.
+- A4 read-only verification at 23:10 and 23:12 UTC:
+  `~/vwoci-acceptance/ux03-a4-verify-20261124T231028Z-aw90BH/summary.txt`
+  and `~/vwoci-acceptance/ux03-a4-verify-20261124T231209Z-fsoBbE/summary.txt`.
+  Both returned identical SHA-256
+  `1a5a5a2060225c4bfccbf7d77d5704e45f6cbc62565170c530aea1f82f547cf0`.
+  Installed exact tree/units, dedicated storage, original authority,
+  kit/first backup ciphertext and in-sync DNS PASS; 27 required checks
+  PASS, automation.execution UNKNOWN, exit 2. Health and independent DNS
+  have successful completion records; backup, maintenance and update
+  check had not yet run. Later timer inventory confirms normal schedules:
+  update check 2026-11-24 23:27:28 UTC, backup 2026-11-25 03:26:50 UTC,
+  maintenance 2026-11-25 04:38:33 UTC, health repeating. Pending first
+  executions are not observed defects. No forced timer/service start,
+  clock change or weakening of readiness is authorized.
+
+Remaining limitations: genuine scheduled completion/readiness evidence
+pending; live retained-key interrupted export and explicit PUBLISH
+refusal variants NOT RUN (automated negative-path coverage and actual
+early refusal/resume are distinct evidence). No undoing custody, creating
+a fake DNS mismatch, or silently relabelling these results as live PASS.
+Existing filesystem adoption covered in automated tests, not a destructive
+native populated-volume exercise. Public ingress/provider network proof,
+offsite and restore evidence are not established by local readiness.
+Reconcile outstanding mandatory validation with administrator; if they
+require the specific unrun native variants, use a separately approved
+isolated disposable environment. No source remediation indicated by the
+reported scheduling/readiness behavior; no code or unit changes to
+accelerate timers. Re-run existing A4 witness after natural scheduled
+completion. Final stage receipt and explicit squash authorization remain
+required. Preserved baseline/default branch unchanged; do not begin the
+next UX stage.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,
