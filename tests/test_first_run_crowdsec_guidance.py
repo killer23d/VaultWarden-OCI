@@ -27,11 +27,12 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
             "ACTION run: sudo vwctl crowdsec setup",
             "ACTION run: sudo vwctl crowdsec remediation-start",
             "ACTION then run: sudo vwctl crowdsec confirm-fail-open",
+            "ACTION run: sudo vwctl edge refresh to verify Cloudflare-only origin filtering before first start",
             "ACTION run: sudo vwctl start",
-            "ACTION after start is healthy, run: sudo vwctl dns update to publish the configured hostname to this host",
-            "ACTION run: sudo vwctl backup to create and verify the first application recovery point",
             "ACTION run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy",
-            "ACTION enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target",
+            "ACTION verify trusted local HTTPS; separately authorize sudo vwctl dns update before publishing traffic",
+            "ACTION run: sudo vwctl backup to create and verify the first application recovery point",
+            "ACTION only after verified backup, healthy foundations and explicit consent to ongoing DNS writes, enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target",
             "ACTION run: sudo vwctl timers",
             "ACTION run: sudo vwctl update check to seed the initial update-status snapshot",
         )
@@ -42,7 +43,7 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
         self.assertLess(rendered.index("sudo vwctl dns update --dry-run"), rendered.index("sudo vwctl start"))
         self.assertLess(
             rendered.index("ACTION run: sudo vwctl start"),
-            rendered.index("ACTION after start is healthy, run: sudo vwctl dns update to publish"),
+            rendered.index("ACTION verify trusted local HTTPS; separately authorize sudo vwctl dns update"),
         )
         self.assertIn("offsite/rclone recovery is expected", rendered)
 
@@ -132,14 +133,16 @@ class FirstRunCrowdSecGuidanceTests(unittest.TestCase):
 
         rendered = output.getvalue()
         ordered = (
-            "sudo vwctl backup",
-            "sudo vwctl doctor",
-            "sudo systemctl enable --now vaultwarden-oci.target",
-            "sudo vwctl timers",
+            "sudo vwctl guide setup",
+            "Doctor and trusted local HTTPS",
+            "separately authorize DNS publication",
+            "create and verify the first backup",
+            "enable persistent appliance automation",
+            "scheduled DNS synchronization can change public traffic",
         )
         positions = [rendered.index(item) for item in ordered]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("after both succeed", rendered)
+        self.assertNotIn("systemctl enable --now", rendered)
 
     def test_human_timer_view_explains_target_managed_monotonic_timer(self) -> None:
         output = io.StringIO()

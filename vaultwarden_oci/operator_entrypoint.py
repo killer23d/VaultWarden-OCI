@@ -181,8 +181,8 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
         action = _automation_enable_action()
         if action is not None:
             print(
-                "ACTION: create and verify the first application recovery point with 'sudo vwctl backup', "
-                "then review Doctor, trusted local HTTPS, custody and DNS publication with 'sudo vwctl guide setup' before you "
+                "ACTION: continue with 'sudo vwctl guide setup': verify Doctor and trusted local HTTPS, "
+                "confirm off-host custody and separately authorize DNS publication, then create and verify the first backup before you "
                 "enable persistent appliance automation; scheduled DNS synchronization can change public traffic."
             )
     elif args[:1] == ["timers"] and code != 0:

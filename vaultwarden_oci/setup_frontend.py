@@ -43,7 +43,7 @@ def _ui() -> setup.UI:
 
 
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
-    recovery_ux._safe_private_dir(root)
+    recovery_ux._safe_private_dir(root, require_root_owner=root == SENSITIVE_RUN)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
     completed = False
     try:
@@ -263,10 +263,11 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     ui.action("run: sudo vwctl crowdsec remediation-start")
     ui.action("set every bouncer-created Worker Route to Fail Open in Cloudflare")
     ui.action("then run: sudo vwctl crowdsec confirm-fail-open")
+    ui.action("run: sudo vwctl edge refresh to verify Cloudflare-only origin filtering before first start")
     ui.action("run: sudo vwctl start")
-    ui.action("after start, verify Doctor and trusted local HTTPS; separately authorize sudo vwctl dns update before publishing traffic")
-    ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
     ui.action("run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy")
+    ui.action("verify trusted local HTTPS; separately authorize sudo vwctl dns update before publishing traffic")
+    ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
     ui.action("only after verified backup, healthy foundations and explicit consent to ongoing DNS writes, enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
     ui.action("run: sudo vwctl timers")
     ui.action("run: sudo vwctl update check to seed the initial update-status snapshot")
@@ -332,7 +333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = recovery_ux.export_recovery_kit(identity)
         ui.ok(f"Verified complete recovery kit: {result.archive}")
         if result.emailed:
-            ui.ok("Verified recovery-kit email handoff completed successfully.")
+            ui.ok("SMTP accepted the verified encrypted recovery kit; independently confirm mailbox receipt and off-host custody.")
         _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():

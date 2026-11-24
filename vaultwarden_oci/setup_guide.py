@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 from pathlib import Path
 from typing import Callable, Sequence
@@ -129,7 +130,11 @@ def _workspaces() -> tuple[Path, ...]:
         return ()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
         raise Hold("Transient recovery directory is not a protected real root-owned directory.")
-    return tuple(sorted(root.glob("setup-offline-recovery-*")))
+    with os.scandir(root) as entries:
+        names = tuple(Path(entry.path) for entry in entries)
+    if any(path.name.startswith("recovery-kit-") for path in names):
+        raise Hold("A previous recovery-kit plaintext workspace remains; inspect custody and cleanup before resuming.")
+    return tuple(sorted(path for path in names if path.name.startswith("setup-offline-recovery-")))
 
 
 def _retained_identity(workspace: Path) -> tuple:
@@ -274,6 +279,8 @@ def main(*, run: Callable, ensure_selected: Callable) -> int:
                 if method == "MANUAL":
                     _consent("Set every bouncer-created Worker Route to Fail Open in Cloudflare and verify it.", "FAIL-OPEN")
                     recheck()
+                    if not crowdsec_worker_policy.runtime_policy_healthy(edge.EdgePaths(), edge.run_command):
+                        raise Hold("Worker source policy changed; manual confirmation refused.")
                     edge.confirm_fail_open(expected_invocation=invocation)
                 elif method == "API":
                     _consent("Authorize API-assisted Fail Open for the exact current managed Route?", "SET-FAIL-OPEN")
