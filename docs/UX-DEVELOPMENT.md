@@ -77,6 +77,14 @@ be independently recorded in PR #444. Local complete checkout still NOT RUN
 NOT RUN and requires explicit host, source and scope. **HOLD** until final
 mandatory evidence is verified. No merge or subsequent stage authorized.
 
+The review also closes the UX-00 F3 bytecode finding where it directly affects
+the changed status presentation. Both existing dashboard launchers invoke the
+same Python module with bytecode writes suppressed. Expanded immutable-tree
+tests invoke the installed dashboard help and the source wrapper without
+inherited bytecode suppression. No menu, dispatch, release-selection or
+lifecycle redesign belongs to this change. Final installed native ARM64
+witness must check the actual dashboard invocation as well as CLI readiness.
+
 ## 1. Fixed snapshot and complete repository structure
 
 All source line references in this record refer to
