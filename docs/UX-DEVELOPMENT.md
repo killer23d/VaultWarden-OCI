@@ -225,6 +225,348 @@ CI and focused/full results are recorded independently in PR #445. Native
 OCI acceptance remains NOT RUN / HOLD until the exact installed source is
 witnessed on an explicitly approved disposable host. UX-05-F01 remains open.
 
+### UX-02 accepted integration — November 24, 2026
+
+**PASS — accepted and integrated for the scoped dashboard/console gate.**
+This dated reconciliation supersedes the historical candidate HOLD and
+unperformed-validation statements above, not their original provenance.
+
+- Accepted base `d5e0e81b2a8f418511e75e04daa4fd04aff164f5`; exact reviewed
+  head `4b44ad0a389f54c8c5370b9bc884f5bb0356e3e6`, tree
+  `de2877fded700a8a3c03189456b83c0af3933bb5`.
+- [PR #445](https://github.com/killer23d/VaultWarden-OCI/pull/445) was closed
+  after administrator-authorized squash-equivalent integration. GitHub
+  reports closed / merged=false; this is not a native GitHub squash.
+  The accepted `v3` commit
+  [8cbe7bd00131990420f5bb82e4b4211376b7d761](https://github.com/killer23d/VaultWarden-OCI/commit/8cbe7bd00131990420f5bb82e4b4211376b7d761)
+  independently has exactly the accepted base as sole parent and the exact
+  reviewed tree. The preserved baseline branch remains
+  `03c3437b2191b052534718d94e2ce96f129c62aa`; default `main` remains
+  `16dc4c82a57234f8de8b54aa709a8ef32831f4e6`.
+- Reviewed-head [push CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45474258129)
+  and [PR CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45474271729)
+  PASS 18/18. Focused 54/54 tests are included within the complete 662/662
+  regression suite, not a separate rerun.
+  [Integration CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45475850475)
+  PASS 9/9 independently verified at the accepted integration SHA,
+  including native Ubuntu 26.04 ARM64 CI.
+- Operator-reported VM9 native witness: rc.18 from reviewed head,
+  canonical ARM64 frozen manifest, six console exit/default-No cases PASS,
+  56 immutable files unchanged, 13 installed units, dedicated storage,
+  absent recovery guard, local-only zero-retention backup and healthy
+  Vaultwarden/Caddy; Doctor without FAIL. Original protected receipt:
+  `~/vwoci-acceptance/ux02-update-20261124T195242Z-K9hqOw/console-receipt.json`,
+  reported SHA-256 `c0cda23e774a17100c70575a31f45cb744aad876bf93a0e1740e5354f69cbea2`.
+  No independent retrieval of protected host JSON or broader recovery,
+  provider, custody, production or failed-update live acceptance is claimed.
+- UX-05-F01 remains OPEN, deferred to UX-05. A healthy snapshot does not
+  resolve the earlier concurrency finding.
+
+## UX-03 entry and A0 preflight (in progress; HOLD for live activation)
+
+- Stage branch `ux/03-guided-installation` created from the accepted UX-02
+  integration SHA above. Target `v3` only. No UX-03 executable change,
+  candidate release, focused or regression run, PR or merge at this checkpoint.
+- Operator-reported A0 on existing disposable `vaultwarden-oci-9-vnic`,
+  Ubuntu 26.04 ARM64, verified exact rc.18 reviewed source, six safe native
+  console cases, 56 immutable files, 13 units and canonical ARM64 frozen
+  manifest. Dedicated ext4 UUID `0d043614-606c-4098-9617-1b1467155b6f`;
+  recovery guard absent; healthy containers; Doctor PASS; local-only backup
+  and both retention values zero. Status exit 0, automation overall PASS.
+  Evidence `~/vwoci-acceptance/ux03-a0-20261124T214834Z-ouG6DF/console-receipt.json`,
+  operator-reported SHA-256 `8a792945b3fb6f35a26978c83d112d1ba030864289b8a25a34e15c3e0cb56aa5`.
+- A0 stopped with exit 2 HOLD because `vaultwarden-oci.target` was loaded,
+  active and enabled rather than the harness's assumed isolated state.
+  Existing-appliance integrity and health PASS; isolation was not proven.
+  This is a harness prerequisite mismatch, not proof of an appliance
+  failure or a newly installed UX-03 candidate. No automatic isolation,
+  timer disablement, service restart, DNS write, storage mutation or reset
+  is authorized by the A0 receipt. Existing scheduled behavior may continue;
+  the health service independently wants the DNS synchronization service.
+- UX-03 source development may use the accepted base without changing VM9.
+  Before activation testing, separately establish the permitted host/source
+  and mutation scope. Fresh-install live coverage requires an expressly
+  approved blank dedicated-data host or separately authorized disposable
+  reset; preserve the existing VM9 state by default. All UX-03 candidate
+  validation is NOT RUN. Overall stage HOLD; no UX-04 or merge authorization.
+
+### UX-03 A0R baseline reconciliation and first source slice
+
+The administrator returned A0R exit 0 from disposable VM9. The prior A0
+console receipt checksum was reverified, dedicated storage and absent guard
+reconfirmed, runtime running/healthy for both containers, Doctor PASS and
+automation PASS, status exit 0. The target is loaded, active and enabled;
+all four timers are loaded, active/waiting and individually disabled;
+their last triggers were recorded. All five scheduled services (including
+independent DNS synchronization) were inactive/dead after successful
+execution (Result=success, ExecMainStatus=0). Active timers via the enabled
+target are normal for this already activated appliance.
+
+Operator-reported evidence:
+`~/vwoci-acceptance/ux03-a0r-20261124T215035Z-KizmmS`.
+Baseline inventory COMPLETE/PASS, no automation or DNS mutation by the
+script. Isolation and first-run activation NOT RUN. Do not disable the
+target merely to satisfy the original A0 harness assumption; active
+schedules can still execute while source development proceeds.
+
+First source slice: permit omitted site arguments in ordinary terminal
+setup via the existing authoritative setup parser, retain explicit/auto/
+non-TTY/dry-run behavior and owner validation, and stop before generated
+custody if config, encrypted secrets or a previous transient workspace
+exists. No private identity deletion, replacement, or new storage
+consent. Preserve existing setup, install, storage and recovery owners.
+Change the project prerelease identity to rc.19 for the changed immutable
+files only; upstream versions, digests and units unchanged. Add focused
+mocked regressions and update installation documentation.
+
+This is an incremental implementation checkpoint, **not complete UX-03**.
+The state-derived post-install continuation, security/SMTP/Worker consent,
+first-start/DNS/backup/automation sequence, dashboard/readiness integration
+and exact-candidate native fresh-install acceptance remain outstanding.
+Focused and complete regression execution, CI and live candidate
+acceptance are NOT RUN at the time of this source commit; verify the
+exact head externally. No merge or UX-04 authorized.
+
+### UX-03 compilation remediation
+
+[Initial candidate CI 45495586823](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45495586823)
+failed Python compilation in three jobs due to invalid context manager syntax
+in the new focused test file. Corrected in
+`2d112cd656422e81c6e3c73dd5ccb17ca15c8681`.
+[Fix-head CI 45496313578](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45496313578)
+ran all 673 unit tests successfully (11 new focused tests included);
+8/9 jobs passed including native ARM64 CI. Quality-unit failed the existing
+release-neutral documentation audit on this record's baseline-branch wording,
+not the tests. Corrected wording without relaxing the audit. The post-install
+guide and its dedicated acceptance remain outstanding. Overall HOLD.
+
+### UX-03 installed continuation remediation
+
+The implementation adds the installed `vwctl guide setup` route and dashboard
+discovery, using current authoritative status, Doctor, readiness, existing
+credential and recovery-kit owners, invocation-bound Worker policy, DNS
+publication and systemd. No workflow state database, new service, upstream pin
+refresh or release publication. Project candidate identity remains rc.19.
+A retained exact protected offline identity is exported with the recovery-kit
+owner and cleaned only following verified export and explicit custody consent;
+otherwise ambiguous custody is HOLD. SMTP transport and administrator mailbox
+acknowledgment remain distinct. Origin and Worker policy must pass before
+supported first start. The specific pre-start partial-runtime diagnostic is
+not relabelled; post-start Doctor and trusted loopback HTTPS must pass.
+A separate pre-activation gate excludes only the subsequent automation checks,
+not genuine local foundation failures. DNS publication is explicit and bound
+to the observed record under the existing owner lock; scheduled DNS writes
+require separate activation consent. Remote publication/pruning are outside
+the first-run guide. Existing activated appliances receive read-only readiness.
+
+The documentation-only correction
+`aefe5c0d747446c0116f55f80fadafe18b07e91c` passed
+[CI 45497014803](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45497014803)
+9/9. The integrated guide checkpoint
+`47d19bc5a3250d1ea24edeb787af9b0a59cc35be` exposed obsolete
+guidance/CLI assertions in
+[CI 45497280289](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45497280289);
+684 tests ran with one failure and three errors. Reconciled those tests to
+the new supported guide and stricter first-start/activation sequence; added
+mocked owner sequencing, cancellation, TLS, backup, DNS-plan and manual
+Worker invocation drift regressions at
+`db234a409682c08927070352a573303be85c5b44`.
+Exact final-head focused/full test and CI conclusions must be independently
+verified. Native first-run and activation acceptance are NOT RUN; the
+existing activated VM9 baseline cannot substitute for a blank-host install.
+No reset, deployment, merge or subsequent stage authorized. **HOLD.**
+
+### UX-03 contract re-review before live acceptance
+
+The explicitly supplied stage contract is Guided First-Run Installation and Safe
+Activation; the older dependency planning table below is historical, not the
+authority for stage numbering or acceptance. Exact reviewed head
+`0f51be6fb7b9923545b85ed9e0c59f3bcad29154` passed 689 unit tests including
+27 focused tests. Both native ARM64 CI jobs passed; the final Caddy integration
+jobs were still pending at the time of this observation. See draft
+[PR #446](https://github.com/killer23d/VaultWarden-OCI/pull/446) for current
+exact-head CI and live gate updates.
+
+Before the first native candidate install, re-review found three input/custody
+gaps: final hostname validation could be deferred until after storage work,
+nonpositive interactive disk indexes could select a different candidate, and
+SMTP acceptance skipped explicit custody acknowledgment in initial setup.
+The setup owner now validates the final hostname before storage, rejects
+explicit ports including zero and out-of-range disk indexes; initial recovery
+handoff requires explicit SAVED acknowledgment even after SMTP accepts the
+verified ZIP. Focused tests cover these boundaries. Existing explicit/headless
+forms and dependency, storage and recovery owners remain in place. Candidate
+release identity stays rc.19 (no native rc.19 installation accepted yet).
+Exact new-head tests and all required native fresh-install evidence remain
+pending. No host reset, DNS cutover, merge or later stage authorized.
+
+### UX-03 native installation and activation checkpoint
+
+**Disposition: HOLD, live positive path passed; final acceptance outstanding.**
+
+Accepted development base: `8cbe7bd00131990420f5bb82e4b4211376b7d761`.
+Branch: `ux/03-guided-installation`; [PR #446](https://github.com/killer23d/VaultWarden-OCI/pull/446).
+Reviewed and installed executable source: `cdd155a6406ffe3ff150446e7b8d6668c63caa99`
+(rc.19); reviewed tree `76ead0a2793450cce70e2857dae64f31d34ddf2e`.
+Exact source [push CI 45498187643](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45498187643)
+and [PR CI 45498202585](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45498202585)
+both completed successfully (18/18 jobs, 692/692 regression tests
+including 30/30 focused methods). Both ARM64 compatibility jobs passed.
+Executable source changes are confined to the guided setup/frontend,
+existing CLI and dashboard routing, DNS/Worker consent seams, related
+tests and release identity. No new service, state database, upstream
+component/image pin or unit-file change. This checkpoint changes the
+development record only; separately verify its integration CI and
+source-equivalent runtime delta before any final review.
+
+Operator-returned native acceptance evidence (not direct assistant host
+access):
+
+- VM9 A0/A0R verified prior appliance health, storage, custody boundary and
+  immutable baseline; A2A `~/vwoci-acceptance/ux03-a2a-20261124T221654Z-xyBstk`
+  passed 30 native focused tests and 8/8 real source terminal/headless
+  checks, including omitted-site cancellation, invalid hostname,
+  existing-custody refusal, latest-version default-No, headless dry-run,
+  real root-disk refusal and missing headless site/recipient refusal.
+  Existing appliance authority and runtime were not modified by that
+  script. VM9 was subsequently terminated by the operator.
+- VM10 A3/A3R `~/vwoci-acceptance/ux03-a3-20261124T223958Z-sSVSEx`:
+  fresh Ubuntu 26.04 native ARM64 disposable host, exact source,
+  independently identified blank non-boot volume, omitted site inputs,
+  separate explicit format consent, dedicated ext4 UUID
+  `bcc0bc7b-cb47-44d6-b688-663661eaa0b7`, dependency and immutable
+  installation, validated encrypted credentials, verified encrypted
+  recovery kit, SMTP acceptance, explicit SAVED acknowledgment and
+  transient identity cleanup reported PASS. Initial setup exited 0;
+  the wrapper exited 2 because the planned deliberate retained-key
+  interruption was not performed. Do not repeat setup or recreate an
+  offline identity to manufacture an interruption.
+- VM10 A3B `~/vwoci-acceptance/ux03-a3b-20261124T224944Z-JeFLAo`:
+  independent installed integrity and six actual console smoke cases
+  passed (57 immutable files, 13 units); original recipient, operational
+  identity, configuration/SOPS and fstab witnessed; no retained private
+  identity workspace. Operator matched independently saved encrypted ZIP
+  SHA-256 `473362b8556cb8d97f7a7af9cdbcc40e225af86fd3d409abc3ecc0a42aba56f8`.
+  Real installed guide CUSTODY refusal and subsequent resumption passed,
+  with unchanged authority and DNS. Real SMTP/mailbox acknowledgment,
+  CrowdSec host INPUT-only setup, explicit Worker start and API-assisted
+  current-invocation Fail Open readback, origin filtering and supported
+  first start succeeded. Genuine partial pre-start runtime-path FAIL and
+  Caddy SKIPs remained visible. Guide correctly held on initially
+  unestablished loopback TLS; independent follow-up found trusted TLS
+  and all local foundations PASS with schedules isolated and DNS unchanged.
+  The wrapper's subsequent question assumed a PUBLISH prompt had appeared;
+  it had not. No live PUBLISH refusal PASS is claimed.
+- The operator then resumed the actual installed guide: verified custody,
+  SMTP and trusted HTTPS; explicitly consented PUBLISH, BACKUP and ENABLE.
+  DNS owner verified A-record readback; first verified encrypted local
+  backup `recovery-20261124T230700Z-aa940088.vwrec`, SHA-256
+  `e035bbfdd72191eb936f1cd58a92cbc97580360a030e07b33da158b7f2ac96b9`.
+  Active enabled systemd target and four active target-managed timers,
+  local-only policy and zero retention. Guide exit 1 correctly reported
+  local readiness HOLD on automation.execution UNKNOWN. No premature
+  activation or replay of healthy Worker/start observed.
+- A4 read-only verification at 23:10 and 23:12 UTC:
+  `~/vwoci-acceptance/ux03-a4-verify-20261124T231028Z-aw90BH/summary.txt`
+  and `~/vwoci-acceptance/ux03-a4-verify-20261124T231209Z-fsoBbE/summary.txt`.
+  Both returned identical SHA-256
+  `1a5a5a2060225c4bfccbf7d77d5704e45f6cbc62565170c530aea1f82f547cf0`.
+  Installed exact tree/units, dedicated storage, original authority,
+  kit/first backup ciphertext and in-sync DNS PASS; 27 required checks
+  PASS, automation.execution UNKNOWN, exit 2. Health and independent DNS
+  have successful completion records; backup, maintenance and update
+  check had not yet run. Later timer inventory confirms normal schedules:
+  update check 2026-11-24 23:27:28 UTC, backup 2026-11-25 03:26:50 UTC,
+  maintenance 2026-11-25 04:38:33 UTC, health repeating. Pending first
+  executions are not observed defects. No forced timer/service start,
+  clock change or weakening of readiness is authorized.
+
+Remaining limitations: genuine scheduled completion/readiness evidence
+pending; live retained-key interrupted export and explicit PUBLISH
+refusal variants NOT RUN (automated negative-path coverage and actual
+early refusal/resume are distinct evidence). No undoing custody, creating
+a fake DNS mismatch, or silently relabelling these results as live PASS.
+Existing filesystem adoption covered in automated tests, not a destructive
+native populated-volume exercise. Public ingress/provider network proof,
+offsite and restore evidence are not established by local readiness.
+Reconcile outstanding mandatory validation with administrator; if they
+require the specific unrun native variants, use a separately approved
+isolated disposable environment. No source remediation indicated by the
+reported scheduling/readiness behavior; no code or unit changes to
+accelerate timers. Re-run existing A4 witness after natural scheduled
+completion. Final stage receipt and explicit squash authorization remain
+required. Preserved baseline/default branch unchanged; do not begin the
+next UX stage.
+
+### UX-03 A4 accelerated execution receipt
+
+Operator explicitly authorized the temporary native timer schedule test on
+disposable VM10. Source remains the installed rc.19 executable candidate
+`cdd155a6406ffe3ff150446e7b8d6668c63caa99`. The preceding documentation-only
+checkpoint `18404b12bb784239cdfd17d5f5243ac1dc064d15` passed both exact-head
+CI runs ([push 45508446415](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45508446415),
+[PR 45508460178](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45508460178)),
+18/18 jobs independently verified.
+
+Operator-returned acceleration evidence:
+`~/vwoci-acceptance/ux03-a4-fast-20261124T232055Z-egA4He`.
+Checksum-pinned paste-only script SHA-256
+`ae5d3303a1808cd86bf7f9555af982f6a0d9f0895518a77841d26a4d6653196e`.
+Original health/DNS schedules kept active; missing update-check, backup
+and maintenance timers triggered their unmodified services sequentially
+using individually scoped transient /run systemd timer drop-ins. Genuine
+service completion records, Result=success and ExecMainStatus=0:
+health and independent DNS 23:18:22 UTC, update-check 23:21:27 UTC,
+backup 23:22:15 UTC and maintenance 23:22:34 UTC, 2026-11-24.
+All temporary overrides removed; original timer definitions and
+enablement restored. Before/after unit-definition witness hashes match:
+`e6be75550449b3fbb778def750f0a4e0b7a7f82327d2281a24068188bbde8fe5`.
+Wall clock unchanged. This establishes real timer-triggered execution
+under authorized temporary test schedules, not natural daily calendar
+execution; post-restoration calendar LastTrigger values need not equal
+the captured transient trigger timestamps.
+
+Final independent A4 read-only verification:
+`~/vwoci-acceptance/ux03-a4-verify-20261124T232236Z-6JWo2x/summary.txt`,
+operator-reported SHA-256
+`fcc8d3e04c18bfba3b779d870bd8db27dd23b76de9f4be310a2cb2b5834d7230`.
+Exact release, units, storage, authority, original ZIP and first backup
+ciphertext checksums, in-sync DNS, all 28 required readiness checks and
+five service completion records PASS. A4_VERIFY_EXIT=0,
+A4_FAST_EXIT=0, ORIGINAL_TIMER_CONFIG_RESTORED=YES,
+SYSTEM_CLOCK_CHANGED=NO. No direct assistant access to host artifacts
+claimed. Native machine readiness and positive-path installation,
+continuation and activation acceptance PASS. No further runtime changes
+or repeated timer execution indicated.
+
+**Native acceptance PASS; administrator test-scope decision recorded.**
+Actual live PUBLISH refusal and deliberately interrupted retained-key
+export variants remain NOT RUN; prior native early guide refusal and
+observed-state continuation, normal custody cleanup, unchanged DNS
+before explicit publication and existing automated coverage are distinct
+evidence. Existing filesystem adoption and explicit-recipient handling
+have automated coverage. The administrator explicitly accepted the
+remaining live negative-path test limitations in lieu of further
+native variants, based on existing automated coverage and completed
+native acceptance. Do not undo successful VM10 custody or DNS solely
+to manufacture missing variants. This decision is not production
+deployment approval. No further native testing required under the
+accepted scope.
+
+Final CI review of the administrator's authorized documentation head
+`3499dd5f87f30bf8629692620062c9aad07e1efe`: both quality-unit jobs
+([push 45509581258](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509581258),
+[PR 45509592003](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509592003))
+passed 692 unit tests but failed the release-neutral documentation audit
+on the literal preserved baseline branch name in this record. The
+administrator's authorization was conditional on successful CI at that
+exact head, so no merge was performed. Corrected the wording here and
+recorded the scope decision without changing executable sources,
+tests, version manifest, unit files or CI audit rules. Stage HOLD
+pending successful CI for the corrected documentation head and
+explicit renewed exact-head squash authorization. Preserve the
+baseline and default branches; do not begin UX-04.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,

@@ -471,12 +471,10 @@ def setup_menu() -> None:
         elif choice == "2": _command_screen("Foundation diagnostics", ["doctor"])
         elif choice == "3": stack_menu()
         elif choice == "4":
-            print("INFO: use the documented setup.sh flow on a new host with a dedicated data disk.")
-            print("ACTION: follow docs/INSTALL.md; an existing appliance uses Configuration and Local readiness.")
-            print("INFO: this console does not provision storage or generate a new recovery identity.")
+            guide(["setup"], nested=True)
             _press_enter()
     _menu("Setup and readiness", (("1", "Local readiness"), ("2", "Check foundations (Doctor)"),
-                                  ("3", "Application start, stop, restart and status"), ("4", "First-install guidance")), handle)
+                                  ("3", "Application start, stop, restart and status"), ("4", "Continue first-run setup")), handle)
 
 
 def diagnostics_menu() -> None:
@@ -679,10 +677,10 @@ def _release_changed(exc: ReleaseChanged) -> int:
 def guide(argv: Sequence[str] | None = None, *, nested: bool = False) -> int:
     args = list(argv or [])
     if args in (["--help"], ["-h"]):
-        print("Usage: sudo vwctl guide [restore|offsite|recovery-kit]\nExisting guided operations only.")
+        print("Usage: sudo vwctl guide [restore|offsite|recovery-kit|setup]\nExisting guided operations only.")
         return 0
-    if len(args) > 1 or (args and args[0] not in {"restore", "offsite", "recovery-kit"}):
-        print("FAIL: choose restore, offsite or recovery-kit", file=sys.stderr)
+    if len(args) > 1 or (args and args[0] not in {"restore", "offsite", "recovery-kit", "setup"}):
+        print("FAIL: choose restore, offsite, recovery-kit or setup", file=sys.stderr)
         return 2
     if os.geteuid() != 0:
         print("FAIL: guide must run as root; use sudo vwctl guide", file=sys.stderr)
@@ -692,11 +690,18 @@ def guide(argv: Sequence[str] | None = None, *, nested: bool = False) -> int:
         return 1
     try:
         _ensure_selected()
+        if args == ["setup"]:
+            from . import setup_guide
+
+            if not _installed_context():
+                print("HOLD: continue setup through the installed sudo vwctl guide setup after setup.sh installation.")
+                return 2
+            return setup_guide.main(run=_run, ensure_selected=_ensure_selected)
         if args:
             _guided_operation(args[0])
         else:
             _menu("Available guided operations", (("restore", "Restore application data"),
-                  ("offsite", "Configure offsite publishing"), ("recovery-kit", "Export credential kit")),
+                  ("offsite", "Configure offsite publishing"), ("recovery-kit", "Export credential kit"), ("setup", "Continue first-run setup")),
                   lambda choice: guide([choice], nested=True))
         return 0
     except ReleaseChanged as exc:

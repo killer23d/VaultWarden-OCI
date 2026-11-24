@@ -103,7 +103,21 @@ Compare the root/boot device with the separate disk. The installer will show pla
 
 ## 4. Run interactive setup
 
-Replace the example values with your own:
+For an interactive terminal, start with:
+
+```bash
+sudo ./setup.sh install
+```
+
+Setup prompts only for missing site arguments. Enter the DNS domain or exact
+vault hostname, the exact public HTTPS URL, and the administrator/certificate
+contact email. A blank response, EOF or Ctrl-C cancels this input step before
+installation. Invalid site input is rejected before installation. Disk selection
+and the separate adoption/formatting confirmations remain in the storage owner.
+
+You may instead supply any or all site arguments explicitly; supplied values
+are not replaced. For automatic, noninteractive and dry-run forms, supply all
+three required site arguments as before. For example:
 
 ```bash
 sudo ./setup.sh install \
@@ -119,9 +133,19 @@ Follow the prompts in order:
 1. **Disk:** select the separate volume. Approve adopting an existing ext4/xfs filesystem or, separately, confirm formatting a blank disk **only after checking the device**.
 2. **SMTP config:** in the validated config editor, replace `smtp.invalid` with your SMTP host and set port, security and sender. This lives in `/etc/vaultwarden-oci/config.toml`.
 3. **Encrypted secrets:** in the secrets editor, enter the two Cloudflare tokens and `smtp_username`/`smtp_password`. Keep the already generated admin credentials. The encrypted file is `/etc/vaultwarden-oci/secrets.sops.yaml`.
-4. **Recovery kit:** if you did not supply an existing offline public recipient, interactive setup creates the offline recovery private identity temporarily, packs it into a **verified AES-256 ZIP**, and prompts for its passphrase and handoff. Keep the kit **off the server** and store its passphrase separately. Complete the exact acknowledgement or verified email handoff before rebooting.
+4. **Recovery kit:** if you did not supply an existing offline public recipient, interactive setup creates the offline recovery private identity temporarily, packs it into a **verified AES-256 ZIP**, and prompts for its passphrase and handoff. Keep the kit **off the server** and store its passphrase separately. After local export or SMTP acceptance, confirm the verified archive is accessible off-host and type `SAVED` before the temporary private identity is removed. SMTP acceptance alone does not establish mailbox receipt. If acknowledgment is declined or interrupted, secure the retained private identity before rebooting.
 
-Setup may finish successfully while the **vault is still stopped**. Follow its next-actions output and continue below. If a key handoff fails, **secure the exact transient key before reboot**; do not rerun with a new key for already-encrypted secrets. See [Recovery](RECOVERY.md#recovery-kit-export-and-first-run-handoff).
+Setup may finish successfully while the **vault is still stopped**. Continue with the installed guide:
+
+```bash
+sudo vwctl guide setup
+```
+
+Use one exclusive administrator session. The guide reads current state rather than maintaining a second workflow database. It never generates a replacement offline identity. On an already activated appliance it only reviews readiness. Before first-run mutations it verifies dedicated storage, the recovery guard boundary and inactive/disabled schedules. An uncertain or inconsistent state stops with HOLD.
+
+The guide uses the existing validated credential editors. If a single exact protected transient setup identity remains, it offers verified kit export using that identity and cleanup only after explicit SAVED acknowledgment. If no transient copy remains, it asks for administrator confirmation of offline identity and encrypted-kit custody. This is an acknowledgment, not independent evidence of off-host storage. A real SMTP test and administrator mailbox acknowledgment are separate steps. It verifies CrowdSec and origin policy, then offers manual or explicit opt-in API-assisted Worker Fail Open confirmation without restarting an active Worker. After supported first start, it checks Doctor and trusted loopback HTTPS; if ACME is still pending, resume once TLS is available without restarting the healthy stack.
+
+Only PUBLISH authorizes moving public DNS to the displayed exact plan. A changed plan requires renewed consent. The guide refuses remote publication or pruning and requires current local backup evidence before enabling schedules. ENABLE separately authorizes persistent systemd automation, whose health timer also launches DNS synchronization that can move public traffic. Final readiness can remain incomplete until scheduled execution is observed. Neither loopback verification nor local recovery receipts prove external network protection or disaster recovery. Use the equivalent documented manual steps below if needed. If a key handoff fails, **secure the exact transient key before reboot**; do not rerun with a new key for already-encrypted secrets. Generated-custody setup refuses to create another offline identity when configuration, encrypted secrets or a previous transient setup workspace exists. Continue with the existing identity and supported recovery-kit handoff; this refusal does not delete or regenerate any key. See [Recovery](RECOVERY.md#recovery-kit-export-and-first-run-handoff).
 
 ## 5. Review and validate settings
 
@@ -184,11 +208,18 @@ specific owner rather than continuing to DNS publication.
 After all checks above pass:
 
 ```bash
+sudo vwctl edge refresh
 sudo vwctl start
+sudo vwctl doctor --json
+sudo vwctl status
+```
+
+Verify trusted local HTTPS as described below and separately authorize any public traffic change before running:
+
+```bash
 sudo vwctl dns update
 sudo vwctl backup
 sudo vwctl doctor --json
-sudo vwctl status
 ```
 
 `start` brings up the app and its protected runtime. **Only after start**, `dns update` writes the server's public IPv4 to the **existing** proxied A record if different; Cloudflare is read back to verify it. The first `backup` creates and verifies an encrypted `.vwrec` application recovery point, which is **not** your credential recovery-kit ZIP.
@@ -228,7 +259,7 @@ from WARN to PASS; optional `recovery.offsite` and `recovery.rclone`
 can remain WARN if remote publication is deliberately disabled.
 Keep automation disabled until its own acceptance gate is complete.
 
-**Only after** the first backup succeeds and doctor has no `FAIL`, enable persistent schedules:
+**Only after** the first backup succeeds, Doctor has no `FAIL`, trusted local HTTPS and all applicable activation prerequisites are verified, and you explicitly authorize recurring DNS synchronization that may change public traffic, enable persistent schedules:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target

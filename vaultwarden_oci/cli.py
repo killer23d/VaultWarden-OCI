@@ -398,8 +398,8 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("menu", help="open the interactive administrator console")
     guide = commands.add_parser("guide", help="choose an available guided operation")
     guide.add_argument(
-        "workflow", nargs="?", choices=("restore", "offsite", "recovery-kit"),
-        help="open an existing guided restore, offsite setup, or recovery-kit export",
+        "workflow", nargs="?", choices=("restore", "offsite", "recovery-kit", "setup"),
+        help="continue first-run setup or open guided restore, offsite setup, or recovery-kit export",
     )
 
     config = commands.add_parser("config", help="validate or safely edit operator configuration")

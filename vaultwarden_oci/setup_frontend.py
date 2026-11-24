@@ -9,6 +9,7 @@ import contextlib
 import io
 import os
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -42,7 +43,7 @@ def _ui() -> setup.UI:
 
 
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
-    recovery_ux._safe_private_dir(root)
+    recovery_ux._safe_private_dir(root, require_root_owner=root == SENSITIVE_RUN)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
     completed = False
     try:
@@ -64,7 +65,7 @@ def _cleanup_generated(workspace: Path) -> None:
     recovery_ux._cleanup_workspace(workspace)
 
 
-def _parse_install_args(args: Sequence[str]):
+def _parse_install_args(args: Sequence[str], *, collect_site: bool = False):
     """Parse setup install argv with the authoritative argparse grammar.
 
     Parsing failures are deliberately silent here because setup.main remains the
@@ -75,9 +76,74 @@ def _parse_install_args(args: Sequence[str]):
         return None
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return setup._parser().parse_args(list(args))
+            return setup._parser(collect_site=collect_site).parse_args(list(args))
     except SystemExit:
         return None
+
+
+def _collect_site_args(args: Sequence[str]) -> list[str]:
+    """Fill only missing site fields for normal terminal-driven installation.
+
+    The setup owner supplies the grammar and final validation. Explicit
+    arguments, including malformed values, are not replaced; noninteractive,
+    automatic and dry-run forms retain the strict required-argument contract.
+    No storage, credentials or installation action is taken here.
+    """
+    result = list(args)
+    if not sys.stdin.isatty():
+        return result
+    parsed = _parse_install_args(args, collect_site=True)
+    if parsed is None or parsed.auto or parsed.dry_run:
+        return result
+    prompts = (
+        ("domain", "DNS domain or exact vault hostname"),
+        ("url", "Exact public HTTPS vault URL"),
+        ("email", "Administrator/certificate contact email"),
+    )
+    missing = [(field, prompt) for field, prompt in prompts if getattr(parsed, field) is None]
+    if not missing:
+        return result
+    ui = _ui()
+    ui.header("Site configuration")
+    ui.info("Prepare a separate non-boot data disk, Cloudflare proxied A record, SMTP account and off-host recovery storage.")
+    ui.info("Enter the missing site values. A blank response, EOF or Ctrl-C cancels before installation.")
+    for field, prompt in missing:
+        value = input(prompt + ": ").strip()
+        if not value:
+            raise EOFError
+        result.append(f"--{field}={value}")
+    # Validate the complete input using the same owner, before any prompts
+    # or calls that can change dependencies, storage or private identity.
+    complete = _parse_install_args(result)
+    if complete is None:
+        raise SetupFrontendError("site input could not be parsed; run setup.sh install --help")
+    setup._normalize(complete.domain, complete.url, complete.email)
+    return result
+
+
+def _require_new_custody() -> None:
+    """Never generate another offline identity over existing or uncertain custody."""
+    for path in (setup.CONFIG, setup.ENCRYPTED):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise SetupFrontendError(
+            "existing configuration or encrypted secrets found; do not generate a replacement offline identity. "
+            "Continue with the existing recovery identity/recipient and the documented recovery-kit handoff."
+        )
+    try:
+        info = SENSITIVE_RUN.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        raise SetupFrontendError("offline recovery workspace location is not a real directory; inspect custody")
+    with os.scandir(SENSITIVE_RUN) as entries:
+        if any(entry.name.startswith("setup-offline-recovery-") for entry in entries):
+            raise SetupFrontendError(
+                "a previous transient offline recovery workspace exists; secure its existing identity before reboot "
+                "and complete the documented recovery-kit handoff; do not generate another identity"
+            )
 
 
 def _should_generate(args: Sequence[str]) -> bool:
@@ -109,12 +175,12 @@ def _confirm_use_latest(args: Sequence[str]) -> bool:
 
 
 def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
-    if result.emailed:
-        return
     ui = _ui()
-    ui.action(f"Copy the verified encrypted recovery kit off-host now: {result.archive}")
+    if result.emailed:
+        ui.info("SMTP acceptance alone does not prove receipt in the intended mailbox. Confirm the archive is accessible off-host or copy the verified local kit.")
+    ui.action(f"Verified encrypted recovery kit for off-host custody: {result.archive}")
     ui.action("Keep its ZIP passphrase separately from the archive.")
-    ui.info("If connected over SSH, leave this prompt open and use a second terminal with scp/sftp to copy the ZIP before typing SAVED.")
+    ui.info("If needed, leave this prompt open and use a second terminal to copy the protected ZIP securely off-host before typing SAVED.")
     try:
         answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()
     except EOFError as exc:
@@ -182,6 +248,8 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     """Print the supported first-run path in the order a fresh host can satisfy it."""
     ui = _ui()
     ui.header("Next actions")
+    ui.action("continue the installed first-run workflow with: sudo vwctl guide setup")
+    ui.info("The guide observes current state, requires separate recovery custody and DNS/automation consent, and never generates another offline identity.")
     if not credentials_ready:
         ui.action(
             "complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit; "
@@ -195,11 +263,12 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     ui.action("run: sudo vwctl crowdsec remediation-start")
     ui.action("set every bouncer-created Worker Route to Fail Open in Cloudflare")
     ui.action("then run: sudo vwctl crowdsec confirm-fail-open")
+    ui.action("run: sudo vwctl edge refresh to verify Cloudflare-only origin filtering before first start")
     ui.action("run: sudo vwctl start")
-    ui.action("after start is healthy, run: sudo vwctl dns update to publish the configured hostname to this host")
-    ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
     ui.action("run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy")
-    ui.action("enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
+    ui.action("verify trusted local HTTPS; separately authorize sudo vwctl dns update before publishing traffic")
+    ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
+    ui.action("only after verified backup, healthy foundations and explicit consent to ongoing DNS writes, enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
     ui.action("run: sudo vwctl timers")
     ui.action("run: sudo vwctl update check to seed the initial update-status snapshot")
     ui.info("A post-start doctor WARN for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured; any FAIL still requires action.")
@@ -210,9 +279,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     ui = _ui()
     if args[:1] == ["recovery-kit"]:
         return recovery_ux.main(args)
-    if not _confirm_use_latest(args):
+    try:
+        args = _collect_site_args(args)
+        if not _confirm_use_latest(args):
+            ui.action("setup cancelled before installation changes", file=sys.stderr)
+            return 2
+    except (EOFError, KeyboardInterrupt):
         ui.action("setup cancelled before installation changes", file=sys.stderr)
         return 2
+    except (SetupFrontendError, setup.SetupError, ValueError) as exc:
+        ui.fail(f"site input rejected: {exc}" if isinstance(exc, (SetupFrontendError, setup.SetupError))
+                else "site input rejected: invalid URL or hostname", file=sys.stderr)
+        return 1
     if not _should_generate(args):
         parsed = _parse_install_args(args)
         if parsed is None or parsed.dry_run:
@@ -225,6 +303,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace: Path | None = None
     identity: Path | None = None
     try:
+        _require_new_custody()
+
         def provide_offline_recipient() -> str:
             nonlocal workspace, identity
             ui.info("Generating the separate offline Age identity in root-only volatile /run storage.")
@@ -253,7 +333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = recovery_ux.export_recovery_kit(identity)
         ui.ok(f"Verified complete recovery kit: {result.archive}")
         if result.emailed:
-            ui.ok("Verified recovery-kit email handoff completed successfully.")
+            ui.ok("SMTP accepted the verified encrypted recovery kit; independently confirm mailbox receipt and off-host custody.")
         _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():
@@ -262,6 +342,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.action("Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
         _print_post_handoff_next_actions(credentials_ready=True)
         return 0
+    except (KeyboardInterrupt, EOFError):
+        ui.warn("setup interrupted; installation and custody completion are not established", file=sys.stderr)
+        if identity is not None and identity.exists():
+            ui.action(f"Secure the existing transient offline identity at {identity} before reboot; do not generate a replacement.", file=sys.stderr)
+        return 2
     except (
         SetupFrontendError,
         notification.NotificationError,

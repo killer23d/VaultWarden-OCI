@@ -94,13 +94,20 @@ def _normalize(domain: str, url: str, email: str) -> tuple[str, str, str]:
         raise SetupError("--domain must be a DNS hostname such as example.com or vault.example.com")
     parsed = urllib.parse.urlsplit(url.strip())
     if (
-        parsed.scheme != "https" or parsed.username or parsed.password or parsed.port
+        parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.port is not None
         or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
     ):
         raise SetupError("--url must be a simple https:// hostname URL without credentials, port, query, or fragment")
     host = (parsed.hostname or "").lower().rstrip(".")
     if host not in {domain, f"vault.{domain}"}:
         raise SetupError("--url hostname must equal --domain or vault.--domain; URL is validated, not stored as a second authority")
+    # Reject invalid final hostnames before dependency, disk or custody work,
+    # using the same hostname authority as the installed configuration.
+    from .runtime import RuntimeConfigError, _hostname
+    try:
+        host = _hostname(host, "site.domain", fqdn=True)
+    except RuntimeConfigError as exc:
+        raise SetupError("site hostname is invalid for the installed configuration") from exc
     email = email.strip()
     if not _EMAIL.fullmatch(email) or any(c in email for c in '"\\'):
         raise SetupError("--email must be a simple RFC-style address safe for operator configuration")
@@ -222,8 +229,13 @@ def _select_storage(args: argparse.Namespace, ui: UI) -> str:
         print(f"  {index}) {row['path']} {size_gib:.1f} GiB {fs} mount={mounts}{model}")
     answer = input("Select dedicated data device number (or q to quit): ").strip()
     if answer.lower() == "q": raise SetupError("storage selection cancelled; no installation changes were made")
-    try: selected = rows[int(answer) - 1]["path"]
-    except (ValueError, IndexError): raise SetupError("invalid storage selection")
+    try:
+        index = int(answer)
+        if not 1 <= index <= len(rows):
+            raise ValueError
+        selected = rows[index - 1]["path"]
+    except (ValueError, IndexError):
+        raise SetupError("invalid storage selection") from None
     assert isinstance(selected, str); return selected
 
 
@@ -371,10 +383,10 @@ def _ensure_secret_start(operational: str, offline: str) -> None:
     _write_atomic(ENCRYPTED, result.stdout); _validate_existing_secrets(operational, offline)
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, collect_site: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="setup.sh", description="Supported VaultWarden-OCI blank-VM setup")
     commands = parser.add_subparsers(dest="command", required=True); install_cmd = commands.add_parser("install")
-    for flag in ("--domain", "--url", "--email"): install_cmd.add_argument(flag, required=True)
+    for flag in ("--domain", "--url", "--email"): install_cmd.add_argument(flag, required=not collect_site)
     install_cmd.add_argument("--data-device"); install_cmd.add_argument("--data-mount", default=str(storage.STATE_ROOT)); install_cmd.add_argument("--offline-recipient")
     install_cmd.add_argument("--accept-existing-filesystem", action="store_true"); install_cmd.add_argument("--confirm-format", action="store_true")
     install_cmd.add_argument("--auto", action="store_true"); install_cmd.add_argument("--use-latest", action="store_true"); install_cmd.add_argument("--dry-run", action="store_true")

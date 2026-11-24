@@ -1334,12 +1334,15 @@ def confirm_fail_open(
     runner: Runner = run_command,
     now: int | None = None,
     verified_route: Mapping[str, str] | None = None,
+    expected_invocation: str | None = None,
 ) -> None:
     if os.geteuid() != 0 and paths == EdgePaths():
         raise EdgeError("vwctl crowdsec confirm-fail-open must run as root")
     invocation = _service_invocation_id(runner)
     if invocation is None:
         raise EdgeError("CrowdSec Cloudflare remediation is not active with a valid systemd invocation")
+    if expected_invocation is not None and invocation != expected_invocation:
+        raise EdgeError("Worker invocation changed since manual Fail Open review; confirm the current Route again")
     payload: dict[str, object] = {
         "schema_version": 1,
         "invocation_id": invocation,
