@@ -45,7 +45,10 @@ class ImmutableVwctlBytecodeTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             before = {path.relative_to(release): path.read_bytes() for path in release.rglob("*") if path.is_file()}
-            for args in (("readiness", "--help"), ("status", "--help")):
+            for args in (
+                ("readiness", "--help"), ("status", "--help"),
+                ("menu", "--help"), ("guide", "--help"),
+            ):
                 result = subprocess.run(
                     [str(release / "vwctl"), *args],
                     cwd=release, env=env, stdout=subprocess.PIPE,

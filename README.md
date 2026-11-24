@@ -45,7 +45,8 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 
 | Task | Command |
 | --- | --- |
-| Open the dashboard | `sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh` |
+| Open the administrator console | `sudo vwctl menu` |
+| Choose an available guided operation | `sudo vwctl guide` |
 | Overall status | `sudo vwctl status` |
 | Find failed checks | `sudo vwctl doctor --json` |
 | Check Cloudflare DNS | `sudo vwctl dns status` |
@@ -54,6 +55,13 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 | Check scheduled jobs | `sudo vwctl timers` |
 | Assess local deployment foundations | `sudo vwctl readiness` |
 | Create an encrypted recovery point | `sudo vwctl backup` |
+
+The console puts actionable exceptions before the routine menus. It uses the
+same operational evidence as `vwctl status --json`; local health does not prove
+off-host recovery custody or external network protection. Existing installed and
+source-checkout `dashboard.sh` launchers remain supported. See
+[the console and available guides](docs/OPERATIONS.md#dashboard) for navigation,
+cancellation, and recovery-required states.
 
 ## Backup and disaster-recovery essentials
 

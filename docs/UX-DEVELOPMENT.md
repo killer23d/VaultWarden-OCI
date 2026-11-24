@@ -33,7 +33,7 @@ independently supplied in the PR/handover. The next stage must verify that merge
 and resulting tree before branching. A commit must never claim to contain its
 own SHA. No tag, release, production change or subsequent stage is authorized.
 
-## UX-01 stage receipt (candidate; HOLD)
+## UX-01 stage receipt (historical candidate; HOLD at that checkpoint)
 
 | Field | Recorded evidence |
 | --- | --- |
@@ -84,6 +84,250 @@ tests invoke the installed dashboard help and the source wrapper without
 inherited bytecode suppression. No menu, dispatch, release-selection or
 lifecycle redesign belongs to this change. Final installed native ARM64
 witness must check the actual dashboard invocation as well as CLI readiness.
+
+### UX-01 accepted integration — November 24, 2026
+
+**PASS — accepted and integrated.** This dated reconciliation supersedes the
+historical candidate HOLD above for the exact accepted source and scoped host
+evidence only. It does not erase earlier failures or extend the live scope.
+The [administrator authorization and integration receipt](https://github.com/killer23d/VaultWarden-OCI/pull/444#issuecomment-7141935584)
+is the independent record for the final accepted head and integration.
+
+| Boundary | Verified evidence at UX-02 entry |
+| --- | --- |
+| Accepted base / reviewed head | `6e89d2feac53a9cc7ac69af07b8b10471b0d117d` / `e96f25bd0974fdf75b713fcaf9033be15cca63da`. |
+| Accepted integration | `d5e0e81b2a8f418511e75e04daa4fd04aff164f5`; sole parent is the accepted base. Current `v3` independently matches it. |
+| Exact merged tree | `a8e7e939aa32f2534fe11229a4f656f602ca7431` equals the reviewed head's tree. [PR #444](https://github.com/killer23d/VaultWarden-OCI/pull/444) is closed with a documented squash-equivalent integration; GitHub's native merged flag is false and is not the integration receipt. |
+| Focused / regression | Accepted-head results: 25/25 focused and 614/614 complete tests PASS. |
+| Reviewed-head CI | [Push 45459479800](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45459479800) and [PR 45459500096](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45459500096): each 9/9 jobs successful. |
+| Integration CI | [45469003357](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45469003357): completed successfully at the exact accepted integration, all 9 jobs independently checked, including native Ubuntu 26.04 ARM64. |
+| Live acceptance | PASS for the operator-reported scoped native OCI ARM64 VM9 witness: exact installed rc.17 source, canonical ARM64 frozen manifest, 56 installed release/unit files and launcher verified; local readiness, automation activation and required service execution reconciled; immutable and other scoped witnesses unchanged. No reinstall was needed for the final witness. |
+| Preserved limits | Initial transient health failure and incomplete execution evidence remain historical; later genuine health-timer dispatch and separately authorized local backup service supplied the follow-up. No new external ingress, provider policy, remote restore, off-host custody, production release, or deployment claim. UX-05-F01 remains open. |
+| Entry decision | PASS: UX-02 may branch from the accepted integration. The preserved baseline branch remains at `03c3437b2191b052534718d94e2ce96f129c62aa`; repository default remains `main`. |
+
+### UX-05-F01 — overlapping health and maintenance: OPEN
+
+The scoped UX-01 operator transcript recorded a health and maintenance dispatch
+at **2026-11-24 19:06:09 UTC**. Vaultwarden and Caddy were running/healthy;
+`edge.cloudflare.iptables` was the sole recorded failing edge check. Health
+exited 1 at 19:06:17, maintenance succeeded at 19:06:18, and a later genuine
+health-timer invocation passed. Preserve the original failure as evidence.
+
+A health read during guarded origin-firewall refresh is a plausible explanation,
+**not a proven cause**; UX-01's storage precheck may also affect timing. The
+master-contract **UX-05 security, automation, and notifications** stage must
+investigate bounded synchronization, ordering, or revalidation within the
+existing owners. Cover overlap, interruption, failed refresh, and a persistent
+real policy defect; never suppress a genuine FAIL to make the display green.
+The provisional stage numbering in section 8 is historical planning and does
+not move this follow-up to another stage. UX-02 does not change health or
+maintenance scheduling or their failure semantics.
+
+## UX-02 stage receipt (candidate; HOLD)
+
+| Field | Recorded evidence |
+| --- | --- |
+| Scope | Objective-oriented terminal console, existing guided-operation discovery, truthful result presentation, and installed command/release-selection safety. No new operation owner. |
+| Accepted base | `d5e0e81b2a8f418511e75e04daa4fd04aff164f5`; UX-01 exact tree and integration CI verified above before branching. |
+| Development branch | `ux/02-dashboard-guided-interface`, targeting `v3` only. |
+| Implementation head / PR | `86f92b2c748fb1d99f5586e3761ef498660bedcb`, tree `8a6923884613fb5d2cefc74af16a116a86601e18`; [draft PR #445](https://github.com/killer23d/VaultWarden-OCI/pull/445), exclusively into `v3`. This subsequent documentation-only receipt does not embed its own SHA; final exact head and CI are supplied independently in the PR/handover. |
+| Changed files | Existing dashboard, CLI routing, shared output, recovery/update human UI, and project identity; existing operations/output/immutable/install tests; new console, entrypoint and host-instrument tests; the bounded `tests/host-acceptance/dashboard-console.py` instrument; README, Operations, and this record. No changes to systemd, shell launchers, setup, dependencies, or operation mutation logic. |
+| Decisions | Reuse accepted UX-01 operational evidence and existing CLI owners; canonical installed launcher dispatch; safe console exit on selection change; owner messages establish outcomes, not exit 0 alone. `menu` and the existing-workflow `guide` are human interfaces. Project identity `0.1.0-rc.18` distinguishes changed immutable bytes; all upstream version/addon/image pins retained. |
+| Focused tests | PASS 51/51: console 23, menu/guide entrypoints 8, installed dashboard 2, immutable bytecode 2, shared output 6, host-instrument safety 10. Includes real child processes, selected-link changes, default-No, malformed evidence, and a real process-group Ctrl-C with owner cleanup lasting beyond the subprocess grace period. |
+| Regression tests | PASS 659/659 complete unit/bounded-integration tests; Python compile, Bash parse, existing documentation/naming audit, and 46 public help routes. Existing historical controller/security transition instruments, preserved-baseline rc.16 to candidate success/coherent rollback, and supplemental accepted UX-01 rc.17 to candidate success/coherent rollback all PASS in isolated temporary layouts. |
+| CI | Implementation-head [push 45472193974](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472193974) completed successfully; all nine jobs independently verified, including native Ubuntu 26.04 ARM64 and Caddy/security/crypto integrations. The matching [PR run 45472269779](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472269779) and this later receipt commit require exact-head completion verification in the PR/handover; no uncompleted check is called PASS here. |
+| Live acceptance | NOT RUN. Native OCI ARM64 exact installed-candidate presentation/entrypoint witness is mandatory. No UX-02 host/source/mutation scope has been established; UX-01's rc.17 witness does not validate changed rc.18 bytes. |
+| Limitations | No new setup, update, security, or automation wizard; no systemd enablement or boot-rearm toggle; no fresh provider, email, remote recovery, or external-network evidence. Advanced prune is preview only and rollback exposes the existing exact-bound CLI guidance. UX-05-F01 remains open. |
+| Verdict | Implementation and local validation PASS; overall stage HOLD pending exact-head CI and mandatory native installed acceptance. No merge authorization. |
+| Next action | Verify exact-head CI, open/update the PR against `v3`, report the outstanding native gate, and stop. Do not merge or begin UX-03. |
+
+### UX-02 command reconciliation against UX-00
+
+All original dashboard command routes remain accessible; the grouping changes
+their presentation without replacing their implementation. Public CLI arguments
+remain available even when they are not separate menu fields. Hidden service and
+candidate commands stay out of human menus.
+
+| New objective | Retained and newly discoverable supported operations |
+| --- | --- |
+| Setup and readiness | `readiness`, `doctor`, and the existing Start/Stop/Restart/Status submenu; first-install guidance points to `setup.sh` and the install manual. |
+| Backup and disaster recovery | Existing nine recovery choices: saved-policy backup, one-time alternate remote, inventory, local/remote verify, guided restore, saved offsite configure/status/disable; separate recovery-kit export/local-only submenu; additional explicit remote inventory. |
+| Security and connectivity | Existing ten security choices, including manual Fail Open confirmation; controlled `crowdsec remediation-stop` and explicitly opted-in experimental `ensure-fail-open`. DNS preview and mutation remain distinct. |
+| Automation and alerts | Existing `timers` and operational-route/direct-SMTP tests; systemd activation and optional Worker boot-rearm guidance is informational. |
+| Updates and maintenance | Recommended stable `update check/apply`; separate `host-upgrade check/apply`. The host check refreshes apt indexes and is not described as read-only. |
+| Configuration | Existing `config edit/validate` and `secrets edit/validate`; normal owner-provided validation/restart behavior retained. |
+| Diagnose a problem | Existing doctor, both container logs, bounded journal, and sanitized support bundle; exact `versions` added. Journal choices include DNS and Worker boot reconciliation. |
+| Advanced operations | Existing explicit `--use-latest` check/apply; `crowdsec setup` and opt-in `remediation-start --auto-fail-open`; existing rollback instructions/help, remote prune preview, and low-level install help. No arbitrary release selector, clear-guard action, hidden service command, or new deletion workflow. |
+| Guided selector | `vwctl guide [restore\|offsite\|recovery-kit]` delegates only to existing `restore`, `recovery offsite configure`, and `recovery-kit export` owners, with their original custody and final-consent boundaries. |
+
+### UX-02 validation and native witness
+
+The focused command was:
+
+```bash
+PYTHONPATH=.:tests python3 -B -m unittest \
+  test_dashboard_console test_menu_entrypoints test_dashboard_install \
+  test_immutable_vwctl_bytecode test_operator_output test_dashboard_host_acceptance
+```
+
+The complete suite was `python3 -B -m unittest discover -s tests -p 'test_*.py'`.
+Local execution used Debian 13 x86_64/Python 3.12.14; shell launchers used the
+system `/usr/bin/python3`. Working-tree transition results are isolated software
+evidence, not a real update, provider exercise, or native OCI witness. Existing
+CI remains responsible for its Ubuntu, image, packet, Caddy, and crypto jobs.
+The authoritative read model, CLI machine contracts and systemd units are unchanged.
+
+The grouped [native console instrument](../tests/host-acceptance/dashboard-console.py)
+is prepared but **NOT RUN on a real host**. Its SHA-256 is
+`88114c4c411ff3ac916a477aaa10c7e50158dd6d3dca6a7655b2e4fa2f217ddd`.
+After separate host/source/scope authorization and installation of the exact
+candidate, invoke it from a fresh operator-owned checkout pinned to the reviewed
+commit supplied in the PR/handover:
+
+```bash
+printf '%s  %s\n' \
+  '88114c4c411ff3ac916a477aaa10c7e50158dd6d3dca6a7655b2e4fa2f217ddd' \
+  'tests/host-acceptance/dashboard-console.py' | sha256sum --check --status
+sudo -n /usr/bin/python3 -B -I tests/host-acceptance/dashboard-console.py \
+  --expected-host 'APPROVED_DISPOSABLE_HOST' \
+  --expected-sha 'REVIEWED_COMMIT_SHA' \
+  --source '/absolute/path/to/clean/checkout'
+```
+
+It refuses the wrong host/architecture, unpinned or dirty source, unverified
+cached bytecode, mismatched release/manifests/units/ownership/modes, or a
+noncanonical selection/launcher. Only the exact source manifest or its canonical
+ARM64 frozen representation is accepted. Six actual PTY cases close both menu
+launchers, go Back from the guide selector, and decline all three guide intros
+with the default No. Before/after immutable content and metadata must match.
+Only sanitized results are printed; terminal output is not retained or published.
+No installation, workflow consent, service activation, backup, restore, update,
+DNS/Worker mutation, email, or synthetic appliance state is performed. The normal
+console status read still runs its existing local diagnostics. A failed or
+unperformed mandatory native witness remains HOLD.
+
+### UX-02 independent acceptance-instrument review (HOLD)
+
+The previous exact head `2e876e2bc96419fe87e8e79371c63efd2be37a9b` passed the original 51 focused
+and 659 regression tests and all nine jobs in each of
+[push CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472607054) and
+[PR CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472620646).
+Review found an acceptance-only defect: the instrument expected an absolute
+`current` link and its isolated fixture reproduced that mistake; the real
+installer and updater require `releases/<version>` relative to the install
+root. The corrected witness uses the canonical relative target and rejects
+absolute or wrong targets. It also refuses a menu smoke with an unknown
+version, incomplete/malformed outcome, or escape sequences under NO_COLOR
+and TERM=dumb. The prior instrument checksum `0f282ee7c8bd0dd2bee0ba9ea2d44350d2c3ae437475aa90c32ce41facdb6ba6` is superseded;
+the updated command above pins the corrected instrument. No application,
+manifest, unit, launcher or dependency bytes change. Final remediation-head
+CI and focused/full results are recorded independently in PR #445. Native
+OCI acceptance remains NOT RUN / HOLD until the exact installed source is
+witnessed on an explicitly approved disposable host. UX-05-F01 remains open.
+
+### UX-02 representative terminal transcripts
+
+These are captured from the actual renderer using synthetic read-model fixtures,
+with plain output. They demonstrate presentation, not live host acceptance,
+current provider protection, or off-host custody. No synthetic state was written
+to an appliance. The menu below follows each outcome.
+
+#### Operational
+
+```text
+ VaultWarden-OCI 0.1.0-rc.18 — Operations Dashboard
+------------------------------------------------------------
+ Outcome: OPERATIONAL
+ required observed operations are healthy; external evidence is separate
+
+ Availability: Vaultwarden running / healthy | Caddy running / healthy
+ Security: edge PASS | CrowdSec PASS | admin protected
+ Recovery: local current receipt age=2m | offsite LOCAL-ONLY (offsite disabled)
+ Automation: PASS | boot persistent | execution success recorded
+ Alerts: not configured | delivery unknown | SMTP configured
+ Update: no stable project release is published (check age 0m)
+ Host: storage ok; 10% used | reboot not required
+ INFO: observed local evidence; public ingress and off-host custody need separate verification.
+------------------------------------------------------------
+```
+
+#### Attention
+
+```text
+ VaultWarden-OCI 0.1.0-rc.18 — Operations Dashboard
+------------------------------------------------------------
+ Outcome: ATTENTION
+ required automation is not healthy; persistent boot automation is not established; update check needs attention
+ ACTION: Review Automation and alerts; Updates and maintenance.
+
+ Availability: Vaultwarden running / healthy | Caddy running / healthy
+ Security: edge PASS | CrowdSec PASS | admin protected
+ Recovery: local current receipt age=2m | offsite LOCAL-ONLY (offsite disabled)
+ Automation: FAIL | boot disabled | execution not established
+ Alerts: not configured | delivery unknown | SMTP configured
+ Update: update check stale/missing/invalid (check age 2d 0h)
+ Host: storage ok; 10% used | reboot not required
+ INFO: observed local evidence; public ingress and off-host custody need separate verification.
+------------------------------------------------------------
+```
+
+#### Recovery Required
+
+```text
+ VaultWarden-OCI 0.1.0-rc.18 — Operations Dashboard
+------------------------------------------------------------
+ Outcome: RECOVERY REQUIRED
+ a failed update requires coherent application recovery
+ FAIL: update recovery is required; ordinary start and update apply remain blocked.
+ ACTION: Advanced operations -> Recorded update recovery instructions.
+
+ Availability: Vaultwarden stopped / none | Caddy stopped / none
+ Security: edge PASS | CrowdSec PASS | admin protected
+ Recovery: local current receipt age=2m | offsite LOCAL-ONLY (offsite disabled)
+ Automation: PASS | boot persistent | execution success recorded
+ Alerts: not configured | delivery unknown | SMTP configured
+ Update: no stable project release is published (check age 0m)
+ Host: storage ok; 10% used | reboot not required
+ INFO: observed local evidence; public ingress and off-host custody need separate verification.
+------------------------------------------------------------
+```
+
+#### Setup Incomplete
+
+```text
+ VaultWarden-OCI 0.1.0-rc.18 — Operations Dashboard
+------------------------------------------------------------
+ Outcome: SETUP INCOMPLETE
+ stopped stack with unestablished setup foundations; intent is unknown
+ ACTION: Setup and readiness -> Local readiness; complete the reported prerequisites.
+
+ Availability: Vaultwarden stopped / none | Caddy stopped / none
+ Security: edge WARN | CrowdSec WARN | admin WARN
+ Recovery: local never verified receipt age=unknown | offsite LOCAL-ONLY (offsite disabled)
+ Automation: FAIL | boot disabled | execution not established
+ Alerts: not configured | delivery unknown | SMTP not established
+ Update: update check stale/missing/invalid (check age unknown)
+ Host: storage ok; 10% used | reboot not required
+ INFO: observed local evidence; public ingress and off-host custody need separate verification.
+------------------------------------------------------------
+```
+
+#### Common objective menu
+
+```text
+ Administrator objectives
+  [ 1/s ] Setup and readiness
+  [ 2/b ] Backup and disaster recovery
+  [ 3/x ] Security and connectivity
+  [ 4/a ] Automation and alerts
+  [ 5/u ] Updates and maintenance
+  [ 6/c ] Configuration
+  [ 7/d ] Diagnose a problem
+  [ 8 ] Advanced operations
+
+  [ g ] Guided operations   [ e/q ] Exit
+ Shortcuts: k credential kit; n email tests. Submenus: b back. Ctrl-C/EOF closes the console.
+```
 
 ## 1. Fixed snapshot and complete repository structure
 
@@ -545,6 +789,12 @@ shared color/choice helper is justified only by concrete duplication. There is
 no need for a new daemon, database, workflow engine, repair engine or dependency.
 
 ### Proposed sequence (planning only)
+
+**Historical provisional numbering:** the administrator's subsequent master
+contract supersedes this table. The accepted UX-01 stage is the operational
+read model; the current UX-02 stage is the console and guided-interface work;
+UX-05 owns the security/automation/notification follow-up above. This retained
+planning table is not authority to begin another stage or rename accepted work.
 
 The labels below organize dependencies; they are not permission to execute any
 later stage. Each stage must pass its mandatory evidence, receive explicit review

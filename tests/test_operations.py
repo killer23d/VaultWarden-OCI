@@ -421,6 +421,7 @@ class DashboardBoundaryTests(unittest.TestCase):
         calls: list[list[str]] = []
         with (
             mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("3")),
+            mock.patch("vaultwarden_oci.dashboard._confirm", return_value=True),
             mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
         ):
             dashboard.stack_menu()
@@ -456,7 +457,7 @@ class DashboardBoundaryTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             dashboard.draw_main_menu()
-        self.assertIn("7/n", output.getvalue())
+        self.assertIn("n email tests", output.getvalue())
         self.assertIn("e/q", output.getvalue())
 
     def test_dashboard_sources_exclude_legacy_backend_orchestration(self) -> None:
@@ -522,6 +523,7 @@ class DashboardBoundaryTests(unittest.TestCase):
         calls: list[list[str]] = []
         with (
             mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("1")),
+            mock.patch("vaultwarden_oci.dashboard._confirm", return_value=True),
             mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
         ):
             dashboard.recovery_kit_menu()
