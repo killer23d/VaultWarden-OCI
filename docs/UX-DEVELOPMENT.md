@@ -16,17 +16,17 @@ or permission to deploy. The administrator's master contract governs this work;
 | Accepted source tree | `dd1eb35b5eb0ce1f37fb9cc9d730cf8183519b01`; local Git and independent remote Git-data read agree. |
 | Branch controls | Development integration `v3` and the [preserved baseline branch](https://github.com/killer23d/VaultWarden-OCI/tree/v2) both selected the accepted base at entry. Default branch is `main`. Only `ux/00-baseline-audit` may be written; its PR targets `v3`. |
 | Development branch | `ux/00-baseline-audit`, created from the exact accepted base. |
-| Implementation head | PENDING first audit commit; recorded in a subsequent receipt commit, never self-embedded. |
-| PR | PENDING creation against `v3`. |
+| Implementation head | `89e661ae6e495c654768601b2993f3c354679799` (reviewed audit content). This receipt is a later documentation-only child; its final exact head is recorded independently in the PR and handover. |
+| PR | [#443](https://github.com/killer23d/VaultWarden-OCI/pull/443), `ux/00-baseline-audit` into `v3`; administrator review and merge authorization pending. |
 | Changed files | `docs/UX-DEVELOPMENT.md` only. No executable, unit, dependency pin, workflow or other production-file change. |
 | Architectural decision | Retain existing owners; entrypoint integrity precedes truthful read models, menu revision and guided extensions. No new runtime layer. |
 | Focused tests | 156 existing operator/recovery/handoff/systemd tests PASS; 40 public leaf help routes and 4 top-level/version routes PASS; parser inventory and 7 isolated audit assertions PASS. |
 | Regression tests | All 588 existing unit/bounded integration tests PASS; compile, Bash syntax, existing CLI-help and documentation audit PASS; existing historical and current-predecessor isolated transaction checks PASS. Exact commands and limits below. |
-| CI | Baseline `v3` push [45448152610](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45448152610): all nine jobs independently verified successful. Final UX-00 PR-head checks PENDING; baseline checks do not substitute for them. |
+| CI | Audited implementation head: [push 45451023299](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45451023299) and [PR 45451108239](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45451108239), each completed successfully with all nine jobs independently verified. The receipt commit must pass its own exact-head checks, recorded in the PR/handover. |
 | Live acceptance | NOT RUN. No host identified or authorized for this stage. A documentation-only audit does not need a new live mutation/installed-entrypoint gate; no executable or presentation entrypoint changes. Existing host evidence is reviewed history only. |
 | Limitations | Known source findings remain unfixed. Local runner is Debian 13 x86_64/Python 3.12.14 (dashboard shells use /usr/bin/python3 3.13.5), not native Ubuntu/OCI. Dependency/OS integrations run in existing CI; rc.16 live acceptance and the historical limits below remain separate. |
-| Verdict | HOLD until final documentation review and exact PR-head CI are verified. |
-| Next action | Complete UX-00 validation and request administrator review/merge authorization. Do not merge or begin UX-01. |
+| Verdict | PASS for scoped UX-00 audit implementation and recorded baseline validation. Final receipt-head CI is mandatory before merge review; missing evidence means HOLD. No merge authorization has been given. |
+| Next action | Verify the final receipt head and CI, then request administrator review and exact-head squash-merge authorization. Stop here; do not merge or begin UX-01. |
 
 The final reviewed PR head and eventual accepted squash-merge SHA must be
 independently supplied in the PR/handover. The next stage must verify that merge
@@ -581,8 +581,9 @@ normal product surfaces.
 
 ### Tests actually performed
 
-Tests ran on the exact accepted source before creating this documentation, using
-Debian 13 x86_64 and Python 3.12.14. Temporary installed-layout and mocked-transaction
+Baseline tests ran on the exact accepted source before creating this documentation,
+using Debian 13 x86_64 and Python 3.12.14. The complete suite and documentation
+checks were also repeated after final receipt assembly; see the final handover. Temporary installed-layout and mocked-transaction
 fixtures never touched an appliance. Negative tests intentionally print some FAIL
 messages; aggregate unittest results, not those expected messages, determine PASS.
 
@@ -598,7 +599,8 @@ messages; aggregate unittest results, not those expected messages, determine PAS
 | Public parser/help | PASS: authoritative parser enumeration; **40/40** public leaf help paths and **4/4** no-arg/top-help/version/versions checks, exit 0 and no ANSI. |
 | Audit-only reproductions | PASS: **7 assertions** across isolated probes: fixed dashboard dispatch, two dashboard bytecode writes, cancelled-zero success footer, stale update precedence, historical offsite summary, human/JSON exit difference, and CrowdSec-only TTY/captured/JSON difference. These characterize existing defects/contracts; they are not fixes. |
 | Baseline remote CI | PASS: [v3 push 45448152610](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45448152610), exact base SHA, completed/success, all nine job conclusions independently inspected. [Preserved-baseline push 45345293271](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45345293271) also reports completed/success at that SHA. |
-| UX-00 final documentation checks | PENDING final documentation/link validation and exact reviewed head PR CI; must pass before a final PASS handover. |
+| UX-00 audit implementation CI | PASS: implementation `89e661ae6e495c654768601b2993f3c354679799`, [push 45451023299](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45451023299) and [PR 45451108239](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45451108239), each nine successful jobs. Quality log independently confirms 588 tests and the correct same-version transition skip. |
+| Final receipt verification | Documentation/source review, complete 165-path inventory comparison, unchanged runtime/pin/workflow objects, and documentation-link/diff checks PASS. This evidence-only receipt commit still requires its own exact-head CI, to be supplied independently in PR #443 and the final handover before authorization. |
 
 Focused modules:
 
