@@ -27,17 +27,41 @@ def snapshot(
     state = load(path)
     checked = state.get("checked_at")
     current_time = time.time() if now is None else float(now)
-    age = max(0, int(current_time - checked)) if isinstance(checked, int) and not isinstance(checked, bool) else None
+    age = (
+        int(current_time - checked)
+        if isinstance(checked, int) and not isinstance(checked, bool) and 0 <= checked <= current_time
+        else None
+    )
     try:
         installed = cli.load_versions().version
     except cli.VersionsError:
         installed = "unknown"
     reason = state.get("availability_reason")
+    stale = age is None or age > MAX_AGE_SECONDS
+    recorded_current = state.get("current")
+    valid = (
+        state.get("schema_version") == 1
+        and isinstance(recorded_current, str) and bool(recorded_current)
+        and isinstance(state.get("available"), bool)
+        and (state.get("candidate") is None or isinstance(state.get("candidate"), str))
+        and (state.get("error") is None or isinstance(state.get("error"), str))
+        and (state.get("available") is not True or bool(state.get("candidate")))
+        and installed != "unknown"
+    )
+    if not valid or age is None:
+        check_state = "unknown"
+    elif state.get("error"):
+        check_state = "failed"
+    elif stale or recorded_current != installed:
+        check_state = "stale"
+    else:
+        check_state = "current"
     return {
         "installed": installed,
         "checked_at": checked if isinstance(checked, int) and not isinstance(checked, bool) else None,
         "check_age_seconds": age,
-        "check_stale": age is None or age > MAX_AGE_SECONDS,
+        "check_stale": stale or (isinstance(recorded_current, str) and recorded_current != installed),
+        "check_state": check_state,
         "candidate": state.get("candidate"),
         "available": state.get("available") is True,
         "availability_reason": reason if isinstance(reason, str) and reason else None,

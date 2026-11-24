@@ -33,6 +33,23 @@ independently supplied in the PR/handover. The next stage must verify that merge
 and resulting tree before branching. A commit must never claim to contain its
 own SHA. No tag, release, production change or subsequent stage is authorized.
 
+## UX-01 stage receipt (candidate; HOLD)
+
+| Field | Recorded evidence |
+| --- | --- |
+| Scope | Authoritative operational evidence and local deployment-readiness assessment. No lifecycle or scheduling mutation; no dashboard menu redesign. |
+| Accepted base | `6e89d2feac53a9cc7ac69af07b8b10471b0d117d` — [UX-00 acceptance and equivalent squash integration](https://github.com/killer23d/VaultWarden-OCI/pull/443#issuecomment-7139887051). |
+| Base tree | `379debac850371238288963e1f1acf5bf6fb8d56` independently matches exact reviewed UX-00 head; single parent is original baseline. |
+| Branch | `ux/01-status-readiness`, independently verified at the accepted base before edits. |
+| Changed owners | Existing recovery, update status/guard, edge, operations, CLI and dashboard presentation; operations manual, README and focused tests. |
+| Decisions | Preserve status schema 1 and exit contracts; additive operational evidence, separate readiness schema 1; no new installed module, mutation owner, dependency, service or pin. No claim of intentional maintenance. No provider probe on periodic health. |
+| Focused and regression tests | NOT RUN locally: execution environment cannot resolve GitHub for a complete checkout. Candidate requires exact-head automated tests and independent review. |
+| CI | NOT RUN at receipt assembly; exact candidate head and workflow references must be independently recorded in PR. |
+| Live acceptance | NOT RUN; disposable native OCI ARM64 host, exact installed source and permitted scope not authorized. Required installed-entrypoint and read-only readiness verification remain HOLD. |
+| Limitations | Receipts describe historical verification, not current remote presence, off-host custody or a successful fresh restore. No independent mailbox/public network/provider proof. |
+| PR / head | To be recorded independently in the PR and handover, not self-referentially in this commit. |
+| Verdict | HOLD pending mandatory validation. No merge or next stage authorized. |
+
 ## 1. Fixed snapshot and complete repository structure
 
 All source line references in this record refer to

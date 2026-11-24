@@ -24,6 +24,47 @@ The main screen covers Vaultwarden/Caddy, doctor, dedicated-storage usage, local
 
 **Expected success:** the screen truthfully reflects `vwctl status --json` and doctor state. **On failure:** exit to `sudo vwctl status --json` and `sudo vwctl doctor --json`; never interpret a dashboard presentation error as appliance health.
 
+### Operational evidence and deployment readiness
+
+The status JSON retains its existing fields and exit behavior and adds an
+`operational` object. Its outcome distinguishes OPERATIONAL, SETUP INCOMPLETE,
+ATTENTION, MAINTENANCE / STOPPED (intent unknown), CRITICAL, and RECOVERY
+REQUIRED. Existing captured status text and the health service's exit boundary
+are unchanged. Use the new evidence rather than interpreting a historical
+receipt as a currently enabled backup policy.
+
+- Local and offsite backup receipts use the existing 36-hour freshness threshold.
+  A current local receipt also checks that the recorded regular archive exists
+  with its recorded size; this is not a new checksum or decryption. Offsite
+  evidence must match the exact saved publication folder. A disabled policy is
+  local-only regardless of prior receipts. A configured folder with a receipt
+  for a different destination has no current applicable verification. Scheduled
+  backup service failure is separate from the last successful artifact receipt;
+  manual failures without a service result are not recorded by this view.
+- Update check history is separate from a current check of this installed release;
+  stale, invalid and failed evidence must not be shown as a fresh success.
+- Automation target, timers, triggered service results and independent DNS job
+  results are separate. A systemd default success result without an observed
+  service exit is not execution evidence. The optional CrowdSec boot reconciliation
+  unit is reported independently; recorded confirmation for the observed Worker
+  invocation is not current Cloudflare API readback.
+- Application SMTP configuration, optional operational alert configuration and
+  past delivery results are different. Configuration does not prove delivery.
+
+Run `sudo vwctl readiness` after setup or when reviewing deployment foundations.
+The read-only command returns 0 for locally verified required foundations,
+1 for failure or incomplete verification, and parser usage errors remain 2.
+`--json` emits a separate schema 1 object with required checks, recommended
+protection, unestablished administrator attestations and unestablished external
+verification. A local PASS is **not** deployment approval. The explicit command
+performs bounded unauthenticated HTTPS GETs against the configured hostname
+resolved to loopback with system CA validation (normal access logs may result).
+It never updates DNS, starts services, sends mail, downloads recovery material,
+or queries an external ingress path. Off-host kit/key custody, mailbox receipt,
+external HTTPS and non-Cloudflare denial, provider policy, current remote object
+presence and disposable restore remain separate evidence. Neither a stopped
+stack nor disabled timers establish administrator maintenance intent.
+
 ## Lifecycle, status, doctor, and logs
 
 | Task | Command | Expected success | If it fails |
@@ -33,6 +74,7 @@ The main screen covers Vaultwarden/Caddy, doctor, dedicated-storage usage, local
 | Restart | `sudo vwctl restart` | Re-rendered exact runtime becomes healthy | Run doctor and logs. |
 | Summary | `sudo vwctl status` / `sudo vwctl status --json` | Truthful service/storage/recovery/update summary | Use doctor for check-level causes. |
 | Diagnostics | `sudo vwctl doctor --json` | No `FAIL` | Fix the named stable check ID before acceptance. |
+| Readiness | `sudo vwctl readiness` / `sudo vwctl readiness --json` | Local machine foundations assessed separately from external and custody evidence | Resolve failed or unverified requirements; complete the site acceptance checklist separately. |
 | Logs | `sudo vwctl logs --tail 200` | Bounded recent container logs | Use systemd journal if launch failed before containers ran. |
 
 Useful journals:

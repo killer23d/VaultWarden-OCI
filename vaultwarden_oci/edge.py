@@ -1390,6 +1390,21 @@ def _fail_open_confirmed(path: Path, invocation: str | None) -> bool:
     )
 
 
+def worker_invocation_snapshot(
+    *, paths: EdgePaths = EdgePaths(), runner: Runner = run_command,
+) -> dict[str, object]:
+    """Observe current invocation and its recorded confirmation, not provider state."""
+    invocation = _service_invocation_id(runner)
+    return {
+        "invocation_observed": invocation is not None,
+        "fail_open_confirmation": (
+            "recorded_for_observed_invocation"
+            if _fail_open_confirmed(paths.fail_open_confirmation, invocation)
+            else "not_established"
+        ),
+    }
+
+
 def _iptables_healthy(binary: str, networks: Iterable[ipaddress._BaseNetwork], runner: Runner) -> bool:
     jump = _rule(binary, RULE_COMMENT, CHAIN)
     guard = _rule(binary, GUARD_COMMENT, "DROP")

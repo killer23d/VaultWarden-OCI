@@ -405,6 +405,9 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", help="stable structured appliance status")
 
+    readiness = commands.add_parser("readiness", help="read-only local deployment foundations and evidence limits")
+    readiness.add_argument("--json", action="store_true")
+
     logs = commands.add_parser("logs")
     logs.add_argument("service", nargs="?", choices=("vaultwarden", "caddy"))
     logs.add_argument("--tail", type=int, default=200)
@@ -615,6 +618,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             overall = "degraded"
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
+    if args.command == "readiness":
+        from . import operations
+        return operations.readiness_command(machine=args.json)
     if args.command == "timers":
         from . import operations
         return operations.timers_command(machine=args.json)

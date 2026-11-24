@@ -105,13 +105,18 @@ def _service(payload: dict[str, object], name: str) -> str:
 
 
 def _recovery_line(payload: dict[str, object], kind: str) -> str:
-    rows = payload.get("recovery", [])
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict) and row.get("kind") == kind:
-            stale = " STALE" if row.get("stale") else ""
-            color = STYLE.warning if stale else STYLE.success
-            return color(f"{row.get('state', 'unknown')} age={_fmt_age(row.get('age_seconds'))}{stale}")
-    return STYLE.warning("not recorded")
+    operational = payload.get("operational")
+    backup = operational.get("backup") if isinstance(operational, dict) else None
+    row = backup.get(kind) if isinstance(backup, dict) else None
+    if not isinstance(row, dict):
+        return STYLE.warning("current evidence unavailable")
+    state = str(row.get("state", "unknown"))
+    if state == "local_only":
+        return STYLE.warning("LOCAL-ONLY (offsite disabled)")
+    history = row.get("historical_receipt") if kind == "offsite" else row
+    age = history.get("age_seconds") if isinstance(history, dict) else None
+    color = STYLE.success if state == "current" else STYLE.failure if state == "failed" else STYLE.warning
+    return color(f"{state.replace('_', ' ')} receipt age={_fmt_age(age)}")
 
 
 def _doctor_check(payload: dict[str, object], check_id: str) -> str:
@@ -151,6 +156,14 @@ def draw_status(payload: dict[str, object]) -> None:
     edge = payload.get("edge", {})
     crowdsec = payload.get("crowdsec", {})
     automation = payload.get("automation", {})
+    operational = payload.get("operational")
+    if isinstance(operational, dict):
+        outcome = str(operational.get("state", "UNKNOWN"))
+        color = STYLE.success if outcome == "OPERATIONAL" else STYLE.failure if outcome in {"CRITICAL", "RECOVERY REQUIRED"} else STYLE.warning
+        print(f" {STYLE.bold('Outcome:')} {color(outcome)} — {operational.get('reason', '')}")
+        guard = operational.get("update_guard")
+        if isinstance(guard, dict) and guard.get("state") != "absent":
+            print(f" {STYLE.bold('Update recovery:')} {STYLE.failure(str(guard.get('detail', 'not established')))}")
     print(f" {STYLE.bold('Stack:')} Vaultwarden {_service(payload, 'vaultwarden')} | Caddy {_service(payload, 'caddy')}")
     print(f" {STYLE.bold('Doctor:')} {_state(doctor.get('overall', 'unknown') if isinstance(doctor, dict) else 'unknown')}")
     if isinstance(storage, dict) and storage.get("state") != "failure":
@@ -179,16 +192,23 @@ def draw_status(payload: dict[str, object]) -> None:
     else:
         timer_text = STYLE.failure("unknown")
     print(f" {STYLE.bold('Automation:')} {timer_text}")
-    print(f" {STYLE.bold('Notifications:')} {_state(notification.get('state', 'unknown') if isinstance(notification, dict) else 'unknown')}")
+    mail = operational.get("notification") if isinstance(operational, dict) else None
+    if isinstance(mail, dict):
+        history = mail.get("delivery_history")
+        history_state = history.get("state", "unknown") if isinstance(history, dict) else "unknown"
+        print(f" {STYLE.bold('Notifications:')} {str(mail.get('operational_route', 'unknown')).replace('_', ' ')}"
+              f" | delivery history {_state(history_state)} | SMTP {str(mail.get('application_smtp', 'unknown')).replace('_', ' ')}")
+    else:
+        print(f" {STYLE.bold('Notifications:')} {_state(notification.get('state', 'unknown') if isinstance(notification, dict) else 'unknown')}")
     if isinstance(update, dict):
         if update.get("error"):
             update_text = STYLE.failure(f"check error: {update.get('error')}")
+        elif update.get("check_stale") or update.get("check_state") in {"stale", "unknown", "failed"}:
+            update_text = STYLE.warning("update check stale/missing/invalid")
         elif update.get("available"):
             update_text = STYLE.warning(f"update available -> {update.get('candidate')}")
         elif update.get("availability_reason"):
             update_text = STYLE.success(str(update.get("availability_reason")))
-        elif update.get("check_stale"):
-            update_text = STYLE.warning("update check stale/missing")
         else:
             update_text = STYLE.success("up to date")
         print(f" {STYLE.bold('Update:')} {update_text} (last check {_fmt_age(update.get('check_age_seconds'))} ago)")
