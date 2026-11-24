@@ -615,7 +615,8 @@ def _remote_parts(remote: str) -> tuple[str, str]:
     return name, path.rstrip("/")
 
 
-def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+def rclone_local_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+    """Inspect local rclone configuration without contacting any provider."""
     if not runner(["rclone", "version"]).ok:
         return False, "rclone is unavailable"
     if not runner(["rclone", "config", "file"]).ok:
@@ -633,6 +634,14 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
     name, _ = _remote_parts(remote)
     if name not in configured:
         return False, f"rclone remote {name!r} is not configured"
+    return True, f"rclone remote {name!r} is configured locally"
+
+
+def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
+    ok, message = rclone_local_diagnostics(remote, runner=runner)
+    if not ok or remote is None:
+        return ok, message
+    name, _ = _remote_parts(remote)
     if not runner(["rclone", "lsf", f"{name}:", "--max-depth", "1"]).ok:
         return False, f"rclone remote {name!r} is not reachable"
     return True, f"rclone remote {name!r} is reachable"
@@ -1412,7 +1421,15 @@ def doctor_checks(
     paths: RecoveryPaths = RecoveryPaths(),
     *,
     runner: Runner = run_command,
+    state_verified: bool = True,
 ) -> list[DoctorCheck]:
+    if not state_verified:
+        ok, message = rclone_local_diagnostics(runner=runner)
+        return [
+            DoctorCheck("recovery.local", "SKIP", "dedicated storage is not verified; receipt not inspected"),
+            DoctorCheck("recovery.offsite", "SKIP", "dedicated storage is not verified; receipt not inspected"),
+            DoctorCheck("recovery.rclone", "PASS" if ok else "WARN", message),
+        ]
     rows = {row["kind"]: row for row in status_rows(paths)}
     local, offsite = rows["local"], rows["offsite"]
     rclone_ok, rclone_message = rclone_diagnostics(runner=runner)

@@ -342,7 +342,7 @@ def load_config(path: Path = CONFIG) -> RuntimeConfig:
             return parse_config(tomllib.load(handle))
     except RuntimeConfigError:
         raise
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise RuntimeConfigError(f"cannot load config {path}: {exc}") from exc
 
 

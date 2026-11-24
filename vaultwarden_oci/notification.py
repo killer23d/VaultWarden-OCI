@@ -900,6 +900,7 @@ def doctor_checks(
     secret_values: Mapping[str, str] | None,
     catalog_path: Path = CATALOG_PATH,
     state_path: Path = STATE_PATH,
+    state_verified: bool = True,
 ) -> list[DoctorCheck]:
     try:
         catalog = load_catalog(catalog_path)
@@ -949,6 +950,9 @@ def doctor_checks(
                     "authenticated TLS SMTP fallback is configured" if fallback and secure else "authenticated TLS SMTP fallback is not configured",
                 )
             )
+    if not state_verified:
+        checks.append(DoctorCheck("notification.last_delivery", "SKIP", "dedicated storage is not verified; delivery history not inspected"))
+        return checks
     last = load_result(state_path)
     if last is None:
         checks.append(DoctorCheck("notification.last_delivery", "SKIP", "no operational delivery has been recorded"))

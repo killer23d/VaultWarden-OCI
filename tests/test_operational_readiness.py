@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from vaultwarden_oci import dashboard, operations, recovery, update_guard, update_status, update_cli
+from vaultwarden_oci import cli, dashboard, edge, notification, operations, recovery, update_guard, update_status, update_cli
 
 
 class ReceiptEvidenceTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class ReceiptEvidenceTests(unittest.TestCase):
         }
         with (
             mock.patch.object(operations.recovery, "backup_receipt_evidence", return_value=historical),
+            mock.patch.object(operations.recovery, "rclone_local_diagnostics", return_value=(True, "configured")),
             mock.patch.object(operations, "_age", return_value=3600),
         ):
             for remote, expected in ((None, "local_only"), ("box:current", "never_verified")):
@@ -99,6 +100,15 @@ class UpdateAndGuardTests(unittest.TestCase):
         self.assertIn("stale", output.getvalue())
         self.assertNotIn("no newer stable release", output.getvalue())
 
+    def test_invalid_update_record_is_not_fresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "update.json"
+            path.write_text(json.dumps({"checked_at": 100, "available": False}))
+            with mock.patch.object(update_status.cli, "load_versions", return_value=SimpleNamespace(version="0.1.0")):
+                result = update_status.snapshot(path=path, now=101)
+        self.assertEqual(result["check_state"], "unknown")
+        self.assertTrue(result["check_stale"])
+
     def test_guard_absent_active_and_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "guard.json"
@@ -125,7 +135,9 @@ class OperationalReadinessTests(unittest.TestCase):
             "admin": {"status": "PASS", "message": "protected"},
             "operational": {"update_guard": {"state": "absent", "detail": "none"},
                             "backup": {"local": {"state": "current"}, "offsite": {"state": "local_only"}},
-                            "notification": {"operational_route": "not_configured"}},
+                            "notification": {"operational_route": "not_configured"},
+                            "automation": {"activation": "PASS", "boot_persistence": "persistent",
+                                           "execution": "success_recorded", "masked_timers": []}},
         }
 
     def test_readiness_is_scoped_and_no_mutation(self):
@@ -160,6 +172,7 @@ class OperationalReadinessTests(unittest.TestCase):
         payload = self.payload()
         payload["storage"] = {"state": "failure"}
         payload["automation"] = {"overall": "FAIL"}
+        payload["operational"]["automation"]["activation"] = "FAIL"
         payload["doctor"]["checks"] = [
             row if row["id"] != "storage.dedicated" else {**row, "status": "FAIL"}
             for row in payload["doctor"]["checks"]
@@ -185,9 +198,10 @@ class OperationalReadinessTests(unittest.TestCase):
         backup = {"local": {"state": "current"}, "policy": "local_only"}
         mail = {"operational_route": "not_configured"}
         guard = {"state": "absent", "detail": "none"}
-        classify = lambda: operations._operational_classification(payload, backup, guard, mail, config)
+        auto = payload["operational"]["automation"]
+        classify = lambda: operations._operational_classification(payload, backup, guard, mail, config, auto)
         self.assertEqual(classify()["state"], "OPERATIONAL")
-        payload["automation"]["overall"] = "FAIL"
+        auto["activation"] = "FAIL"
         self.assertEqual(classify()["state"], "ATTENTION")
         payload["runtime"]["overall"] = "stopped"
         self.assertEqual(classify()["state"], "MAINTENANCE / STOPPED")
@@ -198,6 +212,112 @@ class OperationalReadinessTests(unittest.TestCase):
         self.assertEqual(classify()["state"], "RECOVERY REQUIRED")
         payload["storage"]["state"] = "failure"
         self.assertEqual(classify()["state"], "CRITICAL")
+
+    def test_required_foundations_and_setup_are_truthful(self):
+        payload = self.payload()
+        backup = {"local": {"state": "current"}, "policy": "local_only"}
+        guard = {"state": "absent", "detail": "none"}
+        mail = {"operational_route": "not_configured"}
+        auto = payload["operational"]["automation"]
+        config = SimpleNamespace()
+        classify = lambda: operations._operational_classification(payload, backup, guard, mail, config, auto)
+        checks = payload["doctor"]["checks"]
+        caddy = next(row for row in checks if row["id"] == "edge.caddy.trusted_proxy")
+        for state in ("SKIP", "WARN", "UNKNOWN"):
+            caddy["status"] = state
+            self.assertEqual(classify()["state"], "ATTENTION")
+        checks.remove(caddy)
+        self.assertEqual(classify()["state"], "ATTENTION")
+        payload["runtime"]["overall"] = "stopped"
+        config = None
+        self.assertEqual(classify()["state"], "SETUP INCOMPLETE")
+        checks.append({"id": "edge.cloudflare.iptables", "status": "FAIL"})
+        self.assertEqual(classify()["state"], "CRITICAL")
+
+    def test_offsite_exact_remote_and_no_cloud_polling(self):
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return cli.CommandResult(tuple(argv), "success", 0, "other:\n" if argv[1] == "listremotes" else "", "")
+        self.assertTrue(recovery.rclone_local_diagnostics(runner=runner)[0])
+        self.assertFalse(recovery.rclone_local_diagnostics("box:folder", runner=runner)[0])
+        self.assertTrue(recovery.rclone_local_diagnostics("other:folder", runner=runner)[0])
+        self.assertTrue(all(argv[1] in {"version", "config", "listremotes"} for argv in calls))
+        receipts = {"local": {"state": "verified"}, "offsite": {"state": "verified", "matches_destination": True}}
+        with mock.patch.object(recovery, "backup_receipt_evidence", return_value=receipts), mock.patch.object(operations, "_age", return_value=1), mock.patch.object(recovery, "rclone_local_diagnostics", return_value=(False, "missing")):
+            backup = operations._backup_evidence(SimpleNamespace(offsite_remote="box:folder"), True, {})
+        self.assertEqual(backup["offsite"]["state"], "current")
+        self.assertEqual(backup["destination_state"], "not_established")
+        self.assertEqual(backup["destination_connectivity"], "not_established")
+        payload = self.payload()
+        result = operations._operational_classification(payload, backup, {"state": "absent", "detail": "none"}, {"operational_route": "not_configured"}, SimpleNamespace(), payload["operational"]["automation"])
+        self.assertEqual(result["state"], "ATTENTION")
+
+    def test_automation_persistence_and_independent_jobs(self):
+        payload = self.payload()
+        payload["automation"]["target"] = {"enabled": "enabled-runtime"}
+        jobs = {name: {"state": "success_recorded"} for name in operations._REQUIRED_JOBS}
+        evidence = operations._automation_evidence(payload, jobs)
+        self.assertEqual(evidence["boot_persistence"], "runtime_only")
+        self.assertEqual(evidence["execution"], "success_recorded")
+        payload["automation"]["target"]["enabled"] = "enabled"
+        jobs["vaultwarden-oci-dns.service"] = {"state": "not_recorded"}
+        evidence = operations._automation_evidence(payload, jobs)
+        self.assertEqual(evidence["execution"], "not_established")
+        self.assertIn("vaultwarden-oci-dns.service", evidence["unverified_jobs"])
+        jobs["vaultwarden-oci-dns.service"] = {"state": "failed"}
+        self.assertEqual(operations._automation_evidence(payload, jobs)["execution"], "failed")
+        payload["timers"] = [{"unit": operations.TIMER_UNITS[0], "enabled": "masked"}]
+        self.assertEqual(operations._automation_evidence(payload, jobs)["masked_timers"], [operations.TIMER_UNITS[0]])
+
+    def test_storage_failure_withholds_persistent_evidence(self):
+        with (
+            mock.patch.object(operations, "_storage_status", return_value={"state": "failure"}),
+            mock.patch.object(operations.runtime, "status", return_value=("running", [])),
+            mock.patch.object(operations.cli, "doctor_checks", return_value=[]) as doctor,
+            mock.patch.object(operations, "automation_snapshot", return_value={"overall": "PASS", "target": {}, "healthy": 4, "expected": 4, "timers": []}),
+            mock.patch.object(operations, "_config_snapshot", return_value=None),
+            mock.patch.object(operations, "_systemd_properties", return_value={}),
+            mock.patch.object(recovery, "status_rows") as legacy,
+            mock.patch.object(recovery, "backup_receipt_evidence") as receipts,
+            mock.patch.object(notification, "status_row") as delivery,
+            mock.patch.object(update_status, "load") as update,
+            mock.patch.object(update_guard, "load") as guard,
+            mock.patch.object(edge, "worker_invocation_snapshot") as worker,
+        ):
+            payload = operations.status_payload()
+        doctor.assert_called_once_with(persistent_state_verified=False)
+        for reader in (legacy, receipts, delivery, update, guard, worker):
+            reader.assert_not_called()
+        self.assertEqual(payload["operational"]["state"], "CRITICAL")
+        self.assertEqual(payload["doctor"]["overall"], "FAIL")
+        self.assertTrue(all(row["state"] == "unknown" and row["stale"] for row in payload["recovery"]))
+        self.assertEqual(payload["update"]["check_state"], "unknown")
+        self.assertTrue(payload["update"]["check_stale"])
+        self.assertEqual(payload["notification"]["state"], "unknown")
+
+    def test_guard_blocks_https_and_execution_gap_holds(self):
+        payload = self.payload()
+        payload["operational"]["update_guard"]["state"] = "unknown"
+        with mock.patch.object(operations, "status_payload", return_value=payload), mock.patch.object(operations, "_local_https") as tls:
+            self.assertEqual(operations.readiness_payload()["overall"], "FAIL")
+        tls.assert_not_called()
+        payload["operational"]["update_guard"]["state"] = "absent"
+        payload["operational"]["automation"]["execution"] = "not_established"
+        with mock.patch.object(operations, "status_payload", return_value=payload), mock.patch.object(operations, "_config_snapshot", return_value=SimpleNamespace(domain="vault.example.invalid")), mock.patch.object(operations, "_local_https", return_value={"status": "PASS", "message": "loopback"}):
+            self.assertEqual(operations.readiness_payload()["overall"], "HOLD")
+
+    def test_disabled_admin_tls_requires_404(self):
+        config = SimpleNamespace(domain="vault.example.invalid")
+        with mock.patch.object(operations.subprocess, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, "200", ""),
+            subprocess.CompletedProcess([], 0, "200", ""),
+            subprocess.CompletedProcess([], 0, "404", ""),
+        ]) as run:
+            self.assertEqual(operations._local_https(config, {"status": "PASS", "message": "disabled at Caddy"})["status"], "PASS")
+        self.assertEqual(run.call_count, 3)
+        with mock.patch.object(operations.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "302", "")):
+            self.assertEqual(operations._local_https(config, {"status": "PASS", "message": "protected"})["status"], "FAIL")
 
     def test_independent_job_result_does_not_claim_default_success(self):
         unit = {"load_state": "loaded", "active_state": "inactive", "result": "success"}

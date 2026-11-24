@@ -617,7 +617,7 @@ class UpdateStatusTests(unittest.TestCase):
     def test_public_update_status_snapshot_has_no_private_update_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "update-check.json"
-            path.write_text(json.dumps({"checked_at": 100, "candidate": "2.0", "available": True, "error": None}), encoding="utf-8")
+            path.write_text(json.dumps({"schema_version": 1, "current": "1.0", "checked_at": 100, "candidate": "2.0", "available": True, "error": None}), encoding="utf-8")
             with mock.patch("vaultwarden_oci.update_status.cli.load_versions", return_value=mock.Mock(version="1.0")):
                 payload = update_status.snapshot(path=path, now=200)
         self.assertEqual(payload["installed"], "1.0")

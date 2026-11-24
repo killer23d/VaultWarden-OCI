@@ -159,10 +159,10 @@ def attestation_current(paths: edge.EdgePaths, runner: edge.Runner) -> bool:
     invocation = edge._service_invocation_id(runner)
     if invocation is None:
         return False
-    payload = _load_attestation(paths)
-    if payload is None:
-        return False
     try:
+        payload = _load_attestation(paths)
+        if payload is None:
+            return False
         digest = _config_digest(paths)
     except WorkerPolicyError:
         return False

@@ -116,7 +116,13 @@ def _recovery_line(payload: dict[str, object], kind: str) -> str:
     history = row.get("historical_receipt") if kind == "offsite" else row
     age = history.get("age_seconds") if isinstance(history, dict) else None
     color = STYLE.success if state == "current" else STYLE.failure if state == "failed" else STYLE.warning
-    return color(f"{state.replace('_', ' ')} receipt age={_fmt_age(age)}")
+    detail = ""
+    if kind == "offsite":
+        destination = backup.get("destination_state", "not_established")
+        if destination != "configured_locally":
+            color = STYLE.warning
+        detail = f"; destination {str(destination).replace('_', ' ')}; connectivity unverified"
+    return color(f"{state.replace('_', ' ')} receipt age={_fmt_age(age)}{detail}")
 
 
 def _doctor_check(payload: dict[str, object], check_id: str) -> str:
@@ -191,6 +197,11 @@ def draw_status(payload: dict[str, object]) -> None:
             timer_text = STYLE.failure(f"{healthy}/{expected} healthy — ATTENTION")
     else:
         timer_text = STYLE.failure("unknown")
+    auto = operational.get("automation") if isinstance(operational, dict) else None
+    if isinstance(auto, dict):
+        persistence = str(auto.get("boot_persistence", "unknown")).replace("_", " ")
+        execution = str(auto.get("execution", "unknown")).replace("_", " ")
+        timer_text += f" | boot {persistence} | execution {execution}"
     print(f" {STYLE.bold('Automation:')} {timer_text}")
     mail = operational.get("notification") if isinstance(operational, dict) else None
     if isinstance(mail, dict):

@@ -274,8 +274,8 @@ def _doctor_group(checks: Sequence[cli.DoctorCheck], prefix: str) -> dict[str, o
     }
 
 
-def _update_status() -> dict[str, object]:
-    return update_status.snapshot(now=_now())
+def _update_status(*, storage_ok: bool = True) -> dict[str, object]:
+    return update_status.snapshot(now=_now(), state_verified=storage_ok)
 
 
 def _object(value: object) -> dict[str, object]:
@@ -364,10 +364,16 @@ def _backup_evidence(
         offsite_state = "never_verified"
     else:
         offsite_state = "unknown"
+    destination_state = "not_configured" if policy == "local_only" else "not_established"
+    if storage_ok and remote:
+        ok, _ = recovery.rclone_local_diagnostics(remote)
+        destination_state = "configured_locally" if ok else "not_established"
     job = _object(jobs.get("vaultwarden-oci-backup.service"))
     return {
         "policy": policy,
         "destination": remote,
+        "destination_state": destination_state,
+        "destination_connectivity": "not_established",
         "local": local,
         "offsite": {"state": offsite_state, "historical_receipt": offsite_history},
         "scheduled_job": job.get("state", "unknown"),
@@ -402,9 +408,38 @@ def _notification_evidence(
     }
 
 
+# Keep the legacy timer exit contract separate from execution evidence.
+_REQUIRED_JOBS = tuple(unit.removesuffix(".timer") + ".service" for unit in TIMER_UNITS) + tuple(
+    auxiliary for units in TIMER_AUXILIARY_UNITS.values() for auxiliary in units
+)
+
+
+def _automation_evidence(payload: dict[str, object], jobs: dict[str, object]) -> dict[str, object]:
+    automation = _object(payload.get("automation"))
+    enabled = _object(automation.get("target")).get("enabled")
+    persistence = (
+        "persistent" if enabled == "enabled" else "runtime_only" if enabled == "enabled-runtime"
+        else "disabled" if enabled in {"disabled", "masked", "masked-runtime", "static"} else "unknown"
+    )
+    timers = payload.get("timers")
+    rows = {row.get("unit"): row for row in timers if isinstance(row, dict)} if isinstance(timers, list) else {}
+    masked = [name for name in TIMER_UNITS if _object(rows.get(name)).get("enabled") in {"masked", "masked-runtime"}]
+    states = {name: _object(jobs.get(name)).get("state", "unknown") for name in _REQUIRED_JOBS}
+    failed = [name for name, state in states.items() if state == "failed"]
+    pending = [name for name, state in states.items() if state not in {"success_recorded", "failed"}]
+    return {
+        "activation": automation.get("overall", "UNKNOWN"),
+        "boot_persistence": persistence,
+        "masked_timers": masked,
+        "execution": "failed" if failed else "not_established" if pending else "success_recorded",
+        "failed_jobs": failed, "unverified_jobs": pending,
+    }
+
+
 def _operational_classification(
     payload: dict[str, object], backup: dict[str, object], guard: dict[str, str],
     mail: dict[str, object], config: runtime.RuntimeConfig | None,
+    automation_evidence: dict[str, object],
 ) -> dict[str, object]:
     storage_state = _object(payload.get("storage")).get("state")
     runtime_state = _object(payload.get("runtime")).get("overall")
@@ -413,22 +448,32 @@ def _operational_classification(
         return {"state": "CRITICAL", "reason": "dedicated storage is not verified; persistent evidence cannot be trusted"}
     if guard["state"] != "absent":
         return {"state": "RECOVERY REQUIRED", "reason": guard["detail"]}
-    if doctor_state == "FAIL" or runtime_state not in {"running", "stopped"}:
-        return {"state": "CRITICAL", "reason": "doctor or runtime reports failure or unavailable state"}
-    if config is None:
-        return {"state": "SETUP INCOMPLETE", "reason": "valid operator configuration is not established"}
+    checks = _object(payload.get("doctor")).get("checks")
+    failed = [str(row.get("id")) for row in checks if isinstance(row, dict) and row.get("status") == "FAIL"] if isinstance(checks, list) else []
+    if failed or doctor_state == "FAIL" or runtime_state not in {"running", "stopped"}:
+        return {"state": "CRITICAL", "reason": "doctor or runtime reports failure or unavailable state"
+                + (": " + ", ".join(failed) if failed else "")}
+    missing = [check for check in _REQUIRED_FOUNDATIONS if _check_status(payload, check) != "PASS"]
     if runtime_state == "stopped":
+        if config is None or any(check in missing for check in ("config.toml", "runtime.paths", "secrets.custody", "secrets.decrypt")):
+            return {"state": "SETUP INCOMPLETE", "reason": "stopped stack with unestablished setup foundations; intent is unknown"}
         return {"state": "MAINTENANCE / STOPPED", "reason": "services are stopped; administrator intent is unknown"}
     attention: list[str] = []
-    if _object(payload.get("automation")).get("overall") != "PASS":
+    if config is None or missing or doctor_state not in {"PASS", "WARN"}:
+        attention.append("required foundations not established: " + (", ".join(missing) or "configuration or diagnostics"))
+    if automation_evidence.get("activation") != "PASS":
         attention.append("required automation is not healthy")
+    if automation_evidence.get("boot_persistence") != "persistent" or automation_evidence.get("masked_timers"):
+        attention.append("persistent boot automation is not established")
+    if automation_evidence.get("execution") != "success_recorded":
+        attention.append("required service execution needs attention")
     if _object(backup.get("local")).get("state") != "current":
         attention.append("current verified local backup receipt is not established")
     if backup.get("scheduled_job") == "failed":
         attention.append("scheduled backup service reported failure")
     if backup.get("policy") == "offsite_enabled" and (
         _object(backup.get("offsite")).get("state") != "current"
-        or _check_status(payload, "recovery.rclone") != "PASS"
+        or backup.get("destination_state") != "configured_locally"
     ):
         attention.append("configured offsite protection needs attention")
     update = _object(payload.get("update"))
@@ -436,7 +481,7 @@ def _operational_classification(
         attention.append("update check needs attention")
     if mail.get("operational_route") == "attention" or (
         mail.get("operational_route") == "configured"
-        and _object(mail.get("delivery_history")).get("state") in {"warning", "failure", "unknown"}
+        and _object(mail.get("delivery_history")).get("state") != "success"
     ):
         attention.append("operational notifications need attention")
     if payload.get("reboot_required") or storage_state == "warning":
@@ -459,24 +504,31 @@ def operational_snapshot(payload: dict[str, object]) -> dict[str, object]:
     )
     mail = _notification_evidence(config, payload, storage_ok)
     boot = _systemd_properties("vaultwarden-oci-crowdsec-boot.service")
+    automation = _automation_evidence(payload, jobs)
     return {
-        **_operational_classification(payload, backup, guard, mail, config),
+        **_operational_classification(payload, backup, guard, mail, config, automation),
+        "automation": automation,
         "backup": backup,
         "update_guard": guard,
         "notification": mail,
         "jobs": jobs,
         "crowdsec": {
             "boot_reconciliation": {**boot, "state": _job_result(boot)},
-            "worker": edge.worker_invocation_snapshot(),
+            "worker": edge.worker_invocation_snapshot() if storage_ok else {
+                "invocation_observed": None, "fail_open_confirmation": "not_established",
+            },
         },
         "maintenance_intent": "unknown",
     }
 
 
 def status_payload() -> dict[str, object]:
-    runtime_overall, service_rows = runtime.status()
-    doctor_checks = cli.doctor_checks()
     storage_state = _storage_status()
+    storage_ok = storage_state.get("state") in {"ok", "warning"}
+    runtime_overall, service_rows = runtime.status()
+    doctor_checks = cli.doctor_checks() if storage_ok else cli.doctor_checks(persistent_state_verified=False)
+    if not storage_ok:
+        doctor_checks = [check for check in doctor_checks if check.check_id != "storage.dedicated"]
     if not any(check.check_id == "storage.dedicated" for check in doctor_checks):
         storage_check = cli.DoctorCheck(
             "storage.dedicated",
@@ -499,7 +551,10 @@ def status_payload() -> dict[str, object]:
         "runtime": {"overall": runtime_overall, "services": service_rows},
         "doctor": cli.doctor_payload(doctor_checks),
         "storage": storage_state,
-        "recovery": _recovery_status(),
+        "recovery": _recovery_status() if storage_ok else [
+            {"kind": kind, "state": "unknown", "verified_at": "-", "location": "-", "age_seconds": None, "stale": True}
+            for kind in ("local", "offsite")
+        ],
         "rclone": _check(doctor_checks, "recovery.rclone"),
         "edge": _doctor_group(doctor_checks, "edge."),
         "crowdsec": _doctor_group(doctor_checks, "crowdsec."),
@@ -512,8 +567,10 @@ def status_payload() -> dict[str, object]:
             "expected": automation["expected"],
         },
         "failed_timers": failed_timers,
-        "notification": dict(notification.status_row()),
-        "update": _update_status(),
+        "notification": dict(notification.status_row()) if storage_ok else {
+            "kind": "notification", "state": "unknown", "transport": "-", "detail": "dedicated storage is not verified",
+        },
+        "update": _update_status(storage_ok=storage_ok),
         "reboot_required": Path("/var/run/reboot-required").exists(),
     }
     payload["operational"] = operational_snapshot(payload)
@@ -582,8 +639,8 @@ def readiness_payload() -> dict[str, object]:
     guard = _object(operational.get("update_guard"))
     backup = _object(operational.get("backup"))
     local = _object(backup.get("local"))
-    auto = _object(payload.get("automation")).get("overall")
-    config = _config_snapshot() if storage_ok and runtime_ok else None
+    auto = _object(operational.get("automation"))
+    config = _config_snapshot() if storage_ok and runtime_ok and guard.get("state") == "absent" else None
     tls = (
         _local_https(config, _object(payload.get("admin")))
         if config is not None else {"status": "UNKNOWN", "message": "verified storage, valid config and running stack required"}
@@ -591,20 +648,30 @@ def readiness_payload() -> dict[str, object]:
     required.extend((
         {"id": "runtime.running", "status": "PASS" if runtime_ok else "FAIL", "message": "running stack required"},
         {"id": "update.guard", "status": "PASS" if guard.get("state") == "absent" else "FAIL", "message": guard.get("detail", "guard not established")},
-        {"id": "automation.required", "status": "PASS" if auto == "PASS" else "FAIL", "message": "enabled target and active healthy required timers"},
-        {"id": "recovery.local_receipt", "status": "PASS" if local.get("state") == "current" else "WARN", "message": "current local receipt and recorded file size; no fresh cryptographic verification"},
+        {"id": "automation.required", "status": "PASS" if auto.get("activation") == "PASS" else "FAIL", "message": "active target and required timers"},
+        {"id": "automation.persistence", "status": "PASS" if auto.get("boot_persistence") == "persistent" and not auto.get("masked_timers") else "FAIL", "message": "persistent target enablement and unmasked timers required"},
+        {"id": "automation.execution", "status": "PASS" if auto.get("execution") == "success_recorded" else "FAIL" if auto.get("execution") == "failed" else "UNKNOWN", "message": "required service completion records; includes independent DNS service"},
+        {"id": "recovery.local_receipt", "status": "PASS" if local.get("state") == "current" else "FAIL" if local.get("state") == "failed" else "WARN", "message": "current local receipt and recorded file size; no fresh cryptographic verification"},
         {"id": "https.loopback", **tls},
     ))
+    if not storage_ok:
+        required = [row if row["id"] != "storage.dedicated" else {
+            "id": "storage.dedicated", "status": "FAIL", "message": "dedicated storage is not verified",
+        } for row in required]
     # Include every real doctor failure even if it belongs to an optional feature.
     required.extend(dict(row) for key, row in by_id.items() if key not in _REQUIRED_FOUNDATIONS and row.get("status") == "FAIL")
     mail = _object(operational.get("notification"))
     recommended = [
-        {"id": "recovery.offsite", "state": _object(backup.get("offsite")).get("state", "unknown")},
+        {"id": "recovery.offsite", "state": _object(backup.get("offsite")).get("state", "unknown"),
+         "destination_state": backup.get("destination_state", "not_established"),
+         "destination_connectivity": "not_established"},
         {"id": "notification.operational", "state": mail.get("operational_route", "unknown")},
         {"id": "update.check", "state": _object(payload.get("update")).get("check_state", "unknown")},
         {"id": "crowdsec.boot_reconciliation", "state": _object(_object(operational.get("crowdsec")).get("boot_reconciliation")).get("enabled", "unknown")},
     ]
     statuses = {row.get("status") for row in required}
+    if _object(payload.get("doctor")).get("overall") == "FAIL":
+        statuses.add("FAIL")
     return {
         "schema_version": 1,
         "overall": "FAIL" if "FAIL" in statuses else "PASS" if statuses == {"PASS"} else "HOLD",

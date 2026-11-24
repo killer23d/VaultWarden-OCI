@@ -304,6 +304,7 @@ def doctor_checks(
     versions_path: Path = DEFAULT_VERSIONS_PATH,
     os_release_path: Path = OS_RELEASE_PATH,
     machine: str | None = None,
+    persistent_state_verified: bool = True,
 ) -> list[DoctorCheck]:
     try:
         release = read_os_release(os_release_path)
@@ -353,6 +354,7 @@ def doctor_checks(
     notification_checks = notification.doctor_checks(
         config=config if config is not None else notification_config,
         secret_values=secret_values,
+        **({} if persistent_state_verified else {"state_verified": False}),
     )
     if config is None and notification_config is not None:
         provider_check = next(
@@ -374,8 +376,8 @@ def doctor_checks(
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
         *notification_checks,
-        *edge.doctor_checks(),
-        *recovery.doctor_checks(),
+        *edge.doctor_checks(**({} if persistent_state_verified else {"state_verified": False})),
+        *recovery.doctor_checks(**({} if persistent_state_verified else {"state_verified": False})),
     ]
 
 

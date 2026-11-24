@@ -23,8 +23,9 @@ def snapshot(
     *,
     path: Path = update_appliance.UPDATE_STATE,
     now: float | None = None,
+    state_verified: bool = True,
 ) -> dict[str, object]:
-    state = load(path)
+    state = load(path) if state_verified else {}
     checked = state.get("checked_at")
     current_time = time.time() if now is None else float(now)
     age = (
@@ -45,7 +46,10 @@ def snapshot(
         and isinstance(state.get("available"), bool)
         and (state.get("candidate") is None or isinstance(state.get("candidate"), str))
         and (state.get("error") is None or isinstance(state.get("error"), str))
-        and (state.get("available") is not True or bool(state.get("candidate")))
+        and (reason is None or isinstance(reason, str))
+        and (state.get("available") is not True or (
+            bool(state.get("candidate")) and state.get("candidate") != recorded_current and not state.get("error")
+        ))
         and installed != "unknown"
     )
     if not valid or age is None:
@@ -60,7 +64,8 @@ def snapshot(
         "installed": installed,
         "checked_at": checked if isinstance(checked, int) and not isinstance(checked, bool) else None,
         "check_age_seconds": age,
-        "check_stale": stale or (isinstance(recorded_current, str) and recorded_current != installed),
+        "check_stale": not valid or stale or recorded_current != installed,
+        "state_verified": state_verified,
         "check_state": check_state,
         "candidate": state.get("candidate"),
         "available": state.get("available") is True,

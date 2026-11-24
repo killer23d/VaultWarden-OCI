@@ -1501,6 +1501,7 @@ def doctor_checks(
     paths: EdgePaths = EdgePaths(),
     runner: Runner = run_command,
     now: int | None = None,
+    state_verified: bool = True,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     try:
@@ -1545,6 +1546,8 @@ def doctor_checks(
     ))
     policy: CloudflarePolicy | None = None
     try:
+        if not state_verified:
+            raise EdgeError("dedicated storage is not verified; Cloudflare range evidence not inspected")
         policy = load_lkg(paths.lkg, now=now)
     except EdgeError as exc:
         checks.append(DoctorCheck("edge.cloudflare.cidrs", "FAIL", str(exc)))
@@ -1593,7 +1596,7 @@ def doctor_checks(
     config_test = runner([BOUNCER_BINARY, "-c", str(paths.remediation_config), "-t"])
     bouncer = runner(["cscli", "bouncers", "inspect", BOUNCER_ID, "-o", "json"])
     invocation = _service_invocation_id(runner) if active else None
-    confirmed = _fail_open_confirmed(paths.fail_open_confirmation, invocation)
+    confirmed = state_verified and _fail_open_confirmed(paths.fail_open_confirmation, invocation)
     if active and disabled and config_test.ok and bouncer.ok and confirmed:
         checks.append(DoctorCheck("crowdsec.cloudflare", "PASS", "Cloudflare Worker bouncer is active, boot-disabled, and Fail Open is confirmed for this invocation (manual or verified API readback)"))
     elif active and disabled and config_test.ok and bouncer.ok:
@@ -1603,6 +1606,9 @@ def doctor_checks(
 
     # Keep the source-policy proof in the canonical doctor owner so direct
     # callers and every presentation layer see the same result.
+    if not state_verified:
+        # The Worker check already fails closed; do not read an untrusted attestation.
+        return checks
     from . import crowdsec_worker_policy
 
     return crowdsec_worker_policy.enforce_doctor_checks(
