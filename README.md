@@ -47,6 +47,7 @@ VaultWarden-OCI installs [Vaultwarden](https://github.com/dani-garcia/vaultwarde
 | --- | --- |
 | Open the administrator console | `sudo vwctl menu` |
 | Choose an available guided operation | `sudo vwctl guide` |
+| Continue first-run installation and safe activation | `sudo vwctl guide setup` |
 | Overall status | `sudo vwctl status` |
 | Find failed checks | `sudo vwctl doctor --json` |
 | Check Cloudflare DNS | `sudo vwctl dns status` |

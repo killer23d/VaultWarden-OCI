@@ -72,6 +72,7 @@ sudo vwctl guide
 sudo vwctl guide restore
 sudo vwctl guide offsite
 sudo vwctl guide recovery-kit
+sudo vwctl guide setup
 ```
 
 These entries explain purpose, prerequisites, impact, and verification before
@@ -83,9 +84,11 @@ calling existing guided owners:
 | `offsite` | `vwctl recovery offsite configure` | Configure root's rclone first, select the intended folder, and type `ENABLE` to save it. Check offsite status, then create and verify a recovery point when authorized. |
 | `recovery-kit` | `vwctl recovery-kit export` | Supply the existing offline identity through its protected chooser and enter an independent ZIP passphrase. Email has separate consent. Keep the verified kit off-host and its passphrase separately. |
 
+| `setup` | Existing setup, credential, recovery, security, lifecycle, DNS, backup and systemd owners | Continue first-run installation from observed state. Separate custody, SMTP, DNS and automation consent; see [Install](INSTALL.md). Already activated appliances only review readiness. |
+
 Opening a guide does not authorize its changes. The original CLI forms and their
-noninteractive arguments remain available. No setup, update, security, or
-automation wizard is implied by this selector; use the relevant menu and manual
+noninteractive arguments remain available. The first-run guide is not a general
+security, automation or update repair wizard; use the relevant menu and manual
 for those operations. Local verification or a sent email does not establish
 independent off-host custody or successful disaster recovery.
 

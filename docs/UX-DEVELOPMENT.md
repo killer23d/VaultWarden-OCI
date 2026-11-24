@@ -340,6 +340,42 @@ release-neutral documentation audit on this record's baseline-branch wording,
 not the tests. Corrected wording without relaxing the audit. The post-install
 guide and its dedicated acceptance remain outstanding. Overall HOLD.
 
+### UX-03 installed continuation remediation
+
+The implementation adds the installed `vwctl guide setup` route and dashboard
+discovery, using current authoritative status, Doctor, readiness, existing
+credential and recovery-kit owners, invocation-bound Worker policy, DNS
+publication and systemd. No workflow state database, new service, upstream pin
+refresh or release publication. Project candidate identity remains rc.19.
+A retained exact protected offline identity is exported with the recovery-kit
+owner and cleaned only following verified export and explicit custody consent;
+otherwise ambiguous custody is HOLD. SMTP transport and administrator mailbox
+acknowledgment remain distinct. Origin and Worker policy must pass before
+supported first start. The specific pre-start partial-runtime diagnostic is
+not relabelled; post-start Doctor and trusted loopback HTTPS must pass.
+A separate pre-activation gate excludes only the subsequent automation checks,
+not genuine local foundation failures. DNS publication is explicit and bound
+to the observed record under the existing owner lock; scheduled DNS writes
+require separate activation consent. Remote publication/pruning are outside
+the first-run guide. Existing activated appliances receive read-only readiness.
+
+The documentation-only correction
+`aefe5c0d747446c0116f55f80fadafe18b07e91c` passed
+[CI 45497014803](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45497014803)
+9/9. The integrated guide checkpoint
+`47d19bc5a3250d1ea24edeb787af9b0a59cc35be` exposed obsolete
+guidance/CLI assertions in
+[CI 45497280289](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45497280289);
+684 tests ran with one failure and three errors. Reconciled those tests to
+the new supported guide and stricter first-start/activation sequence; added
+mocked owner sequencing, cancellation, TLS, backup, DNS-plan and manual
+Worker invocation drift regressions at
+`db234a409682c08927070352a573303be85c5b44`.
+Exact final-head focused/full test and CI conclusions must be independently
+verified. Native first-run and activation acceptance are NOT RUN; the
+existing activated VM9 baseline cannot substitute for a blank-host install.
+No reset, deployment, merge or subsequent stage authorized. **HOLD.**
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,
