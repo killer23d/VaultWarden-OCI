@@ -59,7 +59,8 @@ class GuidedSiteInputTests(unittest.TestCase):
     def test_auto_dry_run_and_headless_keep_required_argument_contract(self):
         for tty, args in ((True, ["install", "--auto"]), (True, ["install", "--dry-run"]),
                           (False, ["install"]), (False, ["install", "--auto"])):
-            with self.subTest(tty=tty, args=args), (
+            with (
+                self.subTest(tty=tty, args=args),
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=tty),
                 mock.patch("builtins.input") as prompt,
                 mock.patch.object(setup.storage, "provision") as provision,
@@ -75,7 +76,8 @@ class GuidedSiteInputTests(unittest.TestCase):
 
     def test_cancel_before_any_install_owner_call(self):
         for side_effect in ([""], EOFError, KeyboardInterrupt):
-            with self.subTest(response=side_effect), (
+            with (
+                self.subTest(response=side_effect),
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
                 mock.patch("builtins.input", side_effect=side_effect),
                 mock.patch.object(setup, "main") as owner,
@@ -91,7 +93,8 @@ class GuidedSiteInputTests(unittest.TestCase):
                        ["example.net", "https://other.example.net", "admin@example.net"],
                        ["example.net", "https://vault.example.net", "bad-email"],
                        ["example.net", "https://vault.example.net:invalid", "admin@example.net"]):
-            with self.subTest(values=values), (
+            with (
+                self.subTest(values=values),
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
                 mock.patch("builtins.input", side_effect=values),
                 mock.patch.object(setup, "main") as owner,
