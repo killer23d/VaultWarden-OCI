@@ -240,7 +240,7 @@ unperformed-validation statements above, not their original provenance.
   The accepted `v3` commit
   [8cbe7bd00131990420f5bb82e4b4211376b7d761](https://github.com/killer23d/VaultWarden-OCI/commit/8cbe7bd00131990420f5bb82e4b4211376b7d761)
   independently has exactly the accepted base as sole parent and the exact
-  reviewed tree. Preserved `v2` remains
+  reviewed tree. The preserved baseline branch remains
   `03c3437b2191b052534718d94e2ce96f129c62aa`; default `main` remains
   `16dc4c82a57234f8de8b54aa709a8ef32831f4e6`.
 - Reviewed-head [push CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45474258129)
@@ -326,6 +326,19 @@ and exact-candidate native fresh-install acceptance remain outstanding.
 Focused and complete regression execution, CI and live candidate
 acceptance are NOT RUN at the time of this source commit; verify the
 exact head externally. No merge or UX-04 authorized.
+
+### UX-03 compilation remediation
+
+[Initial candidate CI 45495586823](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45495586823)
+failed Python compilation in three jobs due to invalid context manager syntax
+in the new focused test file. Corrected in
+`2d112cd656422e81c6e3c73dd5ccb17ca15c8681`.
+[Fix-head CI 45496313578](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45496313578)
+ran all 673 unit tests successfully (11 new focused tests included);
+8/9 jobs passed including native ARM64 CI. Quality-unit failed the existing
+release-neutral documentation audit on this record's baseline-branch wording,
+not the tests. Corrected wording without relaxing the audit. The post-install
+guide and its dedicated acceptance remain outstanding. Overall HOLD.
 
 ### UX-02 representative terminal transcripts
 
