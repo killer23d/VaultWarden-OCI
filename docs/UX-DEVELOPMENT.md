@@ -539,20 +539,33 @@ claimed. Native machine readiness and positive-path installation,
 continuation and activation acceptance PASS. No further runtime changes
 or repeated timer execution indicated.
 
-**Stage disposition remains HOLD pending administrator scope decision.**
+**Native acceptance PASS; administrator test-scope decision recorded.**
 Actual live PUBLISH refusal and deliberately interrupted retained-key
-export variants are NOT RUN; prior native early guide refusal and
+export variants remain NOT RUN; prior native early guide refusal and
 observed-state continuation, normal custody cleanup, unchanged DNS
 before explicit publication and existing automated coverage are distinct
 evidence. Existing filesystem adoption and explicit-recipient handling
-have automated coverage. Do not undo successful VM10 custody or DNS
-solely to manufacture missing variants. Administrator may explicitly
-accept the automated negative-path coverage in lieu of additional native
-variants, or require a separate disposable isolated test. This is not
-an implicit waiver, stage PASS, deployment approval or authorization
-to merge. Final review requires exact documentation-head CI, documented
-scope decision and explicit exact-head squash authorization; preserve
-v2 and default main, do not begin UX-04.
+have automated coverage. The administrator explicitly accepted the
+remaining live negative-path test limitations in lieu of further
+native variants, based on existing automated coverage and completed
+native acceptance. Do not undo successful VM10 custody or DNS solely
+to manufacture missing variants. This decision is not production
+deployment approval. No further native testing required under the
+accepted scope.
+
+Final CI review of the administrator's authorized documentation head
+`3499dd5f87f30bf8629692620062c9aad07e1efe`: both quality-unit jobs
+([push 45509581258](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509581258),
+[PR 45509592003](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509592003))
+passed 692 unit tests but failed the release-neutral documentation audit
+on the literal preserved baseline branch name in this record. The
+administrator's authorization was conditional on successful CI at that
+exact head, so no merge was performed. Corrected the wording here and
+recorded the scope decision without changing executable sources,
+tests, version manifest, unit files or CI audit rules. Stage HOLD
+pending successful CI for the corrected documentation head and
+explicit renewed exact-head squash authorization. Preserve the
+baseline and default branches; do not begin UX-04.
 
 ### UX-02 representative terminal transcripts
 
