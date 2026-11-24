@@ -135,8 +135,8 @@ def _automation_enable_action() -> str | None:
     if target.get("enabled") in {"enabled", "enabled-runtime"} and target.get("active_state") == "active":
         return None
     return (
-        "ACTION: enable persistent appliance automation with "
-        "'sudo systemctl enable --now vaultwarden-oci.target', then run 'sudo vwctl timers'."
+        "ACTION: review first-run prerequisites with 'sudo vwctl guide setup' before enabling persistent appliance automation; "
+        "the health timer also authorizes ongoing DNS synchronization."
     )
 
 
@@ -182,9 +182,8 @@ def _completion_guidance(args: Sequence[str], code: int) -> None:
         if action is not None:
             print(
                 "ACTION: create and verify the first application recovery point with 'sudo vwctl backup', "
-                "then run the post-start acceptance check with 'sudo vwctl doctor'; after both succeed, "
-                "enable persistent appliance automation with 'sudo systemctl enable --now vaultwarden-oci.target' "
-                "and run 'sudo vwctl timers'."
+                "then review Doctor, trusted local HTTPS, custody and DNS publication with 'sudo vwctl guide setup' before you "
+                "enable persistent appliance automation; scheduled DNS synchronization can change public traffic."
             )
     elif args[:1] == ["timers"] and code != 0:
         action = _automation_enable_action()

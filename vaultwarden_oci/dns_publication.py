@@ -315,6 +315,7 @@ def status(
 def update(
     *,
     dry_run: bool = False,
+    expected_before: DNSState | None = None,
     fetcher: TextFetcher = _http_text,
     requester: Requester = _read_url,
 ) -> DNSUpdateResult:
@@ -328,6 +329,8 @@ def update(
             zone_id=zone_id,
             requester=requester,
         )
+        if expected_before is not None and before != expected_before:
+            raise DNSError("DNS state changed since the authorized plan; inspect and authorize again")
         if not before.proxied:
             raise DNSError(
                 f"{domain} A record is DNS-only; set it to Proxied in Cloudflare before DNS automation"

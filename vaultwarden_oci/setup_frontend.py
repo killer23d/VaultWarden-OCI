@@ -248,6 +248,8 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     """Print the supported first-run path in the order a fresh host can satisfy it."""
     ui = _ui()
     ui.header("Next actions")
+    ui.action("continue the installed first-run workflow with: sudo vwctl guide setup")
+    ui.info("The guide observes current state, requires separate recovery custody and DNS/automation consent, and never generates another offline identity.")
     if not credentials_ready:
         ui.action(
             "complete remaining Cloudflare/SMTP credentials with: sudo vwctl config edit && sudo vwctl secrets edit; "
@@ -262,10 +264,10 @@ def _print_post_handoff_next_actions(*, credentials_ready: bool = True) -> None:
     ui.action("set every bouncer-created Worker Route to Fail Open in Cloudflare")
     ui.action("then run: sudo vwctl crowdsec confirm-fail-open")
     ui.action("run: sudo vwctl start")
-    ui.action("after start is healthy, run: sudo vwctl dns update to publish the configured hostname to this host")
+    ui.action("after start, verify Doctor and trusted local HTTPS; separately authorize sudo vwctl dns update before publishing traffic")
     ui.action("run: sudo vwctl backup to create and verify the first application recovery point")
     ui.action("run: sudo vwctl doctor after start has materialized the runtime and Cloudflare origin policy")
-    ui.action("enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
+    ui.action("only after verified backup, healthy foundations and explicit consent to ongoing DNS writes, enable persistent automation with: sudo systemctl enable --now vaultwarden-oci.target")
     ui.action("run: sudo vwctl timers")
     ui.action("run: sudo vwctl update check to seed the initial update-status snapshot")
     ui.info("A post-start doctor WARN for unconfigured offsite/rclone recovery is expected until offsite application recovery is configured; any FAIL still requires action.")
@@ -339,6 +341,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.action("Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
         _print_post_handoff_next_actions(credentials_ready=True)
         return 0
+    except (KeyboardInterrupt, EOFError):
+        ui.warn("setup interrupted; installation and custody completion are not established", file=sys.stderr)
+        if identity is not None and identity.exists():
+            ui.action(f"Secure the existing transient offline identity at {identity} before reboot; do not generate a replacement.", file=sys.stderr)
+        return 2
     except (
         SetupFrontendError,
         notification.NotificationError,
