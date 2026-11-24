@@ -179,14 +179,14 @@ The authoritative read model, CLI machine contracts and systemd units are unchan
 
 The grouped [native console instrument](../tests/host-acceptance/dashboard-console.py)
 is prepared but **NOT RUN on a real host**. Its SHA-256 is
-`0f282ee7c8bd0dd2bee0ba9ea2d44350d2c3ae437475aa90c32ce41facdb6ba6`.
+`88114c4c411ff3ac916a477aaa10c7e50158dd6d3dca6a7655b2e4fa2f217ddd`.
 After separate host/source/scope authorization and installation of the exact
 candidate, invoke it from a fresh operator-owned checkout pinned to the reviewed
 commit supplied in the PR/handover:
 
 ```bash
 printf '%s  %s\n' \
-  '0f282ee7c8bd0dd2bee0ba9ea2d44350d2c3ae437475aa90c32ce41facdb6ba6' \
+  '88114c4c411ff3ac916a477aaa10c7e50158dd6d3dca6a7655b2e4fa2f217ddd' \
   'tests/host-acceptance/dashboard-console.py' | sha256sum --check --status
 sudo -n /usr/bin/python3 -B -I tests/host-acceptance/dashboard-console.py \
   --expected-host 'APPROVED_DISPOSABLE_HOST' \
@@ -205,6 +205,25 @@ No installation, workflow consent, service activation, backup, restore, update,
 DNS/Worker mutation, email, or synthetic appliance state is performed. The normal
 console status read still runs its existing local diagnostics. A failed or
 unperformed mandatory native witness remains HOLD.
+
+### UX-02 independent acceptance-instrument review (HOLD)
+
+The previous exact head `2e876e2bc96419fe87e8e79371c63efd2be37a9b` passed the original 51 focused
+and 659 regression tests and all nine jobs in each of
+[push CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472607054) and
+[PR CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45472620646).
+Review found an acceptance-only defect: the instrument expected an absolute
+`current` link and its isolated fixture reproduced that mistake; the real
+installer and updater require `releases/<version>` relative to the install
+root. The corrected witness uses the canonical relative target and rejects
+absolute or wrong targets. It also refuses a menu smoke with an unknown
+version, incomplete/malformed outcome, or escape sequences under NO_COLOR
+and TERM=dumb. The prior instrument checksum `0f282ee7c8bd0dd2bee0ba9ea2d44350d2c3ae437475aa90c32ce41facdb6ba6` is superseded;
+the updated command above pins the corrected instrument. No application,
+manifest, unit, launcher or dependency bytes change. Final remediation-head
+CI and focused/full results are recorded independently in PR #445. Native
+OCI acceptance remains NOT RUN / HOLD until the exact installed source is
+witnessed on an explicitly approved disposable host. UX-05-F01 remains open.
 
 ### UX-02 representative terminal transcripts
 

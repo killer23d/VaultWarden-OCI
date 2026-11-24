@@ -37,7 +37,7 @@ def isolated_install(*, frozen=False):
                 update_versions.resolve_pinned(ROOT, machine="aarch64")), encoding="utf-8")
         install._make_release_immutable(selected)
         current, launcher = root / "current", root / "vwctl"
-        current.symlink_to(selected)
+        current.symlink_to(Path("releases") / selected.name)
         launcher.symlink_to(current / "vwctl")
         units = root / "units"
         units.mkdir()
@@ -121,6 +121,14 @@ class DashboardHostAcceptanceTests(unittest.TestCase):
                 self.assertEqual(kind, "canonical_arm64_frozen_manifest" if frozen else "exact_source_manifest")
                 self.assertEqual(console.snapshot([selected, install.CURRENT_LINK, install.VWCTL_LINK, install.SYSTEMD_DIR]), before)
 
+    def test_noncanonical_current_symlink_is_refused(self):
+        for absolute in (True, False):
+            with self.subTest(absolute=absolute), isolated_install() as (root, selected):
+                install.CURRENT_LINK.unlink()
+                install.CURRENT_LINK.symlink_to(selected if absolute else Path("releases") / "wrong")
+                with self.assertRaises(install.InstallError):
+                    console.verify_installation(ROOT, install, update_versions, temporary_base=root)
+
     def test_installed_file_drift_fails_before_console_execution(self):
         with isolated_install() as (root, selected):
             target = selected / "vaultwarden_oci/dashboard.py"
@@ -142,6 +150,21 @@ class DashboardHostAcceptanceTests(unittest.TestCase):
         self.assertEqual([row[2] for row in cases], [b"q\n", b"q\n", b"b\n", b"\n", b"\n", b"\n"])
         self.assertEqual([row[1][1:] for row in cases[2:]],
                          [["guide"], ["guide", "restore"], ["guide", "offsite"], ["guide", "recovery-kit"]])
+
+    def test_menu_exit_requires_complete_outcome_and_exact_version(self):
+        name, _, _, markers = console.smoke_cases(Path("/installed/vwctl"), Path("/installed/0.1.0-rc.18"))[0]
+        valid = "\n".join((markers[0], "Outcome: ATTENTION", *markers[2:]))
+        console.require_terminal_result(name, 0, valid, markers)
+        for invalid in (valid.replace("ATTENTION", "INCOMPLETE VERIFICATION"),
+                        valid.replace("0.1.0-rc.18", "unknown"),
+                        valid + "\nOutcome: OPERATIONAL",
+                        valid.replace("Outcome: ATTENTION", "Outcome: unexpected")):
+            with self.subTest(output=invalid), self.assertRaises(console.Hold):
+                console.require_terminal_result(name, 0, invalid, markers)
+
+    def test_no_color_smoke_refuses_escape_sequences(self):
+        with self.assertRaisesRegex(console.Hold, "escape sequence"):
+            console.require_terminal_result("guide_selector_back", 0, "\x1b[32mAvailable guided operations", ("Available guided operations",))
 
     def test_real_pty_supplies_only_blank_default_no(self):
         program = "import sys; assert sys.stdin.isatty() and sys.stdout.isatty(); answer=input('Continue? [y/N]: '); assert answer == ''; print('CANCELLED')"

@@ -168,7 +168,10 @@ def require_root_ownership(paths: Sequence[Path]) -> None:
 def verify_installation(source: Path, install: Any, versions: Any, *, temporary_base: Path = Path("/run")) -> tuple[Path, str, list[Path]]:
     release = install.load_versions(source / "versions.toml").version
     selected = install.RELEASES_DIR / install.validate_release_name(release)
-    for link, target in ((install.CURRENT_LINK, selected), (install.VWCTL_LINK, install.CURRENT_LINK / "vwctl")):
+    # The installer and updater publish a relative current target. Do not
+    # accept an absolute link, even if it resolves to the same directory.
+    current_target = Path("releases") / selected.name
+    for link, target in ((install.CURRENT_LINK, current_target), (install.VWCTL_LINK, install.CURRENT_LINK / "vwctl")):
         if not install._check_symlink_compatible(link, target):
             raise Hold("canonical current/launcher symlink is absent")
     if selected.is_symlink() or selected.resolve(strict=True) != selected:
@@ -255,14 +258,29 @@ def terminal(argv: Sequence[str], response: bytes, *, timeout: float = 75) -> tu
 
 
 def smoke_cases(launcher: Path, selected: Path) -> tuple[tuple[str, list[str], bytes, tuple[str, ...]], ...]:
+    menu_markers = (f"VaultWarden-OCI {selected.name} ", "Outcome:", "Availability:",
+                    "Administrator objectives", "INFO: console closed.")
     return (
-        ("canonical_menu_exit", [str(launcher), "menu"], b"q\n", ("Administrator objectives", "INFO: console closed.")),
-        ("legacy_menu_exit", ["/bin/bash", str(selected / "vaultwarden_oci/dashboard.sh")], b"q\n", ("Administrator objectives", "INFO: console closed.")),
+        ("canonical_menu_exit", [str(launcher), "menu"], b"q\n", menu_markers),
+        ("legacy_menu_exit", ["/bin/bash", str(selected / "vaultwarden_oci/dashboard.sh")], b"q\n", menu_markers),
         ("guide_selector_back", [str(launcher), "guide"], b"b\n", ("Available guided operations",)),
         *((f"guide_{workflow}_default_no", [str(launcher), "guide", workflow], b"\n",
            ("Purpose:", "Prerequisites:", "Impact and consent:", "CANCELLED: no command was started."))
           for workflow in ("restore", "offsite", "recovery-kit")),
     )
+
+
+def require_terminal_result(name: str, code: int, output: str, markers: Sequence[str]) -> None:
+    if code != 0 or any(marker not in output for marker in markers):
+        raise Hold("a console exit/default-No check did not produce its expected result")
+    if "\x1b" in output:
+        raise Hold("NO_COLOR/TERM=dumb console emitted an escape sequence")
+    if name in {"canonical_menu_exit", "legacy_menu_exit"}:
+        outcomes = [line.strip() for line in output.splitlines() if line.strip().startswith("Outcome:")]
+        allowed = {"OPERATIONAL", "ATTENTION", "CRITICAL", "RECOVERY REQUIRED",
+                   "SETUP INCOMPLETE", "MAINTENANCE / STOPPED"}
+        if len(outcomes) != 1 or outcomes[0].partition(":")[2].strip() not in allowed:
+            raise Hold("menu did not render one complete operational outcome")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -295,8 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             for name, command, response, markers in smoke_cases(install.VWCTL_LINK, selected):
                 code, output = terminal(command, response)
-                if code != 0 or any(marker not in output for marker in markers):
-                    raise Hold("a console exit/default-No check did not produce its expected result")
+                require_terminal_result(name, code, output, markers)
                 receipt["checks"].append({"name": name, "result": "PASS", "exit_code": code})
         finally:
             unchanged = snapshot(paths) == before
