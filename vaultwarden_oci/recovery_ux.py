@@ -661,6 +661,9 @@ def _restore_summary(point: RecoveryPoint, verified: recovery.VerifiedRecovery, 
     print("  - Vaultwarden application data and SQLite database")
     print("  - Caddy data and configuration state")
     print("  - operational Age custody is preserved or safely regenerated/rekeyed as required")
+    ui.warn("Changes made after this recovery point will be lost. The recovered configuration may contain a different hostname, offsite destination, and retention policy.")
+    ui.info("A cryptographic preflight does not demonstrate a successful disposable-host restore or off-host key custody.")
+    ui.warn("Review automation before restoring: existing schedules can act on recovered configuration. Restore does not pause schedules, resume them, or authorize DNS publication.")
     ui.info("Services are not stopped until the restore engine finishes staging, free-space, ownership, SQLite, and custody preflight.")
 
 
@@ -670,8 +673,11 @@ def _restore_approved(
     ui: UI,
     *,
     explicit_confirmation: bool = False,
+    isolation_check: Callable[[], None] | None = None,
 ) -> bool:
     """Require a final, deliberate authorization after selected-point preflight."""
+    if isolation_check is not None:
+        isolation_check()
     _restore_summary(point, verified, ui)
     if explicit_confirmation:
         ui.info("explicit --confirm RESTORE supplied; proceeding with the verified recovery point")
@@ -697,6 +703,8 @@ def _restored_offsite_policy_notice(
     except (runtime.RuntimeConfigError, OSError) as exc:
         ui.warn(f"restored backup policy could not be read; inspect configuration before resuming timers: {exc}")
         return
+    ui.header("Post-restore review")
+    ui.info(f"Recovered hostname: {config.domain}; configuration: {paths.config}")
     if config.offsite_remote is None:
         ui.warn("restored backup configuration is LOCAL-ONLY (backup.remote is empty)")
         ui.action("to mirror EVERY future local backup to a chosen cloud folder, run "
@@ -706,29 +714,76 @@ def _restored_offsite_policy_notice(
             f"restored backup policy: every local backup also publishes to {config.offsite_remote}; "
             f"retention local/remote={config.local_retention_days}/{config.remote_retention_days} days"
         )
-        if config.local_retention_days > 0 or config.remote_retention_days > 0:
-            ui.warn("review restored retention settings BEFORE resuming backup timers; "
-                    "positive limits can delete older recovery points after a successful backup")
+    ui.info(
+        f"Recovered retention local/remote={config.local_retention_days}/{config.remote_retention_days} days; "
+        "0 keeps recovery points indefinitely."
+    )
+    if config.local_retention_days > 0 or config.remote_retention_days > 0:
+        ui.warn("review restored retention settings BEFORE resuming backup timers; "
+                "positive limits can delete older recovery points after a successful backup")
+    ui.action("review 'sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml', 'sudo vwctl recovery offsite status', and 'sudo vwctl guide retention' before allowing new backups")
+    ui.action("inspect 'sudo vwctl status', 'sudo vwctl doctor --json', and 'sudo vwctl timers' before separately authorizing application start or automation")
+    ui.warn("Runtime health, automation readiness, public traffic and known restored vault contents require separate verification. No automation enablement or DNS publication was performed by this review.")
 
 
-def guided_restore(
+def _require_restore_isolation() -> None:
+    """Observe the existing systemd owner; never stop or resume work here."""
+    from . import operations
+
+    snapshot = operations.automation_snapshot()
+    target = snapshot.get("target")
+    timers = snapshot.get("timers")
+    boot = operations._systemd_properties("vaultwarden-oci-crowdsec-boot.service")
+
+    def inactive(row: object) -> bool:
+        return isinstance(row, dict) and row.get("load_state") == "loaded" and row.get("active_state") == "inactive"
+
+    isolated = (
+        inactive(target) and target.get("enabled") == "disabled"
+        and isinstance(timers, list) and len(timers) == len(operations.TIMER_UNITS)
+        and all(isinstance(row, dict) for row in timers)
+        and {row.get("unit") for row in timers} == set(operations.TIMER_UNITS)
+        and inactive(boot) and boot.get("enabled") == "disabled"
+    )
+    if isolated:
+        for row in timers:
+            expected_auxiliary = set(operations.TIMER_AUXILIARY_UNITS.get(row["unit"], ()))
+            auxiliaries = row.get("auxiliary_units")
+            if (
+                not inactive(row) or row.get("enabled") != "disabled"
+                or row.get("trigger_load_state") != "loaded"
+                or row.get("trigger_active_state") != "inactive"
+                or not isinstance(auxiliaries, list)
+                or not all(isinstance(item, dict) for item in auxiliaries)
+                or {item.get("unit") for item in auxiliaries} != expected_auxiliary
+                or any(not inactive(item) for item in auxiliaries)
+            ):
+                isolated = False
+                break
+    if not isolated:
+        units = " ".join((operations.AUTOMATION_TARGET, *operations.TIMER_UNITS))
+        raise RecoveryUXError(
+            "guided restore is blocked: target, timers, scheduled jobs, DNS and Worker boot re-arm must be verifiably isolated. "
+            f"After reviewing the outage, explicitly run 'sudo systemctl disable --now {units}', "
+            "then 'sudo systemctl disable vaultwarden-oci-crowdsec-boot.service'. "
+            "Wait for all in-flight jobs, including DNS and Worker boot re-arm, to finish; inspect 'sudo vwctl timers', then retry. "
+            "No schedule or live data was changed by this check."
+        )
+
+
+def _pick_recovery_point(
     *,
-    start: bool = False,
-    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
-    runner: recovery.Runner = recovery.run_command,
-    ui: UI | None = None,
-) -> int:
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        raise RecoveryUXError("guided restore requires a TTY; use --file/--from-remote and --identity for automation")
-    ui = ui or UI()
-    ui.header("Guided restore")
+    paths: recovery.RecoveryPaths,
+    runner: recovery.Runner,
+    ui: UI,
+) -> RecoveryPoint | None:
+    """Shared read-only local/recursive remote picker for verification and restore."""
     print("  1) Local recovery points")
     print("  2) Remote recovery points (rclone, including subfolders)")
     print("  q) Cancel")
     source_choice = _choice("Choose recovery source: ", 2)
     if source_choice is None:
-        ui.info("restore cancelled; no live state was changed")
-        return 0
+        return None
 
     if source_choice == 0:
         points = list_local(paths)
@@ -741,10 +796,17 @@ def guided_restore(
         remote = configured
         if configured:
             ui.info(f"Configured offsite destination: {configured}")
-            if input("Use configured destination? [Y/n]: ").strip().lower() in {"n", "no"}:
-                remote = input("Other rclone REMOTE:folder (searches subfolders): ").strip()
+            answer = input("Use configured destination? [Y/n, q to cancel]: ").strip().lower()
+            if answer in {"q", "quit", "cancel"}:
+                return None
+            if answer in {"n", "no"}:
+                remote = input("Other rclone REMOTE:folder (searches subfolders; q to cancel): ").strip()
+            elif answer not in {"", "y", "yes"}:
+                raise RecoveryUXError("choose y, n, or q for the saved destination")
         else:
-            remote = input("rclone REMOTE:folder to search (including subfolders): ").strip()
+            remote = input("rclone REMOTE:folder to search (including subfolders; q to cancel): ").strip()
+        if remote is not None and remote.lower() in {"q", "quit", "cancel"}:
+            return None
         if not remote:
             raise RecoveryUXError("remote recovery source is required")
         ui.info(f"Searching recovery points under {remote}, including subfolders...")
@@ -754,11 +816,66 @@ def guided_restore(
         if not points:
             raise RecoveryUXError(f"no remote .vwrec recovery points found under {remote} or its subfolders")
 
+    ui.info("Inventory and previous verification labels are observations, not a current offline-key recovery proof.")
     selected_index = _choice("Choose recovery point number (or q to cancel): ", len(points))
-    if selected_index is None:
+    return None if selected_index is None else points[selected_index]
+
+
+def guided_verify(
+    *,
+    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
+    runner: recovery.Runner = recovery.run_command,
+    ui: UI | None = None,
+) -> int:
+    if not _interactive_tty():
+        raise RecoveryUXError("guided verification requires a TTY; use --file/--from-remote and --identity for automation")
+    ui = ui or UI()
+    ui.header("Verify recovery without replacing live state")
+    ui.info("Choose one encrypted recovery point and its matching offline identity or encrypted recovery kit.")
+    ui.info("This reads/decrypts a temporary copy and records verification history; it does not stop services or replace live configuration/data.")
+    point = _pick_recovery_point(paths=paths, runner=runner, ui=ui)
+    if point is None:
+        ui.info("recovery verification cancelled; no live state was changed")
+        return 0
+    with _offline_identity_for_command(None, option_name="--identity", paths=paths, runner=runner, ui=ui) as identity:
+        if identity is None:
+            ui.info("recovery verification cancelled; no live state was changed")
+            return 0
+        storage.verify()
+        ui.info(f"Verifying {point.location} with the offline recovery identity...")
+        if point.source == "local":
+            verified = verify_local(Path(point.location), identity, paths=paths, runner=runner)
+        else:
+            verified = verify_remote(point.location, identity, paths=paths, runner=runner)
+        ui.ok(
+            f"offline-key cryptographic recovery verified: {point.location} "
+            f"created={verified.created_at} size={verified.size} sha256={verified.sha256}"
+        )
+    ui.info("Assurance: backup existence, remote ciphertext readback, offline-key cryptographic recovery, and disposable-host recovery are separate evidence levels.")
+    ui.info("This check establishes offline-key cryptographic recovery for the selected bytes. Disposable-host recovery remains NOT ESTABLISHED by this operation.")
+    ui.action("keep the encrypted recovery kit and its passphrase separately off-host; demonstrate restored vault contents and runtime health on an authorized disposable host")
+    return 0
+
+
+def guided_restore(
+    *,
+    start: bool = False,
+    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
+    runner: recovery.Runner = recovery.run_command,
+    ui: UI | None = None,
+    isolation_check: Callable[[], None] | None = None,
+) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise RecoveryUXError("guided restore requires a TTY; use --file/--from-remote and --identity for automation")
+    ui = ui or UI()
+    ui.header("Guided restore")
+    ui.info("Guided restore requires disabled, inactive automation and completed background jobs before final RESTORE consent.")
+    ui.info("The guide observes this boundary; it never pauses schedules, resumes automation or publishes DNS.")
+    point = _pick_recovery_point(paths=paths, runner=runner, ui=ui)
+    if point is None:
         ui.info("restore cancelled; no live state was changed")
         return 0
-    point = points[selected_index]
+    check_isolation = isolation_check or _require_restore_isolation
     with _offline_identity_for_command(
         None,
         option_name="--identity",
@@ -777,8 +894,9 @@ def guided_restore(
         if point.source == "local":
             artifact = Path(point.location)
             verified = verify_local(artifact, identity, paths=paths, runner=runner, record=False)
-            if not _restore_approved(point, verified, ui):
+            if not _restore_approved(point, verified, ui, isolation_check=check_isolation):
                 return 0
+            check_isolation()
             manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
         else:
             if not paths.backups.is_dir():
@@ -793,8 +911,9 @@ def guided_restore(
                     state_location=point.location,
                     record=False,
                 )
-                if not _restore_approved(point, verified, ui):
+                if not _restore_approved(point, verified, ui, isolation_check=check_isolation):
                     return 0
+                check_isolation()
                 manifest = recovery.restore_recovery(artifact, identity, paths=paths, runner=runner, start=start)
 
         ui.ok(f"restored recovery point created {manifest['created_at']}")
@@ -1147,10 +1266,14 @@ def _parser() -> argparse.ArgumentParser:
 
     recovery_cmd = commands.add_parser("recovery", help="recovery inventory, verification, and retention")
     recovery_commands = recovery_cmd.add_subparsers(dest="recovery_command", required=True)
+    recovery_commands.add_parser("protection", help="review current backup policy and recovery assurance")
+    recovery_commands.add_parser("configure", help="guide local-only or saved offsite backup configuration")
+    recovery_commands.add_parser("backup", help="review saved policy and explicitly create one backup")
+    recovery_commands.add_parser("retention", help="review retention and preview policy changes")
     listing = recovery_commands.add_parser("list", help="list local and optional remote recovery points")
     listing.add_argument("--remote", help="rclone REMOTE:path to include")
     verify = recovery_commands.add_parser("verify", help="non-destructively verify a recovery point")
-    verify_source = verify.add_mutually_exclusive_group(required=True)
+    verify_source = verify.add_mutually_exclusive_group()
     verify_source.add_argument("--file", type=Path)
     verify_source.add_argument("--from-remote")
     verify.add_argument(
@@ -1183,7 +1306,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(list(argv) if argv is not None else None)
+    parser = _parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
     ui = UI()
     try:
         if args.command == "restore":
@@ -1239,6 +1363,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
 
         if args.command == "recovery":
+            if args.recovery_command in {"protection", "configure", "backup"}:
+                from . import backup_guide
+
+                return {
+                    "protection": backup_guide.protection,
+                    "configure": backup_guide.configure,
+                    "backup": backup_guide.backup_now,
+                }[args.recovery_command]()
+            if args.recovery_command == "retention":
+                from . import dashboard, retention_guide
+
+                return retention_guide.main(ensure_selected=dashboard._ensure_selected)
             if args.recovery_command == "offsite":
                 if args.offsite_action == "status":
                     offsite.status()
@@ -1258,6 +1394,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print_inventory(list_remote_points(selected_remote))
                 return 0
             if args.recovery_command == "verify":
+                if args.file is None and args.from_remote is None:
+                    if args.identity is not None or not _interactive_tty():
+                        parser.error("verification requires --file or --from-remote outside the interactive picker; supply --identity for unattended use")
+                    return guided_verify(ui=ui)
                 with _offline_identity_for_command(
                     args.identity,
                     option_name="--identity",
@@ -1277,6 +1417,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"verified recovery {location} created={verified.created_at} "
                         f"size={verified.size} sha256={verified.sha256}"
                     )
+                    if _interactive_tty():
+                        ui.info("Offline-key cryptographic recovery verified; disposable-host recovery remains NOT ESTABLISHED by archive verification.")
                     return 0
             if args.recovery_command == "prune":
                 decision = recovery.prune_remote(args.remote, args.keep_last, confirm=args.confirm)

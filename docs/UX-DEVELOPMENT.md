@@ -567,6 +567,88 @@ pending successful CI for the corrected documentation head and
 explicit renewed exact-head squash authorization. Preserve the
 baseline and default branches; do not begin UX-04.
 
+### UX-03 accepted integration verified at UX-04 entry — November 25, 2026
+
+The final administrator-authorized reviewed head is
+`129f59e396c1fcedfc853c502844befb103b9570`. The independently verified accepted
+integration is `2126c845cb44322e8ae3ac5197d5de6c4210f5ff`, with exactly one
+parent, `8cbe7bd00131990420f5bb82e4b4211376b7d761`. Its tree
+`d5d322fefeb9d3f154f959bea8588f3eb4b53b4b` matches the reviewed head exactly.
+[PR #446](https://github.com/killer23d/VaultWarden-OCI/pull/446) is closed and
+contains the final accepted integration receipt. Its native merged flag is
+false because the authorized integration used the equivalent single-parent
+commit method. This final acceptance supersedes the earlier conditional HOLD.
+
+Reverified [reviewed-head push](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509798552),
+[reviewed-head PR](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45509805495)
+and [integration CI](https://github.com/killer23d/VaultWarden-OCI/actions/runs/45510179390):
+all nine jobs successful in each final run. The push success is attempt two;
+retain the earlier intermittent packet-test failure as historical evidence.
+The preserved baseline remains `03c3437b2191b052534718d94e2ce96f129c62aa`;
+`main` remains `16dc4c82a57234f8de8b54aa709a8ef32831f4e6` and the default.
+Native VM10 evidence and the two explicitly accepted NOT RUN variants above
+remain scoped to UX-03. They do not waive UX-04 acceptance. VM9 is terminated.
+
+## UX-04 guided backup, retention and recovery — candidate; HOLD for native acceptance
+
+| Field | Evidence and boundary |
+| --- | --- |
+| Accepted base | `2126c845cb44322e8ae3ac5197d5de6c4210f5ff`; repository entry gate PASS before branching. |
+| Development branch | `ux/04-guided-recovery`, created from the exact accepted base; targets `v3` only. |
+| Release identity | `0.1.0-rc.20` for changed immutable content. All upstream component/image pins, CI, units and notification catalog unchanged. No tag or release publication. |
+| Implementation head / PR | Recorded independently in the draft PR and handover after this commit; this commit does not embed its own SHA. |
+| Scope | Reconciled backup submenu, protection/assurance history, local-only/offsite configuration, optional first backup, shared verification picker, restore impact and isolation, post-restore review, retention preview and measured storage estimates. |
+| Changed owners | `dashboard.py`, `cli.py` and `update_cli.py` route to existing owners; `backup_guide.py` and `retention_guide.py` present review/consent. `offsite.py` retains one pipeline; `recovery_ux.py` retains identity/picker and recovery dispatch; `runtime.py` atomically saves only two retention settings; `recovery.py` shares its pure age selector with the preview. Manuals and bounded tests updated. |
+| Architecture | No new service, scheduler, provider authentication implementation, recovery format or cryptographic owner. Backup consent is bound to the reviewed config; publication and retention retain their existing locked policy checks. Existing explicit CLI forms and machine outputs remain supported. |
+| Focused tests | PASS: 62 new behavioral tests covering backup consent/drift/history, retention preview/save/refusal, guided verification/isolation and the read-only preflight instrument. |
+| Regression tests | PASS: all 754 unit/bounded tests on Debian x86_64/Python 3.12.14. Compile, Bash parsing and existing CLI-help/documentation audits recorded in final PR evidence. Two initial failures were obsolete submenu-choice expectations; updated those tests to exercise the relocated cancellation and delegated verification paths, then all passed. |
+| CI | Exact candidate-head CI pending at this checkpoint; run references and conclusions must be recorded independently before review. No previous-stage CI is transferred to this candidate. |
+| Live acceptance | NOT RUN. First command is a read-only baseline for VM10, existing rc.19 source `cdd155a6406ffe3ff150446e7b8d6668c63caa99`, Ubuntu 26.04 ARM64, ext4 UUID `bcc0bc7b-cb47-44d6-b688-663661eaa0b7`. No candidate adoption or live mutation is authorized by this baseline. |
+| Limitations | Local tests are isolated fixtures, not native/provider/restore evidence. New real offsite publication/readback, wrong identity/passphrase refusals, guided restore cancellation and populated-data restore remain mandatory pending live scope approval. No independent off-host custody or production claim. UX-05-F01 remains open and deferred. |
+| Verdict | HOLD for mandatory native acceptance and exact-head CI. No merge authorization. |
+| Next action | Return the checksum-pinned read-only VM10 preflight receipt, then approve a concrete candidate adoption and grouped isolated recovery rehearsal. Do not begin UX-05. |
+
+### Retention and restore safety decisions
+
+The retention guide displays current observations and exact eligible filenames;
+`CHANGE` and `SAVE` are explicit. Zero remains indefinite. Saving rechecks config,
+inventory and time-based eligibility under the existing mutation lock, then
+updates only the authoritative TOML policy. The guide never deletes an archive.
+Remote scope remains flat, and automatic deletion remains after a successful
+backup/readback with the newly verified artifact protected. A dormant remote
+policy can be cleared to zero while local-only; enabling a new positive remote
+policy requires an actual saved destination and preview.
+
+Guided restore now requires disabled/inactive target, timers and optional Worker
+boot re-arm, with all scheduled jobs including DNS inactive. It observes this
+before final RESTORE and immediately before calling the unchanged transaction
+owner. It prints supported systemd isolation guidance and never performs that
+isolation, resumes automation or publishes DNS. Explicit restore forms retain
+their supported contracts and caller-owned isolation responsibility. Post-restore
+review includes recovered config/domain, exact remote, both retention values,
+status, doctor, timers and known populated vault contents.
+
+### Planned native groups — no result inferred
+
+1. Read-only installed baseline and existing ciphertext/custody metadata.
+2. Separately approved exact rc.20 adoption, immutable verification and local
+   guided backup; preserve the original recovery identity and kit.
+3. One uniquely isolated offsite folder: cancel before ENABLE, select/save exact
+   destination, guided backup and actual systemd backup-service execution,
+   independent ciphertext readback and bounded recursive discovery. Zero retention.
+4. Correct and incorrect identity/passphrase, guided verification, non-TTY
+   compatibility, safe cancellation and retention preview/refusal; no historical
+   or production archive deletion.
+5. Approved disposable populated-data guided restore, active-automation refusal,
+   separately authorized isolation, final RESTORE cancellation and application,
+   restored-policy, identity-cleanup and automation-boundary reconciliation.
+
+Copy/paste one-shots acquire exact source and verify script checksums themselves;
+manual file transfer is not required. Pasted receipts must contain no credentials,
+private identities, passphrases or vault contents. Missing required evidence is
+HOLD. Preserve previously accepted historical evidence without repeating an
+expensive fresh installation merely to reconcile documentation.
+
 ### UX-02 representative terminal transcripts
 
 These are captured from the actual renderer using synthetic read-model fixtures,

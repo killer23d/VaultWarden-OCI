@@ -69,6 +69,9 @@ retrying; an interrupted command may already have performed part of its work.
 
 ```bash
 sudo vwctl guide
+sudo vwctl guide backup
+sudo vwctl guide verify
+sudo vwctl guide retention
 sudo vwctl guide restore
 sudo vwctl guide offsite
 sudo vwctl guide recovery-kit
@@ -80,10 +83,12 @@ calling existing guided owners:
 
 | Guide | Existing operation | Required decision and next check |
 | --- | --- | --- |
+| `backup` | `vwctl recovery configure`, existing offsite owner and backup pipeline | Choose local-only or an exact offsite destination. Missing root credentials can open the supported `rclone config` workflow with separate consent. `ENABLE` saves publication; a first backup requires its own `BACKUP` confirmation. |
+| `verify` | `vwctl recovery verify` with the shared local/remote picker | Select an archive and provide the matching offline identity or encrypted kit. Records cryptographic verification without replacing live data; this is not a populated-host restore. |
+| `retention` | `vwctl recovery retention` and the authoritative config/retention owners | Inspect measured sizes, labelled projections and exact current deletion candidates. `SAVE` changes policy only; existing successful-backup retention applies later. Zero keeps indefinitely. |
 | `restore` | `vwctl restore` local/remote picker and shared offline-identity chooser | Review the authenticated selected point and type `RESTORE` only to authorize replacement. The default leaves the stack stopped; review recovered policy, then explicitly start and run doctor when appropriate. |
 | `offsite` | `vwctl recovery offsite configure` | Configure root's rclone first, select the intended folder, and type `ENABLE` to save it. Check offsite status, then create and verify a recovery point when authorized. |
 | `recovery-kit` | `vwctl recovery-kit export` | Supply the existing offline identity through its protected chooser and enter an independent ZIP passphrase. Email has separate consent. Keep the verified kit off-host and its passphrase separately. |
-
 | `setup` | Existing setup, credential, recovery, security, lifecycle, DNS, backup and systemd owners | Continue first-run installation from observed state. Separate custody, SMTP, DNS and automation consent; see [Install](INSTALL.md). Already activated appliances only review readiness. |
 
 Opening a guide does not authorize its changes. The original CLI forms and their

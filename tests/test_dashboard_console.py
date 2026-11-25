@@ -319,6 +319,9 @@ class DashboardInteractionTests(unittest.TestCase):
             ("restore", ["restore"]),
             ("offsite", ["recovery", "offsite", "configure"]),
             ("recovery-kit", ["recovery-kit", "export"]),
+            ("backup", ["recovery", "configure"]),
+            ("verify", ["recovery", "verify"]),
+            ("retention", ["recovery", "retention"]),
         ):
             output = Terminal()
             with self.subTest(workflow=name), \
@@ -333,7 +336,7 @@ class DashboardInteractionTests(unittest.TestCase):
                 self.assertIn(context, output.getvalue())
 
     def test_guides_default_no_never_dispatch(self) -> None:
-        for name in ("restore", "offsite", "recovery-kit"):
+        for name in ("restore", "offsite", "recovery-kit", "backup", "verify", "retention"):
             output = Terminal()
             with self.subTest(workflow=name), \
                  mock.patch.object(dashboard.os, "geteuid", return_value=0), \

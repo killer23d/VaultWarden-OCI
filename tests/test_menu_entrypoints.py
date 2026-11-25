@@ -28,6 +28,9 @@ class MenuEntrypointTests(unittest.TestCase):
             (["guide", "offsite"], "guide", ["offsite"]),
             (["guide", "recovery-kit"], "guide", ["recovery-kit"]),
             (["guide", "setup"], "guide", ["setup"]),
+            (["guide", "backup"], "guide", ["backup"]),
+            (["guide", "verify"], "guide", ["verify"]),
+            (["guide", "retention"], "guide", ["retention"]),
         )
         for argv, function, forwarded in cases:
             for code in (0, 1, 2, 130):
@@ -102,7 +105,7 @@ class MenuEntrypointTests(unittest.TestCase):
         recovery.assert_not_called()
 
     def test_direct_guides_require_both_terminal_streams_before_dispatch(self) -> None:
-        for workflow in ("restore", "offsite", "recovery-kit", "setup"):
+        for workflow in ("restore", "offsite", "recovery-kit", "setup", "backup", "verify", "retention"):
             for input_tty, output_tty in ((False, False), (True, False), (False, True)):
                 stdin = Terminal() if input_tty else io.StringIO()
                 stdout = Terminal() if output_tty else io.StringIO()
@@ -165,7 +168,7 @@ class MenuEntrypointTests(unittest.TestCase):
                     self.assertIn("menu", result.stdout)
                     self.assertIn("guide", result.stdout)
                 elif argv[0] == "guide":
-                    for workflow in ("restore", "offsite", "recovery-kit", "setup"):
+                    for workflow in ("restore", "offsite", "recovery-kit", "setup", "backup", "verify", "retention"):
                         self.assertIn(workflow, result.stdout)
 
 

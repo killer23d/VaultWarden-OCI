@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -384,6 +385,89 @@ def set_backup_remote(
                 lines[index] = entry
             candidate_text = "".join(lines)
         descriptor, name = tempfile.mkstemp(prefix=".backup-config-", suffix=".toml", dir=str(path.parent))
+        os.close(descriptor)
+        candidate = Path(name)
+        try:
+            candidate.write_text(candidate_text, encoding="utf-8")
+            os.chmod(candidate, 0o600)
+            load_config(candidate)
+            durability.fsync_file(candidate)
+            durability.replace(candidate, path)
+            os.chmod(path, 0o600)
+            durability.fsync_file_and_parent(path)
+        finally:
+            candidate.unlink(missing_ok=True)
+
+
+def set_backup_retention(
+    local_days: int,
+    remote_days: int,
+    *,
+    expected_config_sha256: str,
+    verify_preview: Callable[[], None],
+    path: Path = CONFIG,
+    lock_path: Path = LOCK,
+) -> None:
+    """Save a reviewed age policy after a fresh preview check under the owner lock.
+
+    This does not prune recovery points. The existing successful-backup pipeline
+    remains the only automatic retention executor.
+    """
+    local_days = _retention_days(local_days, "backup.local_retention_days")
+    remote_days = _retention_days(remote_days, "backup.remote_retention_days")
+    if not isinstance(expected_config_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_config_sha256):
+        raise RuntimeConfigError("retention requires the exact reviewed config fingerprint")
+    if path == CONFIG and os.geteuid() != 0:
+        raise RuntimeConfigError("retention configuration must run as root")
+    with mutation_lock(lock_path):
+        if path.is_symlink() or not path.is_file() or path.lstat().st_uid != os.geteuid():
+            raise RuntimeConfigError(f"operator config must be a regular owned file: {path}")
+        original = path.read_bytes()
+        if hashlib.sha256(original).hexdigest() != expected_config_sha256:
+            raise RuntimeConfigError("operator config changed since retention review; preview again")
+        data = tomllib.loads(original.decode("utf-8"))
+        config = parse_config(data)
+        if config.offsite_remote is None and remote_days not in {0, config.remote_retention_days}:
+            raise RuntimeConfigError("choose an offsite destination before changing remote retention")
+        verify_preview()
+        if path.is_symlink() or path.read_bytes() != original:
+            raise RuntimeConfigError("operator config changed during retention review; preview again")
+
+        lines = original.decode("utf-8").splitlines(keepends=True)
+        header = next(
+            (i for i, line in enumerate(lines) if re.fullmatch(r"\s*\[\s*backup\s*\]\s*(?:#.*)?", line.rstrip("\r\n"))),
+            None,
+        )
+        policy = {
+            "local_retention_days": local_days,
+            "remote_retention_days": remote_days,
+        }
+        if header is None:
+            candidate_text = original.decode("utf-8").rstrip("\n") + "\n\n[backup]\n"
+            candidate_text += "".join(f"{key} = {value}\n" for key, value in policy.items())
+        else:
+            end = next(
+                (i for i in range(header + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+                len(lines),
+            )
+            # Rebuild only the two policy assignments. Validation below refuses
+            # unusual TOML forms rather than overwriting unrelated configuration.
+            kept = [line for line in lines[header + 1:end]
+                    if not re.match(r"\s*(?:local_retention_days|remote_retention_days)\s*=", line)]
+            lines[header + 1:end] = [*(f"{key} = {value}\n" for key, value in policy.items()), *kept]
+            if not lines[header].endswith("\n"):
+                lines[header] += "\n"
+            candidate_text = "".join(lines)
+        expected = dict(data)
+        expected["backup"] = {**data.get("backup", {}), **policy}
+        try:
+            parsed = tomllib.loads(candidate_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise RuntimeConfigError("retention settings could not be safely prepared; use the documented [backup] table form") from exc
+        parse_config(parsed)
+        if parsed != expected:
+            raise RuntimeConfigError("retention edit would alter unrelated settings; original config preserved")
+        descriptor, name = tempfile.mkstemp(prefix=".retention-config-", suffix=".toml", dir=str(path.parent))
         os.close(descriptor)
         candidate = Path(name)
         try:

@@ -431,7 +431,7 @@ class DashboardBoundaryTests(unittest.TestCase):
         with (
             mock.patch("vaultwarden_oci.dashboard._prompt", return_value=""),
             mock.patch("vaultwarden_oci.dashboard._command_screen") as command,
-            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("2")),
+            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("10")),
         ):
             dashboard.recovery_menu()
         command.assert_not_called()
@@ -512,12 +512,12 @@ class DashboardBoundaryTests(unittest.TestCase):
     def test_recovery_verification_delegates_identity_selection_to_recovery_owner(self) -> None:
         calls: list[list[str]] = []
         with (
-            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("4")),
-            mock.patch("vaultwarden_oci.dashboard._prompt", return_value="/tmp/recovery.vwrec"),
+            mock.patch("vaultwarden_oci.dashboard._menu", side_effect=lambda _title, _opts, handler: handler("6")),
+            mock.patch("vaultwarden_oci.dashboard._confirm", return_value=True),
             mock.patch("vaultwarden_oci.dashboard._command_screen", side_effect=lambda _label, args: calls.append(list(args))),
         ):
             dashboard.recovery_menu()
-        self.assertEqual(calls, [["recovery", "verify", "--file", "/tmp/recovery.vwrec"]])
+        self.assertEqual(calls, [["recovery", "verify"]])
 
     def test_recovery_kit_delegates_identity_selection_to_recovery_owner(self) -> None:
         calls: list[list[str]] = []

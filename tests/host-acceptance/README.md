@@ -22,6 +22,8 @@ remains in `tests/test_*.py`, targeted integration tests and CI.
 | --- | --- | --- |
 | `production-new-host-preflight.py` | New blank-data Ubuntu 26.04 ARM64 candidate, exact reviewed source commit | Read-only version/source/host/boot-disk/blank-volume inventory and private evidence; no format or installation consent |
 | `production-readiness-inventory.py` | Explicitly selected already-installed appliance host | Read-only installed version, storage/custody, doctor/timers/status and private evidence; do not use for a blank VM |
+| `dashboard-console.py` | Explicitly selected installed appliance with its exact reviewed source | Verify immutable release and units, then bounded exit/default-no terminal paths; no operation approval |
+| `guided-recovery-preflight.py` | Explicitly selected installed ARM64 appliance with a clean exact installed-source checkout | Reuse the checksum-verified immutable verifier, inspect current protected baseline and print a sanitized read-only receipt; no candidate adoption, remote access, identity extraction, scheduling change or restore |
 
 Permanent source-level and integration acceptance for the software
 lives in `tests/test_*.py`, `tests/acceptance_*.py`,

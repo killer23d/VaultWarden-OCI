@@ -36,6 +36,37 @@ Backup briefly pauses running application containers for a consistent copy, snap
 
 ## Create and verify without restoring
 
+The dashboard's **Backup and disaster recovery** submenu presents current
+protection, the existing schedule, local-only/offsite configuration, a manual
+backup, recovery inventory, non-destructive verification, restore, credential-kit
+export, and retention review. Start with:
+
+```bash
+sudo vwctl recovery protection
+sudo vwctl guide backup
+```
+
+The protection view shows the exact saved destination, current retention and
+actual verification history. It does not contact the cloud provider. It keeps
+four distinct levels of evidence:
+
+| Assurance | Evidence required |
+| --- | --- |
+| Backup exists | An observed recovery artifact; inventory alone does not prove its contents |
+| Remote ciphertext readback verified | The published encrypted bytes were independently downloaded and matched; a receipt is historical and specific to its destination |
+| Offline-key cryptographic recovery verified | The matching offline identity decrypted the selected archive and validated its manifest, checksums and SOPS custody |
+| Disposable-host recovery demonstrated | A separately recorded restore of known populated data, followed by application and runtime verification on an authorized disposable host |
+
+Historical receipts do not prove current remote presence, off-host key custody,
+or a successful disaster recovery. The view never promotes archive verification
+to the fourth assurance level.
+
+`sudo vwctl recovery backup` reviews the saved destination and retention before
+requesting the exact `BACKUP` confirmation. It uses the same existing pipeline
+as `sudo vwctl backup` and the systemd service. Guided execution requires healthy
+running services and verified storage; the explicit backup command keeps its
+existing supported behavior. Neither command enables a timer.
+
 On a healthy installed server, make and list a local recovery point:
 
 ```bash
@@ -49,6 +80,13 @@ Use the **actual** filename printed by the command:
 sudo vwctl recovery verify \
   --file /var/lib/vaultwarden-oci/backups/recovery-REPLACE_ME.vwrec
 ```
+
+To avoid typing an archive filename, use `sudo vwctl recovery verify` or
+`sudo vwctl guide verify`. Both open the same local/recursive-remote picker used
+by guided restore. Selecting a remote parent searches its subfolders and retains
+the selected object's exact path. An unattended verification still requires an
+explicit source and identity. Cancellation does not replace live data; successful
+verification records history and removes transient key material.
 
 On an interactive terminal, verification offers secure paste of the matching offline Age private identity, selection of an identity file (such as removable media), or a local encrypted recovery-kit ZIP. For unattended use, provide an explicit `--identity /secure/offline-age-key.txt`. The regular operational key at `/etc/vaultwarden-oci/age-key.txt` is **not** a replacement for your offline key.
 
@@ -105,6 +143,41 @@ The explicit `--remote` passed to `sudo vwctl backup --remote 'another:folder'` 
 
 The rclone connection/credentials must separately survive total server loss; they are **not** in the application `.vwrec` or credential-recovery ZIP. An optional rclone crypt remote is compatible but does not replace offline Age private-key custody. Automatic pruning is disabled by default. To opt in, set `local_retention_days` and/or `remote_retention_days` in `[backup]`; positive values delete only recovery files older than the configured age after the new backup has completely succeeded. Remote publication failure therefore retains both the new local backup and all older history. A successful remote checksum roundtrip alone does not prove that the **offline recovery key** can decrypt a backup.
 
+For a guided choice between local-only and offsite, use
+`sudo vwctl recovery configure`. If root's remotes are unavailable, it offers the
+existing `rclone config` program after a separate `RCLONE` confirmation. rclone
+continues to own provider authentication. Credentials do not authorize a
+destination: selection and `ENABLE` remain mandatory. A cancellation stops the
+guide. After a completed choice, an immediate backup is optional and requires
+separate consent. The resulting readback proves the encrypted object, not
+offline-key decryption or a restore.
+
+## Review retention before changing policy
+
+```bash
+sudo vwctl recovery retention
+```
+
+The guide reads the authoritative settings, local inventory and, when configured,
+the exact saved remote folder. It shows actual file counts, known byte sizes,
+local free space and a clearly labelled estimate for 30 additional backups at
+the observed average size. This projection is neither a growth measurement nor
+a claim about the current schedule.
+
+The current and proposed policies use the same age selector as existing
+automatic retention. The preview identifies the exact existing filenames
+currently eligible for removal. Remote retention remains flat: recursive
+recovery discovery never expands deletion into subfolders. A failed or changed
+inventory blocks saving. `CHANGE` opens proposed values, and only exact `SAVE`
+commits them after configuration and inventory are checked again under the
+existing mutation lock. Cancellation keeps the policy unchanged.
+
+This guide never deletes an archive. Saving positive days authorizes the
+existing pipeline to prune expired recovery points after a future successful
+backup/publication. The newly verified point is protected; existing points can
+age into eligibility later. Zero keeps indefinitely. Manual count-based
+`recovery prune` remains a separate explicit operation.
+
 For recursive discovery under an existing Box backup folder, run `sudo vwctl recovery list --remote 'bw-backup:bw-backup'`. This includes recovery points in child directories and shows their full object locations. Explicit `--from-remote` verification or restoration still requires the selected **full object path**.
 
 ## Same-host restore
@@ -112,6 +185,17 @@ For recursive discovery under an existing Box backup folder, run `sudo vwctl rec
 Use this when the server is intact and the canonical dedicated storage identity still passes. **Restore replaces live application state and involves downtime.** Practice on a disposable host rather than risking your only production copy.
 
 **Prerequisites:** `/var/lib/vaultwarden-oci` is the expected dedicated mount, a verified `.vwrec` is available locally or remotely, and you have the offline Age private identity.
+
+Before a **guided** restore, deliberately isolate automation and let in-flight
+work finish. The guide observes that the appliance target, its four timers and
+the optional Worker boot re-arm are disabled and inactive, and that scheduled
+jobs including DNS have finished. It checks this before `RESTORE` consent and
+again before the transaction. If the state is active or uncertain, it blocks and
+prints the exact systemd commands for administrator review. It never pauses,
+resumes or enables schedules itself. Work in an exclusive administrator session;
+do not start background work during the restore. Explicit CLI restore forms
+retain their existing contracts, so their caller must establish the same safe
+operating conditions.
 
 Guided path:
 
@@ -129,7 +213,11 @@ sudo vwctl restore
 4. Review the dedicated-storage gate, downloaded backup, decryption, manifest/checksums, and SOPS custody preflight. The remaining free-space, ownership, SQLite, and staged promotion checks run **after** your final authorization but **before** the application is stopped.
 5. Review the **full exact source path** and the live state that would be replaced. If you selected the wrong recovery point, type `CANCEL`; `RESTORE` is an authorization to replace live data from the selected point.
 6. Type the exact uppercase `RESTORE` confirmation **only when you intend to replace live state**. Any other text cancels without stopping services or replacing live data.
-7. After promotion, start when ready if you did not request automatic start.
+7. Review recovered configuration, hostname, exact offsite destination and both
+   retention values. Inspect status, doctor and timers. Start separately when
+   ready if you did not request `--start`, then verify the known restored vault
+   contents. Review automation and DNS as separate decisions; a successful
+   restore does not authorize either.
 
 Explicit local form:
 

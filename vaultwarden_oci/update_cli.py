@@ -648,7 +648,8 @@ def _print_top_help() -> int:
     code = cli.main([])
     print(
         "\nEnhanced recovery:\n"
-        "  recovery {list,verify,prune,offsite}  recovery inventory, verification, and offsite setup\n"
+        "  recovery {protection,configure,backup,list,verify,retention,prune,offsite}\n"
+        "                                backup evidence, guided policy, verification and retention\n"
         "  restore                       guided TTY picker or explicit restore\n"
         "  recovery-kit export           complete AES-256 credential handoff"
     )

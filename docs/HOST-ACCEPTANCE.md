@@ -17,12 +17,21 @@ new VM. Keep product-level fail-closed origin security, install,
 recoverability, and rollback validation below; do not infer live
 security from source or a stopped reference host.
 
-The two retained reusable host instruments are
+The core reusable host instruments are
 `tests/host-acceptance/production-new-host-preflight.py` for a
 clean blank host and `tests/host-acceptance/production-readiness-inventory.py`
 for a deliberately selected already-installed appliance.
 Both are read-only inventories; neither grants consent to install,
 format, activate, alter provider policy or restore.
+
+Installed UX verification additionally uses `dashboard-console.py` and the
+read-only `guided-recovery-preflight.py`; see the
+[reusable tool descriptions](../tests/host-acceptance/README.md).
+The latter binds an existing installed release, dedicated storage, current
+policy and automation to explicit expected values. Its receipt is a baseline
+for separately approved live recovery work, not evidence that a new candidate
+or populated-data restore has passed. Capture pasted sanitized results without
+collecting credentials, private keys, ZIP passphrases or vault contents.
 
 ## Release-readiness reconciliation: rc.15 (RC15-G, 2026-11-19)
 
