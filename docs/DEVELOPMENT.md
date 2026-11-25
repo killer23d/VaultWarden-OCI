@@ -14,6 +14,7 @@ VaultWarden-OCI favors explicit ownership over frameworks. The native Python 3 o
 - `vaultwarden_oci/edge.py` — Cloudflare origin policy and CrowdSec Cloudflare remediation.
 - `vaultwarden_oci/dns_publication.py` — safe publication of one existing Proxied IPv4 A record, public IPv4 discovery, and debounced DNS timer failures.
 - `vaultwarden_oci/recovery.py` / `recovery_ux.py` — `.vwrec`, rclone, guided restore, recovery-kit flow.
+- `vaultwarden_oci/backup_guide.py` / `retention_guide.py` — human evidence, policy review and consent; backup, config publication and deletion remain in the existing owners.
 - `vaultwarden_oci/notification.py` — closed provider catalog rendering/delivery and bounded SMTP fallback.
 - `vaultwarden_oci/update*.py` — exact version discovery/freezing and explicit immutable update transaction.
 - `vaultwarden_oci/operations.py` / `dashboard.py` — read-only aggregation and supported presentation; no mutation ownership.

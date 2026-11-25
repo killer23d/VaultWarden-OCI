@@ -760,7 +760,7 @@ class GuidedRestoreTests(unittest.TestCase):
             mock.patch.object(recovery_ux, "verify_local", return_value=verified),
             mock.patch.object(recovery, "restore_recovery", return_value={"created_at": points[1].created_at}) as restore,
         ):
-            self.assertEqual(recovery_ux.guided_restore(ui=recovery_ux.UI(color=False)), 0)
+            self.assertEqual(recovery_ux.guided_restore(ui=recovery_ux.UI(color=False), isolation_check=lambda: None), 0)
         restore.assert_called_once()
         self.assertEqual(restore.call_args.args[0], Path(points[1].location))
 
@@ -782,7 +782,7 @@ class GuidedRestoreTests(unittest.TestCase):
             mock.patch.object(recovery_ux, "verify_local", return_value=verified),
             mock.patch.object(recovery, "restore_recovery") as restore,
         ):
-            self.assertEqual(recovery_ux.guided_restore(ui=recovery_ux.UI(color=False)), 0)
+            self.assertEqual(recovery_ux.guided_restore(ui=recovery_ux.UI(color=False), isolation_check=lambda: None), 0)
         restore.assert_not_called()
 
     def test_guided_remote_nested_point_cancel_preserves_live_state(self) -> None:
@@ -819,7 +819,7 @@ class GuidedRestoreTests(unittest.TestCase):
                 mock.patch.object(recovery_ux, "verify_local", return_value=verified) as verify,
                 mock.patch.object(recovery, "restore_recovery") as restore,
             ):
-                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False)), 0)
+                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False), isolation_check=lambda: None), 0)
             listing.assert_called_once_with(
                 "bw-backup:bw-backup", paths=paths, runner=recovery.run_command,
             )
@@ -867,7 +867,7 @@ class GuidedRestoreTests(unittest.TestCase):
                 mock.patch.object(recovery_ux, "verify_local", side_effect=verify) as verified,
                 mock.patch.object(recovery, "restore_recovery", side_effect=restore_exact) as restored,
             ):
-                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False)), 0)
+                self.assertEqual(recovery_ux.guided_restore(paths=paths, ui=recovery_ux.UI(color=False), isolation_check=lambda: None), 0)
             downloaded.assert_called_once()
             verified.assert_called_once()
             restored.assert_called_once()

@@ -50,7 +50,7 @@ def _configured_names() -> list[str]:
     return names
 
 
-def configure(remote: str | None = None, *, interactive: bool = True) -> None:
+def configure(remote: str | None = None, *, interactive: bool = True) -> bool:
     if os.geteuid() != 0:
         raise OffsiteError("offsite configuration requires sudo/root")
     if not remote:
@@ -63,7 +63,7 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
         answer = input("Remote number (q to cancel): ").strip()
         if answer.lower() in {"q", "quit", ""}:
             print("INFO: offsite setup cancelled; existing configuration unchanged")
-            return
+            return False
         try:
             index = int(answer)
         except ValueError as exc:
@@ -86,7 +86,7 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
         print("Only new encrypted .vwrec files are published; no remote objects are deleted.")
         if input("Type ENABLE to activate scheduled offsite backups: ").strip() != "ENABLE":
             print("INFO: offsite setup cancelled; existing configuration and remote are unchanged")
-            return
+            return False
     ok, message = recovery.prepare_rclone_destination(remote)
     if not ok:
         raise OffsiteError(message)
@@ -96,9 +96,10 @@ def configure(remote: str | None = None, *, interactive: bool = True) -> None:
     print("      each new encrypted recovery point and verify its remote copy")
     print("ACTION: optionally run 'sudo vwctl backup' to verify publication immediately")
     print("ACTION: run 'sudo vwctl recovery offsite status' and 'sudo vwctl timers'")
+    return True
 
 
-def disable(*, confirmed: bool) -> None:
+def disable(*, confirmed: bool) -> bool:
     if os.geteuid() != 0:
         raise OffsiteError("offsite configuration requires sudo/root")
     if not confirmed:
@@ -106,19 +107,31 @@ def disable(*, confirmed: bool) -> None:
             raise OffsiteError("headless disable requires --confirm")
         if input("Disable scheduled offsite publishing (keep local backups)? Type DISABLE: ").strip() != "DISABLE":
             print("INFO: cancelled; nothing changed")
-            return
+            return False
     runtime.set_backup_remote("")
     print("PASS: scheduled offsite publishing disabled; existing local/remote recovery points untouched")
+    return True
 
 
-def backup(*, override: str | None = None) -> int:
+def backup(
+    *,
+    override: str | None = None,
+    reviewed_config: runtime.RuntimeConfig | None = None,
+) -> int:
     """One local snapshot, optionally mirrored in the SAME job; no remote timer.
 
     The saved backup.remote opt-in is the only authority for routine offsite
     publication. Do not guess a cloud destination from root's rclone config.
     A one-time --remote overrides this invocation without changing the policy.
     """
-    config = runtime.load_config()
+    current = runtime.load_config()
+    if reviewed_config is not None and current != reviewed_config:
+        raise OffsiteError("configuration changed after backup review; no snapshot or publication was started, review again")
+    # Guided consent is bound to this exact reviewed configuration. Do not load
+    # a replacement policy after consent and silently use its destination or
+    # retention. The recovery owner rechecks destination/custody under its lock;
+    # the retention owner independently checks the expected policy under lock.
+    config = reviewed_config if reviewed_config is not None else current
     remote = override if override is not None else config.offsite_remote
     if remote:
         runtime.backup_remote_destination(remote)

@@ -493,32 +493,28 @@ def diagnostics_menu() -> None:
 
 def recovery_menu() -> None:
     def handle(choice: str) -> None:
-        if choice == "1":
-            if _confirm("Create a recovery point using saved offsite/retention policy? Snapshot may briefly pause services"):
-                _command_screen("Backup using saved policy", ["backup"])
-        elif choice in {"2", "11"}:
+        if choice == "1": _command_screen("Current backup protection", ["recovery", "protection"])
+        elif choice == "2": _command_screen("Existing systemd backup schedule", ["timers"])
+        elif choice == "3": _guided_operation("backup")
+        elif choice == "4": _command_screen("Backup now using saved policy", ["recovery", "backup"])
+        elif choice == "5": _command_screen("Recovery inventory", ["recovery", "list"])
+        elif choice == "6": _guided_operation("verify")
+        elif choice == "7": _guided_operation("restore")
+        elif choice == "8": recovery_kit_menu()
+        elif choice == "9": _guided_operation("retention")
+        elif choice in {"10", "11"}:
             remote = _prompt(" rclone REMOTE:folder (blank cancels): ")
             if not remote:
                 _cancelled()
             elif choice == "11": _command_screen("Remote recovery inventory", ["recovery", "list", "--remote", remote])
             elif _confirm("Create and publish one backup to this alternate remote without changing the saved destination?"):
                 _command_screen("One-time alternate backup", ["backup", "--remote", remote])
-        elif choice == "3": _command_screen("Recovery inventory", ["recovery", "list"])
-        elif choice in {"4", "5"}:
-            location = _prompt(" Local .vwrec path (blank cancels): " if choice == "4" else " Remote .vwrec REMOTE:object (blank cancels): ")
-            if location:
-                _command_screen("Verify recovery point; records verification history", ["recovery", "verify", "--file" if choice == "4" else "--from-remote", location])
-            else: _cancelled()
-        elif choice == "6": _guided_operation("restore")
-        elif choice == "7": _guided_operation("offsite")
-        elif choice == "8": _command_screen("Offsite configuration and health", ["recovery", "offsite", "status"])
-        elif choice == "9" and _confirm("Disable offsite publishing for all backups while keeping existing archives?"):
-            _command_screen("Disable saved offsite destination", ["recovery", "offsite", "disable", "--confirm"])
-        elif choice == "10": recovery_kit_menu()
-    _menu("Backup and disaster recovery", (("1", "Backup now using saved policy"), ("2", "Backup once to an alternate remote"),
-          ("3", "Recovery inventory"), ("4", "Verify local recovery point"), ("5", "Verify remote recovery point"),
-          ("6", "Guided local/remote restore"), ("7", "Configure offsite publishing"), ("8", "Offsite policy and health"),
-          ("9", "Disable offsite publishing"), ("10", "Export separate credential recovery kit"), ("11", "Inventory another remote folder")), handle)
+    _menu("Backup and disaster recovery", (("1", "Current protection and verification history"), ("2", "Existing backup schedule"),
+          ("3", "Configure local-only or offsite backups"), ("4", "Backup now using saved policy"),
+          ("5", "Recovery inventory"), ("6", "Verify a local/remote backup without restoring"),
+          ("7", "Guided local/remote restore"), ("8", "Export separate credential recovery kit"),
+          ("9", "Review retention and storage estimates"), ("10", "Backup once to an alternate remote"),
+          ("11", "Inventory another remote folder")), handle)
 
 
 def security_menu() -> None:
@@ -641,7 +637,7 @@ def advanced_menu() -> None:
 
 
 def _guided_operation(workflow: str, *, local_only: bool = False) -> None:
-    # Three links to existing guided owners, not another workflow implementation.
+    # Links to authoritative command owners, not another workflow implementation.
     if workflow == "restore":
         label, args = "Guided application restore", ["restore"]
         purpose = "Recover application data from one verified encrypted .vwrec recovery point."
@@ -654,6 +650,24 @@ def _guided_operation(workflow: str, *, local_only: bool = False) -> None:
         prerequisites = "Configure the intended rclone remote as root and choose the destination folder."
         impact = "The existing guide probes/prepares the remote and saves policy only after its ENABLE confirmation."
         verification = "Inspect offsite status, then explicitly create and verify a backup; a saved destination alone is not off-host custody."
+    elif workflow == "backup":
+        label, args = "Configure backup protection", ["recovery", "configure"]
+        purpose = "Choose local-only or offsite protection for the existing backup command and timer."
+        prerequisites = "Have a healthy installed appliance; offsite uses root's supported rclone configuration."
+        impact = "Choose an exact destination with ENABLE consent, or explicitly disable offsite; a first backup needs separate consent."
+        verification = "Read back the saved policy and actual backup/readback results; secure the offline key separately."
+    elif workflow == "verify":
+        label, args = "Verify an encrypted recovery point", ["recovery", "verify"]
+        purpose = "Select a local or remote backup and prove offline-key decryption without replacing live state."
+        prerequisites = "Have the matching offline identity or encrypted credential kit and its separate passphrase."
+        impact = "The existing picker downloads if needed, verifies cryptography and SOPS, records history, and cleans transient identity material."
+        verification = "Read the selected object's cryptographic result; this does not demonstrate a populated-host restore."
+    elif workflow == "retention":
+        label, args = "Review backup retention", ["recovery", "retention"]
+        purpose = "Inspect actual storage observations and preview consequences before changing retention days."
+        prerequisites = "Review the exact saved destination; zero keeps recovery points indefinitely."
+        impact = "No archive is deleted by this guide. Saving positive days authorizes the existing pipeline to prune after a future successful backup."
+        verification = "Review the exact preview, explicit SAVE decision and policy readback; remote discovery does not broaden pruning scope."
     else:
         label, args = "Export separate encrypted credential kit", ["recovery-kit", "export"]
         if local_only: args.append("--no-email")
@@ -677,10 +691,10 @@ def _release_changed(exc: ReleaseChanged) -> int:
 def guide(argv: Sequence[str] | None = None, *, nested: bool = False) -> int:
     args = list(argv or [])
     if args in (["--help"], ["-h"]):
-        print("Usage: sudo vwctl guide [restore|offsite|recovery-kit|setup]\nExisting guided operations only.")
+        print("Usage: sudo vwctl guide [backup|verify|retention|restore|offsite|recovery-kit|setup]\nGuided access to existing operation owners.")
         return 0
-    if len(args) > 1 or (args and args[0] not in {"restore", "offsite", "recovery-kit", "setup"}):
-        print("FAIL: choose restore, offsite, recovery-kit or setup", file=sys.stderr)
+    if len(args) > 1 or (args and args[0] not in {"restore", "offsite", "recovery-kit", "setup", "backup", "verify", "retention"}):
+        print("FAIL: choose backup, verify, retention, restore, offsite, recovery-kit or setup", file=sys.stderr)
         return 2
     if os.geteuid() != 0:
         print("FAIL: guide must run as root; use sudo vwctl guide", file=sys.stderr)
@@ -700,7 +714,8 @@ def guide(argv: Sequence[str] | None = None, *, nested: bool = False) -> int:
         if args:
             _guided_operation(args[0])
         else:
-            _menu("Available guided operations", (("restore", "Restore application data"),
+            _menu("Available guided operations", (("backup", "Configure backup protection"),
+                  ("verify", "Verify backup without restoring"), ("retention", "Review retention and storage"), ("restore", "Restore application data"),
                   ("offsite", "Configure offsite publishing"), ("recovery-kit", "Export credential kit"), ("setup", "Continue first-run setup")),
                   lambda choice: guide([choice], nested=True))
         return 0

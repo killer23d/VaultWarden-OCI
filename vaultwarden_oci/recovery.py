@@ -1215,6 +1215,48 @@ def _older_than_days(name: str, days: int, *, now: datetime) -> bool:
     return created is not None and created < now - timedelta(days=days)
 
 
+def age_pruning_decision(
+    entries: Iterable[Mapping[str, object]],
+    days: int,
+    *,
+    preserve_name: str | None = None,
+    now: datetime | None = None,
+) -> PruneDecision:
+    """Shared non-destructive age selection; only generated flat names qualify.
+
+    The successful-backup caller protects its newly verified artifact explicitly.
+    This is not the separate keep-last policy used by manual remote pruning.
+    """
+    cutoff_now = now or datetime.now(timezone.utc)
+    names = dict.fromkeys(
+        name for item in entries if (name := _safe_flat_recovery_name(item)) is not None
+    )
+    keep, delete = [], []
+    for name in names:
+        target = delete if days > 0 and name != preserve_name and _older_than_days(name, days, now=cutoff_now) else keep
+        target.append(name)
+    return PruneDecision(tuple(keep), tuple(delete))
+
+
+def local_retention_inventory(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, object]]:
+    """Observe the exact local retention scope, retaining existing file safeguards."""
+    if not paths.backups.exists() and not paths.backups.is_symlink():
+        return []
+    _ensure_directory(paths.backups, "local recovery directory")
+    entries = []
+    for artifact in sorted(paths.backups.iterdir()):
+        if not artifact.name.startswith("recovery-") or not artifact.name.endswith(".vwrec"):
+            continue
+        _ensure_regular(artifact, "local recovery artifact", nonempty=True)
+        info = artifact.lstat()
+        entries.append({
+            "Name": artifact.name, "Path": artifact.name, "Size": info.st_size,
+            "device": info.st_dev, "inode": info.st_ino,
+            "modified_ns": info.st_mtime_ns, "changed_ns": info.st_ctime_ns,
+        })
+    return entries
+
+
 def prune_local_by_age(
     days: int,
     *,
@@ -1224,15 +1266,18 @@ def prune_local_by_age(
 ) -> tuple[str, ...]:
     if days <= 0:
         return ()
-    cutoff_now = now or datetime.now(timezone.utc)
+    entries = local_retention_inventory(paths)
     deleted: list[str] = []
     preserve_resolved = preserve.resolve() if preserve is not None else None
-    for artifact in sorted(paths.backups.glob("recovery-*.vwrec")):
+    preserve_name = next(
+        (str(item["Name"]) for item in entries
+         if preserve_resolved is not None and (paths.backups / str(item["Name"])).resolve() == preserve_resolved),
+        None,
+    )
+    decision = age_pruning_decision(entries, days, preserve_name=preserve_name, now=now)
+    for name in decision.delete:
+        artifact = paths.backups / name
         _ensure_regular(artifact, "local recovery artifact", nonempty=True)
-        if preserve_resolved is not None and artifact.resolve() == preserve_resolved:
-            continue
-        if not _older_than_days(artifact.name, days, now=cutoff_now):
-            continue
         durability.unlink(artifact)
         deleted.append(artifact.name)
     return tuple(deleted)
@@ -1248,14 +1293,11 @@ def prune_remote_by_age(
 ) -> tuple[str, ...]:
     if days <= 0:
         return ()
-    cutoff_now = now or datetime.now(timezone.utc)
+    decision = age_pruning_decision(
+        list_remote(remote, runner=runner), days, preserve_name=preserve_name, now=now,
+    )
     deleted: list[str] = []
-    for item in list_remote(remote, runner=runner):
-        name = _safe_flat_recovery_name(item)
-        if name is None or name == preserve_name:
-            continue
-        if not _older_than_days(name, days, now=cutoff_now):
-            continue
+    for name in decision.delete:
         result = runner(["rclone", "deletefile", _remote_object(remote, name)])
         if not result.ok:
             raise _safe_error(f"rclone retention prune {name}", result)
@@ -1340,13 +1382,15 @@ def prune_remote(
 def backup_receipt_evidence(
     remote: str | None,
     paths: RecoveryPaths = RecoveryPaths(),
+    *,
+    state: Mapping[str, object] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Inspect backup receipts without decrypting, downloading or changing state.
 
     These are historical verification receipts, not proof of off-host custody.
     Only a receipt for the exact routine publication folder applies to its policy.
     """
-    state = _load_state(paths.state_file)
+    state = _load_state(paths.state_file) if state is None else state
     result: dict[str, dict[str, object]] = {}
     for kind, location_key in (("local", "artifact"), ("offsite", "remote_object")):
         row: dict[str, object] = {"state": "unknown", "verified_at": None}
